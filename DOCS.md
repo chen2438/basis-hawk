@@ -12,6 +12,7 @@ Basis Hawk 使用四家交易所的公共接口，扫描同一交易所内做多
 
 - Python 3.12、FastAPI、Pydantic、SQLAlchemy async、SQLite WAL。
 - React、TypeScript、Vite；REST 初始化与查询，WebSocket 增量刷新。
+- 前端固定使用高对比度浅色主题，正收益与健康状态使用绿色，负收益使用红色。
 - 所有金融数值在后端用 `Decimal` 计算；API 以十进制字符串传输。
 - SQLite 保留 30 天分钟级机会快照，并保存资金费历史、目录、设置及运行状态。
 
