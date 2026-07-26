@@ -4,14 +4,16 @@
 的唯一迁移入口；应用只为 SQLite 测试数据库自动建表，禁止在 PostgreSQL 启动时隐式 `create_all`。
 `instruments` 表持久化六所现货/永续价格和数量步长、最小数量/名义额及永续合约乘数；旧目录记录迁移
 后以 0 表示未知，并在下一次公共目录刷新时更新。任一真实下单规划看到未知规则都必须阻断。
-Binance、OKX、Bybit 及 Bitget Classic V2 永续配置只接受 1–10 倍杠杆。Binance 切换到逐仓前会
+Binance、OKX、Bybit、Bitget Classic V2 及 Gate 永续配置只接受 1–10 倍杠杆。Binance 切换到逐仓前会
 查询该标的挂单和仓位；
 OKX 在目标逐仓杠杆尚未匹配时也会先检查该标的挂单和仓位。Bybit UTA 2.0 的逐仓是账户级
 `ISOLATED_MARGIN`，所以切换前会翻页检查全部 USDT 线性挂单和仓位；任一敞口存在时拒绝改变账户模式或
 杠杆。Bybit 通过 `positionIdx` 自动识别单向/双向模式，配置后重新查询账户模式与目标空头侧杠杆，
 不能确认时视为失败。Bitget V2 的逐仓和杠杆是标的级配置，修改前检查该标的所有挂单和非零仓位，
 并用单账户查询二次确认空头侧逐仓杠杆。OKX 每条下单/撤单响应还必须明确返回成功的子状态码；顶层成功
-但单条命令失败或缺失子状态码不能视为已接受。
+但单条命令失败或缺失子状态码不能视为已接受。Gate 使用明确指定 `margin_mode=isolated` 的新版
+`set_leverage` 接口；双向模式只配置 `dual_short`，修改前检查目标标的挂单与所有非零仓位，响应未返回
+目标逐仓模式和杠杆时拒绝继续。
 
 Docker Compose 当前提供 PostgreSQL、FastAPI、唯一交易 worker 和 Caddy。Caddy 自动管理 TLS，只暴露 80/443；
 数据库只在 Compose 网络可见。生产启动顺序为数据库健康检查、`alembic upgrade head`、API 健康检查、

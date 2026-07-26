@@ -2013,24 +2013,56 @@ class GateAccountClient(PrivateAccountClient):
         self._owned = client is None
 
     async def _get(self, path: str, **params: object) -> Any:
-        params = _ordered(params)
-        query = _query(params)
+        return await self._request("GET", path, params=params)
+
+    async def _post(
+        self,
+        path: str,
+        *,
+        params: dict[str, object] | None = None,
+        body: dict[str, object] | None = None,
+    ) -> Any:
+        return await self._request("POST", path, params=params, body=body)
+
+    async def _delete(self, path: str, **params: object) -> Any:
+        return await self._request("DELETE", path, params=params)
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, object] | None = None,
+        body: dict[str, object] | None = None,
+    ) -> Any:
+        ordered_params = _ordered(params or {})
+        query = _query(ordered_params)
+        ordered_body = _ordered(body or {})
+        content = (
+            json.dumps(ordered_body, separators=(",", ":"), ensure_ascii=False)
+            if body is not None
+            else ""
+        )
         timestamp = str(self.clock_s())
-        body_hash = hashlib.sha512(b"").hexdigest()
+        body_hash = hashlib.sha512(content.encode()).hexdigest()
         signature = _hmac_hex(
             self.secrets.api_secret,
-            f"GET\n{path}\n{query}\n{body_hash}\n{timestamp}",
+            f"{method}\n{path}\n{query}\n{body_hash}\n{timestamp}",
             "sha512",
         )
         return await _json_request(
             self.http,
-            "GET",
+            method,
             path,
-            params=params,
+            params=ordered_params,
+            content=content or None,
             headers={
                 "KEY": self.secrets.api_key,
                 "Timestamp": timestamp,
                 "SIGN": signature,
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "X-Gate-Size-Decimal": "1",
             },
         )
 
@@ -2088,8 +2120,13 @@ class GateAccountClient(PrivateAccountClient):
             if quantity == 0:
                 continue
             side = str(item.get("mode") or item.get("position_side") or "").lower()
+            if side == "dual_long":
+                side = "long"
+            elif side == "dual_short":
+                side = "short"
             if side not in {"long", "short"}:
                 side = "long" if quantity > 0 else "short"
+            margin_mode = str(item.get("pos_margin_mode") or "").lower()
             positions.append(
                 RemotePosition(
                     symbol=str(item.get("contract") or ""),
@@ -2098,9 +2135,13 @@ class GateAccountClient(PrivateAccountClient):
                     entry_price=Decimal(str(item.get("entry_price") or "0")),
                     mark_price=Decimal(str(item.get("mark_price") or "0")),
                     liquidation_price=_optional_decimal(item.get("liq_price")),
-                    leverage=Decimal(str(item.get("leverage") or "0")),
+                    leverage=Decimal(
+                        str(item.get("lever") or item.get("leverage") or "0")
+                    ),
                     isolated=(
-                        None
+                        margin_mode == "isolated"
+                        if margin_mode
+                        else None
                         if item.get("leverage") in (None, "")
                         else Decimal(str(item.get("leverage") or "0")) != 0
                     ),
@@ -2215,6 +2256,189 @@ class GateAccountClient(PrivateAccountClient):
             )
             order = _gate_perp_order(item)
         return RemoteOrderLookup(order=order, complete=True)
+
+    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
+        if (
+            not re.fullmatch(r"t-[A-Za-z0-9_.-]+", order.client_order_id)
+            or len(order.client_order_id.encode()) > 30
+        ):
+            raise ValueError(
+                "Gate client order IDs must start with t-, use supported ASCII "
+                "characters, and contain at most 28 bytes after the prefix"
+            )
+        if order.market == "spot":
+            path = "/api/v4/spot/orders"
+            body: dict[str, object] = {
+                "text": order.client_order_id,
+                "currency_pair": order.symbol,
+                "type": "limit",
+                "account": "spot",
+                "side": order.side,
+                "amount": format(order.quantity, "f"),
+                "price": format(order.limit_price, "f"),
+                "time_in_force": "ioc",
+            }
+        else:
+            path = "/api/v4/futures/usdt/orders"
+            signed_quantity = (
+                order.quantity if order.side == "buy" else -order.quantity
+            )
+            body = {
+                "contract": order.symbol,
+                "size": format(signed_quantity, "f"),
+                "price": format(order.limit_price, "f"),
+                "tif": "ioc",
+                "text": order.client_order_id,
+                "reduce_only": order.reduce_only,
+                "pos_margin_mode": "isolated",
+                "action_mode": "ACK",
+            }
+        result = await self._post(path, body=body)
+        if not isinstance(result, dict):
+            raise PrivateRequestError("Gate order submission returned no result")
+        exchange_order_id = str(result.get("id") or "")
+        result_client_id = str(result.get("text") or order.client_order_id)
+        if not exchange_order_id or not result_client_id:
+            raise PrivateRequestError(
+                "Gate order submission returned no order identifiers"
+            )
+        return OrderSubmission(
+            market=order.market,
+            symbol=order.symbol,
+            client_order_id=result_client_id,
+            exchange_order_id=exchange_order_id,
+        )
+
+    async def cancel_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+    ) -> OrderCancellation:
+        if exchange_order_id is None and client_order_id is None:
+            raise ValueError("an exchange or client order ID is required")
+        target = exchange_order_id or client_order_id or ""
+        if market == "spot":
+            result = await self._delete(
+                f"/api/v4/spot/orders/{target}",
+                currency_pair=symbol,
+                account="spot",
+            )
+        else:
+            result = await self._delete(
+                f"/api/v4/futures/usdt/orders/{target}",
+            )
+        if not isinstance(result, dict):
+            raise PrivateRequestError("Gate order cancellation returned no result")
+        result_order_id = str(result.get("id") or exchange_order_id or "")
+        result_client_id = str(result.get("text") or client_order_id or "")
+        if not result_order_id and not result_client_id:
+            raise PrivateRequestError(
+                "Gate order cancellation returned no order identifier"
+            )
+        return OrderCancellation(
+            market=market,
+            symbol=symbol,
+            client_order_id=result_client_id or None,
+            exchange_order_id=result_order_id or None,
+            accepted=True,
+        )
+
+    async def configure_perp(
+        self,
+        *,
+        symbol: str,
+        leverage: int,
+        position_mode: PositionMode,
+    ) -> PerpConfiguration:
+        if leverage < 1 or leverage > 10:
+            raise ValueError("leverage must be between 1 and 10")
+        if position_mode == PositionMode.UNKNOWN:
+            raise ValueError("position mode must be known before configuration")
+        account, positions = await _gather(
+            self._get("/api/v4/futures/usdt/accounts"),
+            self._get("/api/v4/futures/usdt/positions"),
+        )
+        detected_mode = (
+            PositionMode.HEDGE
+            if account.get("in_dual_mode") is True
+            else PositionMode.ONE_WAY
+        )
+        if detected_mode != position_mode:
+            raise PrivateRequestError(
+                "Gate position mode does not match the requested configuration"
+            )
+        target_mode = "dual_short" if position_mode == PositionMode.HEDGE else "single"
+        target = next(
+            (
+                item
+                for item in positions
+                if str(item.get("contract") or "") == symbol
+                and str(item.get("mode") or "single") == target_mode
+            ),
+            None,
+        )
+        current_leverage = Decimal(
+            str(
+                (target or {}).get("lever")
+                or (target or {}).get("leverage")
+                or "0"
+            )
+        )
+        isolated = str((target or {}).get("pos_margin_mode") or "").lower() == "isolated"
+        if target is not None and isolated and current_leverage == Decimal(leverage):
+            return PerpConfiguration(
+                symbol=symbol,
+                leverage=leverage,
+                isolated=True,
+                position_mode=position_mode,
+            )
+        open_orders = await self._get(
+            "/api/v4/futures/usdt/orders",
+            contract=symbol,
+            status="open",
+            limit=100,
+            offset=0,
+        )
+        has_position = any(
+            str(item.get("contract") or "") == symbol
+            and Decimal(str(item.get("size") or "0")) != 0
+            for item in positions
+        )
+        if open_orders or has_position:
+            raise PrivateRequestError(
+                "cannot change Gate margin or leverage with open orders or positions"
+            )
+        params: dict[str, object] = {
+            "leverage": str(leverage),
+            "margin_mode": "isolated",
+        }
+        if position_mode == PositionMode.HEDGE:
+            params["dual_side"] = "dual_short"
+        configured = await self._post(
+            f"/api/v4/futures/usdt/positions/{symbol}/set_leverage",
+            params=params,
+        )
+        if not isinstance(configured, dict):
+            raise PrivateRequestError("Gate leverage configuration returned no result")
+        confirmed_leverage = Decimal(
+            str(configured.get("lever") or configured.get("leverage") or "0")
+        )
+        if (
+            str(configured.get("pos_margin_mode") or "").lower() != "isolated"
+            or confirmed_leverage != Decimal(leverage)
+        ):
+            raise PrivateRequestError(
+                "Gate isolated leverage configuration was not confirmed"
+            )
+        return PerpConfiguration(
+            symbol=symbol,
+            leverage=leverage,
+            isolated=True,
+            position_mode=position_mode,
+        )
 
     async def close(self) -> None:
         if self._owned:

@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -11,6 +12,7 @@ from basis_hawk.accounts import (
     BinanceAccountClient,
     BitgetAccountClient,
     BybitAccountClient,
+    GateAccountClient,
     LimitIocOrder,
     OkxAccountClient,
     PositionMode,
@@ -1244,5 +1246,271 @@ async def test_bitget_normalizes_hedge_close_and_rejects_bad_ack() -> None:
         await client.place_limit_ioc(invalid)
     valid = invalid.model_copy(update={"client_order_id": "bh-order"})
     with pytest.raises(PrivateRequestError, match="no result"):
+        await client.place_limit_ioc(valid)
+    await http.aclose()
+
+
+async def test_gate_places_spot_and_perp_ioc_orders_with_decimal_size() -> None:
+    requests: list[tuple[str, dict[str, object], httpx.Headers]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        raw = json.loads(body)
+        requests.append((request.url.path, raw, request.headers))
+        body_hash = hashlib.sha512(body.encode()).hexdigest()
+        assert request.headers["SIGN"] == _hmac_hex(
+            SECRETS.api_secret,
+            f"POST\n{request.url.path}\n\n{body_hash}\n1785088000",
+            "sha512",
+        )
+        assert request.headers["X-Gate-Size-Decimal"] == "1"
+        return httpx.Response(
+            201,
+            json={
+                "id": str(1001 + len(requests)),
+                "text": raw["text"],
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://gate.test",
+    )
+    client = GateAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        clock_s=lambda: 1_785_088_000,
+        client=http,
+    )
+
+    spot = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="spot",
+            symbol="ORDER_USDT",
+            side="buy",
+            quantity=Decimal("20"),
+            limit_price=Decimal("0.05"),
+            client_order_id="t-bh-open-spot",
+        )
+    )
+    open_short = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="perp",
+            symbol="ORDER_USDT",
+            side="sell",
+            quantity=Decimal("20.5"),
+            limit_price=Decimal("0.051"),
+            client_order_id="t-bh-open-perp",
+            position_mode=PositionMode.HEDGE,
+        )
+    )
+    close_short = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="perp",
+            symbol="ORDER_USDT",
+            side="buy",
+            quantity=Decimal("10.5"),
+            limit_price=Decimal("0.052"),
+            client_order_id="t-bh-close-perp",
+            reduce_only=True,
+            position_mode=PositionMode.HEDGE,
+        )
+    )
+
+    assert spot.exchange_order_id == "1002"
+    assert open_short.exchange_order_id == "1003"
+    assert close_short.exchange_order_id == "1004"
+    assert requests[0][1] == {
+        "account": "spot",
+        "amount": "20",
+        "currency_pair": "ORDER_USDT",
+        "price": "0.05",
+        "side": "buy",
+        "text": "t-bh-open-spot",
+        "time_in_force": "ioc",
+        "type": "limit",
+    }
+    assert requests[1][1]["size"] == "-20.5"
+    assert requests[1][1]["reduce_only"] is False
+    assert requests[1][1]["action_mode"] == "ACK"
+    assert requests[2][1]["size"] == "10.5"
+    assert requests[2][1]["reduce_only"] is True
+    await http.aclose()
+
+
+async def test_gate_targeted_cancel_returns_acceptance_receipt() -> None:
+    requests: list[tuple[str, str, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path, dict(request.url.params)))
+        return httpx.Response(
+            200,
+            json={"id": "1101", "text": "t-bh-order"},
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://gate.test",
+    )
+    client = GateAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    canceled = await client.cancel_order(
+        market="spot",
+        symbol="ORDER_USDT",
+        exchange_order_id="1101",
+        client_order_id="t-bh-order",
+    )
+
+    assert requests == [
+        (
+            "DELETE",
+            "/api/v4/spot/orders/1101",
+            {"account": "spot", "currency_pair": "ORDER_USDT"},
+        )
+    ]
+    assert canceled.accepted is True
+    assert canceled.exchange_order_id == "1101"
+    await http.aclose()
+
+
+async def test_gate_safely_sets_hedge_short_isolated_leverage() -> None:
+    current_leverage = "1"
+    requests: list[tuple[str, str, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal current_leverage
+        params = dict(request.url.params)
+        requests.append((request.method, request.url.path, params))
+        if request.url.path.endswith("/accounts"):
+            return httpx.Response(200, json={"in_dual_mode": True})
+        if request.url.path.endswith("/positions"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "contract": "ORDER_USDT",
+                        "mode": "dual_short",
+                        "size": "0",
+                        "pos_margin_mode": "cross",
+                        "lever": current_leverage,
+                    }
+                ],
+            )
+        if request.url.path.endswith("/orders"):
+            return httpx.Response(200, json=[])
+        current_leverage = params["leverage"]
+        return httpx.Response(
+            200,
+            json={
+                "contract": "ORDER_USDT",
+                "mode": "dual_short",
+                "size": "0",
+                "pos_margin_mode": params["margin_mode"],
+                "lever": current_leverage,
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://gate.test",
+    )
+    client = GateAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    result = await client.configure_perp(
+        symbol="ORDER_USDT",
+        leverage=3,
+        position_mode=PositionMode.HEDGE,
+    )
+
+    assert result.isolated is True
+    config_request = next(
+        item for item in requests if item[1].endswith("/set_leverage")
+    )
+    assert config_request[2] == {
+        "dual_side": "dual_short",
+        "leverage": "3",
+        "margin_mode": "isolated",
+    }
+    with pytest.raises(ValueError, match="between 1 and 10"):
+        await client.configure_perp(
+            symbol="ORDER_USDT",
+            leverage=11,
+            position_mode=PositionMode.HEDGE,
+        )
+    await http.aclose()
+
+
+async def test_gate_reuses_matching_configuration_and_refuses_exposure() -> None:
+    current_leverage = "3"
+    position_size = "0"
+    mutations: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            mutations.append(request.url.path)
+        if request.url.path.endswith("/accounts"):
+            return httpx.Response(200, json={"in_dual_mode": False})
+        if request.url.path.endswith("/positions"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "contract": "ORDER_USDT",
+                        "mode": "single",
+                        "size": position_size,
+                        "pos_margin_mode": "isolated",
+                        "lever": current_leverage,
+                    }
+                ],
+            )
+        return httpx.Response(200, json=[])
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://gate.test",
+    )
+    client = GateAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    result = await client.configure_perp(
+        symbol="ORDER_USDT",
+        leverage=3,
+        position_mode=PositionMode.ONE_WAY,
+    )
+    assert result.leverage == 3
+    assert mutations == []
+
+    current_leverage = "2"
+    position_size = "-20"
+    with pytest.raises(PrivateRequestError, match="open orders or positions"):
+        await client.configure_perp(
+            symbol="ORDER_USDT",
+            leverage=3,
+            position_mode=PositionMode.ONE_WAY,
+        )
+    assert mutations == []
+    await http.aclose()
+
+
+async def test_gate_rejects_invalid_client_id_and_missing_ack() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201, json={})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://gate.test",
+    )
+    client = GateAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+    invalid = LimitIocOrder(
+        market="spot",
+        symbol="ORDER_USDT",
+        side="buy",
+        quantity=Decimal("20"),
+        limit_price=Decimal("0.05"),
+        client_order_id="bh-order",
+    )
+    with pytest.raises(ValueError, match="start with t-"):
+        await client.place_limit_ioc(invalid)
+    valid = invalid.model_copy(update={"client_order_id": "t-bh-order"})
+    with pytest.raises(PrivateRequestError, match="no order identifiers"):
         await client.place_limit_ioc(valid)
     await http.aclose()
