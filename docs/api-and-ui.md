@@ -6,6 +6,8 @@
 所有比例使用小数值字符串，例如 `0.001` 表示 `0.1%`。
 机会对象同时返回开仓方向 `spot_ask`/`perp_bid` 与平仓方向 `spot_bid`/`perp_ask`，
 以及各自的最优档容量。
+`/api/opportunities` 的 `page_size` 上限为 3,000，匹配六所各 500 个候选；行情首页初始读取完整
+3,000 项，再由浏览器本地搜索和筛选，不能只取全局前 300 项而漏掉某所已扫描标的。
 
 管理员使用密码与 TOTP 登录。服务通过 Secure、HttpOnly、SameSite=Strict Cookie 保存会话；
 所有修改请求还必须提供与 Cookie 会话绑定的 `X-CSRF-Token`。连续失败登录受限流保护。

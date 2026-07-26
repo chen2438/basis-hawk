@@ -52,6 +52,7 @@ class ScannerService:
         self.adapters = adapters
         self.settings = ScannerSettings()
         self.pairs: dict[Exchange, list[InstrumentPair]] = {exchange: [] for exchange in adapters}
+        self._pairs_by_key: dict[str, InstrumentPair] = {}
         self.quotes: dict[str, MarketQuote] = {}
         self.current: dict[str, FundingObservation] = {}
         self.history: dict[str, list[FundingObservation]] = {}
@@ -211,6 +212,12 @@ class ScannerService:
         )
         selected = eligible[: self.settings.universe_size]
         self.pairs[exchange] = selected
+        self._pairs_by_key = {
+            key: pair
+            for key, pair in self._pairs_by_key.items()
+            if pair.exchange != exchange
+        }
+        self._pairs_by_key.update({pair.key: pair for pair in selected})
         for pair in selected:
             self.quotes[pair.key] = quote_by_key[pair.key]
         await self.database.replace_instruments(exchange.value, selected)
@@ -255,6 +262,9 @@ class ScannerService:
         )
 
     def _pair(self, key: str) -> InstrumentPair | None:
+        indexed = self._pairs_by_key.get(key)
+        if indexed is not None:
+            return indexed
         exchange = Exchange(key.split(":", 1)[0])
         return next((pair for pair in self.pairs.get(exchange, []) if pair.key == key), None)
 

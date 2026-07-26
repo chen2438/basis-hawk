@@ -464,7 +464,7 @@ def create_app(
         base_asset: str | None = None,
         quality: Quality | None = None,
         page: int = Query(default=1, ge=1),
-        page_size: int = Query(default=50, ge=1, le=300),
+        page_size: int = Query(default=50, ge=1, le=3000),
     ) -> dict[str, object]:
         values = scanner.list_opportunities()
         if exchange:

@@ -57,7 +57,7 @@ export const api = {
       body: JSON.stringify({ username, password, totp_code: totpCode }),
     }),
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
-  opportunities: () => request<{ items: Opportunity[]; sequence: number }>("/api/opportunities?page_size=300"),
+  opportunities: () => request<{ items: Opportunity[]; sequence: number }>("/api/opportunities?page_size=3000"),
   statuses: () => request<{ items: ExchangeStatus[] }>("/api/exchanges/status"),
   settings: () => request<Settings>("/api/settings"),
   saveSettings: (value: Settings) => request<Settings>("/api/settings", { method: "PUT", body: JSON.stringify(value) }),
