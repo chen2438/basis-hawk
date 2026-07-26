@@ -51,6 +51,11 @@ worker 定期写入 `account_snapshots`、`remote_open_order_snapshots`、
 完成真实 ping/pong 探测后才续写健康心跳；异常会先关闭连接、写入断开状态，再以 1–30 秒指数退避
 重连。日志只记录交易所和环境，不记录异常正文、URL、签名、订阅载荷或凭据。当前监督器尚未由 worker
 创建具体交易所连接。
+Binance 私有连接由两条通道组成：现货使用
+`userDataStream.subscribe.signature`，USDT 永续使用 `/fapi/v1/listenKey` 后连接私有
+WebSocket，并每 30 分钟续期。只有现货签名订阅返回成功且永续 listenKey 与连接都建立后，通用监督器
+才可登记三类订阅就绪；任一通道关闭、ping/pong 失败或续期返回不同 listenKey 都使整个 Binance 账户
+断开并进入 REST 对账。沙盒使用当前官方 Spot Testnet 与 USDⓈ-M Demo 地址。
 每轮对账对每个账户独立汇总阻断原因；只有全部已配置账户都没有原因且没有请求失败，才把账户状态写为
 `ready`。写入全局 `ready` 前会再次检查每个账户的私有流心跳，避免把本轮处理中已经陈旧的连接放行。
 任一账户为 `blocked`/`error` 或已有补偿失败等安全暂停时，全局状态不会进入 `ready`。
