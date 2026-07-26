@@ -91,12 +91,16 @@ class GateAdapter(ExchangeAdapter):
                         exchange=Exchange.GATE,
                         base_asset=pair.base_asset,
                         observed_at=now,
+                        spot_bid=Decimal(str(spot["highest_bid"])),
+                        spot_bid_qty=Decimal(str(spot.get("highest_size") or "0")),
                         spot_ask=spot_ask,
                         # Gate's bulk spot ticker omits best-level size. The later
                         # streaming order-book layer will populate executable depth.
                         spot_ask_qty=Decimal(str(spot.get("lowest_size") or "0")),
                         perp_bid=perp_bid,
                         perp_bid_qty=Decimal(str(perp["highest_size"])) * multiplier,
+                        perp_ask=Decimal(str(perp["lowest_ask"])),
+                        perp_ask_qty=Decimal(str(perp["lowest_size"])) * multiplier,
                         spot_quote_volume_24h=Decimal(str(spot["quote_volume"])),
                         perp_quote_volume_24h=Decimal(
                             str(

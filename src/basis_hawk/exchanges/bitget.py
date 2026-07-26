@@ -98,10 +98,14 @@ class BitgetAdapter(ExchangeAdapter):
                         exchange=Exchange.BITGET,
                         base_asset=pair.base_asset,
                         observed_at=observed_at,
+                        spot_bid=Decimal(str(spot["bidPr"])),
+                        spot_bid_qty=Decimal(str(spot["bidSz"])),
                         spot_ask=spot_ask,
                         spot_ask_qty=Decimal(str(spot["askSz"])),
                         perp_bid=perp_bid,
                         perp_bid_qty=Decimal(str(perp["bidSz"])),
+                        perp_ask=Decimal(str(perp["askPr"])),
+                        perp_ask_qty=Decimal(str(perp["askSz"])),
                         spot_quote_volume_24h=Decimal(str(spot["quoteVolume"])),
                         perp_quote_volume_24h=Decimal(
                             str(perp.get("quoteVolume") or perp.get("usdtVolume") or "0")

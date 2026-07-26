@@ -49,10 +49,14 @@ class MarketQuote(DecimalModel):
     exchange: Exchange
     base_asset: str
     observed_at: datetime
+    spot_bid: Decimal
+    spot_bid_qty: Decimal
     spot_ask: Decimal
     spot_ask_qty: Decimal
     perp_bid: Decimal
     perp_bid_qty: Decimal
+    perp_ask: Decimal
+    perp_ask_qty: Decimal
     spot_quote_volume_24h: Decimal
     perp_quote_volume_24h: Decimal
 
@@ -115,10 +119,13 @@ class Opportunity(DecimalModel):
     spot_symbol: str
     perp_symbol: str
     observed_at: datetime
+    spot_bid: Decimal
     spot_ask: Decimal
     perp_bid: Decimal
+    perp_ask: Decimal
     executable_basis: Decimal
     top_book_notional: Decimal
+    close_top_book_notional: Decimal
     current_funding_rate: Decimal
     funding_interval_hours: Decimal
     next_funding_at: datetime | None

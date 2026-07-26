@@ -63,10 +63,14 @@ class OkxAdapter(ExchangeAdapter):
                     observed_at=datetime.fromtimestamp(
                         min(int(s["ts"]), int(p["ts"])) / 1000, tz=UTC
                     ),
+                    spot_bid=Decimal(s["bidPx"]),
+                    spot_bid_qty=Decimal(s["bidSz"]),
                     spot_ask=Decimal(s["askPx"]),
                     spot_ask_qty=Decimal(s["askSz"]),
                     perp_bid=Decimal(p["bidPx"]),
                     perp_bid_qty=Decimal(p["bidSz"]),
+                    perp_ask=Decimal(p["askPx"]),
+                    perp_ask_qty=Decimal(p["askSz"]),
                     spot_quote_volume_24h=Decimal(s["volCcy24h"]),
                     perp_quote_volume_24h=Decimal(p["volCcy24h"]) * last,
                 )

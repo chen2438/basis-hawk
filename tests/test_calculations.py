@@ -34,10 +34,14 @@ def test_builds_executable_opportunity() -> None:
         exchange=Exchange.BINANCE,
         base_asset="BTC",
         observed_at=now,
+        spot_bid=Decimal("99"),
+        spot_bid_qty=Decimal("3"),
         spot_ask=Decimal("100"),
         spot_ask_qty=Decimal("2"),
         perp_bid=Decimal("101"),
         perp_bid_qty=Decimal("1"),
+        perp_ask=Decimal("102"),
+        perp_ask_qty=Decimal("2"),
         spot_quote_volume_24h=Decimal("2000000"),
         perp_quote_volume_24h=Decimal("3000000"),
     )
@@ -69,4 +73,5 @@ def test_builds_executable_opportunity() -> None:
     )
     assert result.executable_basis == Decimal("0.01")
     assert result.top_book_notional == Decimal("101")
+    assert result.close_top_book_notional == Decimal("204")
     assert result.quality == Quality.HEALTHY

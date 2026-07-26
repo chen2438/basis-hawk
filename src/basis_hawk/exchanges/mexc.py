@@ -64,10 +64,14 @@ class MexcAdapter(ExchangeAdapter):
                 )
                 if cp[pair.perp_symbol].get("timestamp")
                 else now,
+                spot_bid=Decimal(sb[pair.spot_symbol]["bidPrice"]),
+                spot_bid_qty=Decimal(sb[pair.spot_symbol]["bidQty"]),
                 spot_ask=Decimal(sb[pair.spot_symbol]["askPrice"]),
                 spot_ask_qty=Decimal(sb[pair.spot_symbol]["askQty"]),
                 perp_bid=Decimal(str(cp[pair.perp_symbol]["bid1"])),
                 perp_bid_qty=Decimal("0"),
+                perp_ask=Decimal(str(cp[pair.perp_symbol]["ask1"])),
+                perp_ask_qty=Decimal("0"),
                 spot_quote_volume_24h=Decimal(st[pair.spot_symbol]["quoteVolume"]),
                 perp_quote_volume_24h=Decimal(str(cp[pair.perp_symbol]["amount24"])),
             )

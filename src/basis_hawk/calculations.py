@@ -57,10 +57,14 @@ def build_opportunity(
     now: datetime | None = None,
 ) -> Opportunity:
     now = now or datetime.now(UTC)
-    if quote.spot_ask <= 0 or quote.perp_bid <= 0:
+    if min(quote.spot_bid, quote.spot_ask, quote.perp_bid, quote.perp_ask) <= 0:
         raise ValueError("quote prices must be positive")
     basis = quote.perp_bid / quote.spot_ask - Decimal("1")
     capacity = min(quote.spot_ask * quote.spot_ask_qty, quote.perp_bid * quote.perp_bid_qty)
+    close_capacity = min(
+        quote.spot_bid * quote.spot_bid_qty,
+        quote.perp_ask * quote.perp_ask_qty,
+    )
     start_24h = now - timedelta(hours=24)
     start_7d = now - timedelta(days=7)
     apr_24h = annualize_history(history, start=start_24h, end=now)
@@ -77,10 +81,13 @@ def build_opportunity(
         spot_symbol=pair.spot_symbol,
         perp_symbol=pair.perp_symbol,
         observed_at=quote.observed_at,
+        spot_bid=quote.spot_bid,
         spot_ask=quote.spot_ask,
         perp_bid=quote.perp_bid,
+        perp_ask=quote.perp_ask,
         executable_basis=basis,
         top_book_notional=capacity,
+        close_top_book_notional=close_capacity,
         current_funding_rate=current.rate,
         funding_interval_hours=current.interval_hours,
         next_funding_at=current.next_funding_at,

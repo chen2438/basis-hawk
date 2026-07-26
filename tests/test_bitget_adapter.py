@@ -48,6 +48,8 @@ def handler(request: httpx.Request) -> httpx.Response:
                 "data": [
                     {
                         "symbol": "BTCUSDT",
+                        "bidPr": "99",
+                        "bidSz": "3",
                         "askPr": "100",
                         "askSz": "2",
                         "quoteVolume": "2000000",
@@ -66,6 +68,8 @@ def handler(request: httpx.Request) -> httpx.Response:
                         "symbol": "BTCUSDT",
                         "bidPr": "101",
                         "bidSz": "3",
+                        "askPr": "102",
+                        "askSz": "2",
                         "quoteVolume": "3000000",
                         "ts": "1785087001000",
                     }

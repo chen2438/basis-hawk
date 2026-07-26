@@ -43,6 +43,8 @@ def handler(request: httpx.Request) -> httpx.Response:
             json=[
                 {
                     "currency_pair": "BTC_USDT",
+                    "highest_bid": "99",
+                    "highest_size": "3",
                     "lowest_ask": "100",
                     "lowest_size": "2",
                     "quote_volume": "2000000",
@@ -57,6 +59,8 @@ def handler(request: httpx.Request) -> httpx.Response:
                     "contract": "BTC_USDT",
                     "highest_bid": "101",
                     "highest_size": "3000",
+                    "lowest_ask": "102",
+                    "lowest_size": "2000",
                     "quanto_multiplier": "0.001",
                     "volume_24h_quote": "3000000",
                     "funding_rate": "0.0001",

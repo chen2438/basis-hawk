@@ -4,6 +4,8 @@
 其余 HTTP 和 WebSocket API 均要求管理员会话。当前市场接口为 `/api/opportunities`、单机会
 `/history`、`/api/exchanges/status`、`/api/settings` 和 `/api/ws/opportunities`。
 所有比例使用小数值字符串，例如 `0.001` 表示 `0.1%`。
+机会对象同时返回开仓方向 `spot_ask`/`perp_bid` 与平仓方向 `spot_bid`/`perp_ask`，
+以及各自的最优档容量。
 
 管理员使用密码与 TOTP 登录。服务通过 Secure、HttpOnly、SameSite=Strict Cookie 保存会话；
 所有修改请求还必须提供与 Cookie 会话绑定的 `X-CSRF-Token`。连续失败登录受限流保护。
