@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 
 from basis_hawk.accounts import (
     AccountSnapshot,
+    OrderCancellation,
     PositionMode,
     PrivateRequestError,
     RemoteFill,
@@ -51,6 +52,7 @@ class FakeAccountClient:
         self.fills = fills or {}
         self.orders = orders or {}
         self.closed = False
+        self.cancellations: list[str] = []
 
     async def snapshot(self) -> AccountSnapshot:
         if self.fail:
@@ -131,6 +133,23 @@ class FakeAccountClient:
 
     async def close(self) -> None:
         self.closed = True
+
+    async def cancel_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+    ) -> OrderCancellation:
+        self.cancellations.append(exchange_order_id or client_order_id or "")
+        return OrderCancellation(
+            market=market,
+            symbol=symbol,
+            exchange_order_id=exchange_order_id,
+            client_order_id=client_order_id,
+            accepted=True,
+        )
 
 
 class EmptyFakeAccountClient(FakeAccountClient):
@@ -778,4 +797,29 @@ async def test_reconciliation_does_not_clear_a_safety_pause() -> None:
     assert control is not None
     assert control.state == "paused"
     assert control.reason == reason
+    await database.close()
+
+
+async def test_safety_pause_cancels_remote_orders_and_stays_paused() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    reason = "operator requested a safety pause"
+    await database.set_execution_control(state="paused", reason=reason)
+    credentials = await _credentials(database)
+    client = FakeAccountClient()
+
+    result = await ReconciliationService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    ).run_once()
+
+    assert result.execution_state == "paused"
+    assert client.cancellations == ["1"]
+    control = await database.execution_control()
+    assert control is not None
+    assert control.state == "paused"
+    assert control.reason == reason
+    states = await database.reconciliation_states()
+    assert "pause cancellation was submitted" in states[0].reason
     await database.close()

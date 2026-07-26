@@ -187,3 +187,44 @@ async def test_automation_rejects_incomplete_limits_and_missing_credentials() ->
         strategy_config()["notional_per_trade"]
     ) == Decimal("100")
     await database.close()
+
+
+async def test_global_execution_pause_requires_confirmation_and_fresh_resume() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    service = ScannerService(database, {})
+    await service.initialize()
+    await database.set_execution_control(state="ready", reason="test")
+    app = create_app(
+        service,
+        manage_lifecycle=False,
+        auth_required=False,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        missing_confirmation = await client.post(
+            "/api/system/execution/pause",
+            json={"confirmed": False, "reason": "maintenance"},
+        )
+        assert missing_confirmation.status_code == 422
+
+        paused = await client.post(
+            "/api/system/execution/pause",
+            json={"confirmed": True, "reason": "maintenance"},
+        )
+        assert paused.status_code == 200
+        assert paused.json()["state"] == "paused"
+        assert paused.json()["cancel_open_orders"] == "worker_pending"
+
+        resumed = await client.post(
+            "/api/system/execution/resume",
+            json={"confirmed": True},
+        )
+        assert resumed.status_code == 200
+        assert resumed.json()["state"] == "reconciling"
+
+    control = await database.execution_control()
+    assert control is not None
+    assert control.state == "reconciling"
+    await database.close()

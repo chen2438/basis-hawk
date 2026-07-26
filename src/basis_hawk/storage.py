@@ -1460,6 +1460,13 @@ class Database:
                 raise ValueError("live intent must contain exactly two primary legs")
             if intent.status != "planned":
                 return intent, legs, False
+            control = await session.scalar(
+                select(ExecutionControlRow)
+                .where(ExecutionControlRow.id == 1)
+                .with_for_update()
+            )
+            if control is None or control.state != "ready":
+                return intent, legs, False
             if any(item.status != "created" for item in primary.values()):
                 raise ValueError("live order legs are not ready for first submission")
             if intent.action == "close":

@@ -105,6 +105,19 @@ class AutomationPauseRequest(BaseModel):
     reason: str = Field(default="paused by administrator", min_length=1, max_length=300)
 
 
+class ExecutionPauseRequest(BaseModel):
+    confirmed: Literal[True]
+    reason: str = Field(
+        default="execution paused by administrator",
+        min_length=1,
+        max_length=300,
+    )
+
+
+class ExecutionResumeRequest(BaseModel):
+    confirmed: Literal[True]
+
+
 def create_app(
     service: ScannerService | None = None,
     *,
@@ -377,6 +390,47 @@ def create_app(
                 }
                 for item in reconciliations
             ],
+        }
+
+    @app.post("/api/system/execution/pause")
+    async def pause_execution(
+        value: ExecutionPauseRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        actor = request_actor(request)
+        await scanner.database.set_execution_control(
+            state="paused",
+            reason=value.reason,
+        )
+        await scanner.database.append_audit(
+            "execution.paused",
+            actor=actor,
+            details={"reason": value.reason},
+        )
+        return {
+            "state": "paused",
+            "reason": value.reason,
+            "cancel_open_orders": "worker_pending",
+        }
+
+    @app.post("/api/system/execution/resume")
+    async def resume_execution(
+        value: ExecutionResumeRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        actor = request_actor(request)
+        await scanner.database.set_execution_control(
+            state="reconciling",
+            reason="administrator requested a fresh safety reconciliation",
+        )
+        await scanner.database.append_audit(
+            "execution.resume_requested",
+            actor=actor,
+            details={},
+        )
+        return {
+            "state": "reconciling",
+            "reason": "worker must pass a fresh reconciliation before ready",
         }
 
     @app.get("/api/automation")

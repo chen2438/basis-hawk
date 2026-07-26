@@ -43,6 +43,10 @@
   交易所在策略环境中已配置凭据。
 - `POST /api/automation/pause`、`/resume`、`/disable`：暂停、重新验证后恢复或禁用自动交易；
   不把暂停等同于紧急清仓。
+- `POST /api/system/execution/pause`：要求 `confirmed=true`，立即持久化全局安全暂停；worker 随后撤销
+  所有账户的远端活动订单，已对冲仓位保持不动。
+- `POST /api/system/execution/resume`：要求 `confirmed=true`，只把状态改为 `reconciling`；不能由
+  HTTP 请求直接宣称 `ready`，必须等待 worker 完成全量安全对账。
 
 写入接口只接受已认证且 CSRF 校验通过的请求。明文只在单次请求内进入内存，随后使用绑定交易所与环境的
 AES-GCM 关联数据加密；响应、审计事件和日志均不得包含 API Secret、passphrase 或完整 API Key。
@@ -85,6 +89,8 @@ Gate LIVE 与 MEXC LIVE 的认证连接均已装配到常驻 worker。任一私�
 当全部已配置账户的余额、交易权限、持仓模式、远端挂单/成交/仓位关联以及私有流新鲜度都通过时，
 worker 才会把账户项和全局状态置为 `ready`；任一账户失败或阻断都会保持 `blocked`，已有的
 `paused` 安全状态优先且不会被普通对账清除。
+真实执行器在网络预检完成、两腿订单进入提交事务前会再次对 `execution_control` 加锁并要求仍为
+`ready`，因此管理员暂停与正在进行的预检并发时也不会在暂停之后把订单腿改为 `submitted`。
 六所客户端也可按客户端订单 ID 查询单笔订单。worker 对明确进入已提交状态但缺少交易所订单 ID 的
 本地订单腿执行恢复，并对已经关联但仍非终态的 IOC 持续刷新；两种情况都严格核对市场、标的、方向、
 原生数量及 reduce-only，`created` 订单不会被误当成 ACK 丢失订单。部分成交后撤销的 IOC 保留撤销

@@ -284,6 +284,24 @@ async def test_live_executor_expires_stale_open_without_remote_calls() -> None:
     await database.close()
 
 
+async def test_submission_transaction_rechecks_global_pause() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    _, intent_id = await _planned_live_intent(database)
+    await database.set_execution_control(
+        state="paused",
+        reason="operator pause raced with preflight",
+    )
+
+    prepared = await database.prepare_live_submission(intent_id=intent_id)
+
+    assert prepared is not None
+    assert prepared[2] is False
+    assert prepared[0].status == "planned"
+    assert {item.status for item in prepared[1]} == {"created"}
+    await database.close()
+
+
 async def test_live_executor_expires_stale_close_and_reopens_position() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()

@@ -120,11 +120,31 @@ class ReconciliationService:
                     client.snapshot(),
                     client.trading_state(),
                 )
+                cancellation_submitted = 0
+                cancellation_failed = 0
+                if safety_pause_reason is not None:
+                    (
+                        cancellation_submitted,
+                        cancellation_failed,
+                    ) = await _cancel_open_orders(
+                        client,
+                        trading_state.open_orders,
+                    )
                 private_stream_ready = await self.database.private_stream_ready(
                     exchange=summary.exchange.value,
                     environment=summary.environment.value,
                 )
                 reasons = []
+                if cancellation_submitted:
+                    reasons.append(
+                        "pause cancellation was submitted and requires "
+                        "remote terminal verification"
+                    )
+                if cancellation_failed:
+                    reasons.append(
+                        "one or more open orders could not be canceled "
+                        "during the safety pause"
+                    )
                 if not private_stream_ready:
                     reasons.append(
                         "private event stream is disconnected, incomplete, or stale"
@@ -407,6 +427,44 @@ def _open_order_reasons(
     if matched:
         reasons.append("locally linked IOC orders are still open")
     return reasons
+
+
+async def _cancel_open_orders(
+    client: PrivateAccountClient,
+    orders: list[RemoteOrder],
+) -> tuple[int, int]:
+    submitted = 0
+    failed = 0
+    for order in orders:
+        try:
+            cancellation = await client.cancel_order(
+                market=order.market,
+                symbol=order.symbol,
+                exchange_order_id=order.exchange_order_id,
+                client_order_id=order.client_order_id,
+            )
+            if (
+                not cancellation.accepted
+                or cancellation.market != order.market
+                or cancellation.symbol != order.symbol
+                or (
+                    cancellation.exchange_order_id is not None
+                    and cancellation.exchange_order_id
+                    != order.exchange_order_id
+                )
+                or (
+                    cancellation.client_order_id is not None
+                    and order.client_order_id is not None
+                    and cancellation.client_order_id
+                    != order.client_order_id
+                )
+            ):
+                failed += 1
+            else:
+                submitted += 1
+        except Exception:
+            failed += 1
+    return submitted, failed
 
 
 def _position_reasons(
