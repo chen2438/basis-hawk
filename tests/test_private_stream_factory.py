@@ -9,7 +9,7 @@ from basis_hawk.private_stream_factory import create_private_stream_connections
 from basis_hawk.storage import Database
 
 
-async def test_factory_builds_only_implemented_private_stream_connections() -> None:
+async def test_factory_builds_implemented_private_stream_connections() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()
     credentials = CredentialService(
@@ -37,8 +37,12 @@ async def test_factory_builds_only_implemented_private_stream_connections() -> N
         timeout_seconds=7,
     )
 
-    assert len(connections) == 1
-    assert connections[0].exchange == Exchange.BINANCE
-    assert connections[0].environment == ExchangeEnvironment.LIVE
-    assert connections[0].timeout_seconds == 7
+    assert [item.exchange for item in connections] == [
+        Exchange.BINANCE,
+        Exchange.OKX,
+    ]
+    assert all(
+        item.environment == ExchangeEnvironment.LIVE for item in connections
+    )
+    assert all(item.timeout_seconds == 7 for item in connections)
     await database.close()

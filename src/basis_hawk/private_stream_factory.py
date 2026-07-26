@@ -3,6 +3,7 @@ from __future__ import annotations
 from basis_hawk.binance_private_stream import BinancePrivateStreamConnection
 from basis_hawk.credentials import CredentialService
 from basis_hawk.models import Exchange
+from basis_hawk.okx_private_stream import OkxPrivateStreamConnection
 from basis_hawk.private_stream import PrivateStreamConnection
 
 
@@ -13,16 +14,23 @@ async def create_private_stream_connections(
 ) -> list[PrivateStreamConnection]:
     connections: list[PrivateStreamConnection] = []
     for summary in await credentials.list():
-        if summary.exchange != Exchange.BINANCE:
-            continue
         secrets = await credentials.load(summary.exchange, summary.environment)
         if secrets is None:
             continue
-        connections.append(
-            BinancePrivateStreamConnection(
-                secrets,
-                summary.environment,
-                timeout_seconds=timeout_seconds,
+        if summary.exchange == Exchange.BINANCE:
+            connections.append(
+                BinancePrivateStreamConnection(
+                    secrets,
+                    summary.environment,
+                    timeout_seconds=timeout_seconds,
+                )
             )
-        )
+        elif summary.exchange == Exchange.OKX:
+            connections.append(
+                OkxPrivateStreamConnection(
+                    secrets,
+                    summary.environment,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
     return connections

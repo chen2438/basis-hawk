@@ -37,6 +37,8 @@
 - 已完成：Binance 现货签名 WebSocket API 与 USDT 永续 listenKey 私有流连接、双连接 ping/pong、
   永续 listenKey 续期和安全关闭适配，并已装配到常驻 worker；事件当前触发健康心跳，订单/成交/仓位
   仍由每轮 REST 对账落账。
+- 已完成：OKX 生产/模拟盘私有 WebSocket 登录、通用订单（含成交更新）、仓位和账户频道订阅、文本
+  ping/pong 保活及 worker 装配；专用 fills 频道因 VIP 限制不作为就绪条件。
 - 已完成：启动对账在全部已配置账户的余额、权限、模式、远端订单/成交/仓位关联和私有流均通过时进入
   `ready`；任一账户失败、阻断或心跳在最终确认前失效都保持 `blocked`，既有安全暂停不被覆盖。
 - 已完成：Binance、OKX、Bybit 现货/永续保护性限价 IOC 下单、撤单、逐仓和 1–10 倍杠杆私有适配。
