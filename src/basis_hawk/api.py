@@ -4,21 +4,46 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
+from basis_hawk.auth import AuthenticationError, AuthService, LoginAttemptLimiter
 from basis_hawk.config import get_config
+from basis_hawk.crypto import SecretCipher
 from basis_hawk.models import Exchange, Quality, ScannerSettings
 from basis_hawk.service import ScannerService, default_adapters
 from basis_hawk.storage import Database
 
+SESSION_COOKIE = "basis_hawk_session"
+CSRF_COOKIE = "basis_hawk_csrf"
 
-def create_app(service: ScannerService | None = None, *, manage_lifecycle: bool = True) -> FastAPI:
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    totp_code: str
+
+
+def create_app(
+    service: ScannerService | None = None,
+    *,
+    manage_lifecycle: bool = True,
+    auth_required: bool | None = None,
+    auth_service: AuthService | None = None,
+) -> FastAPI:
     config = get_config()
     scanner = service or ScannerService(
         Database(config.database_url), default_adapters(config.http_timeout_seconds)
     )
+    require_auth = config.auth_required if auth_required is None else auth_required
+    if auth_service is None and config.credential_master_key:
+        auth_service = AuthService(
+            scanner.database,
+            SecretCipher(config.credential_master_key.get_secret_value()),
+            session_hours=config.session_hours,
+        )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -30,6 +55,106 @@ def create_app(service: ScannerService | None = None, *, manage_lifecycle: bool 
 
     app = FastAPI(title="Basis Hawk", version="0.1.0", lifespan=lifespan)
     app.state.scanner = scanner
+    app.state.auth_service = auth_service
+    login_limiter = LoginAttemptLimiter()
+
+    @app.middleware("http")
+    async def authenticate_request(request: Request, call_next):
+        if not require_auth or not request.url.path.startswith("/api/"):
+            return await call_next(request)
+        if request.url.path in {
+            "/api/auth/login",
+            "/api/health/live",
+            "/api/health/ready",
+        }:
+            return await call_next(request)
+        if auth_service is None:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "credential master key is not configured"},
+            )
+        session_token = request.cookies.get(SESSION_COOKIE)
+        admin = await auth_service.authenticate(session_token)
+        if admin is None:
+            return JSONResponse(status_code=401, content={"detail": "authentication required"})
+        request.state.admin = admin
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            csrf_cookie = request.cookies.get(CSRF_COOKIE)
+            csrf_header = request.headers.get("X-CSRF-Token")
+            if (
+                not session_token
+                or not csrf_cookie
+                or csrf_cookie != csrf_header
+                or not await auth_service.validate_csrf(session_token, csrf_header)
+            ):
+                return JSONResponse(status_code=403, content={"detail": "invalid CSRF token"})
+        return await call_next(request)
+
+    @app.post("/api/auth/login")
+    async def login(value: LoginRequest, request: Request) -> Response:
+        if not require_auth:
+            raise HTTPException(status_code=409, detail="authentication is disabled")
+        if auth_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential master key is not configured",
+            )
+        remote_address = request.client.host if request.client else "unknown"
+        limiter_key = f"{remote_address}:{value.username.strip()}"
+        if not login_limiter.allowed(limiter_key):
+            raise HTTPException(status_code=429, detail="too many login attempts")
+        try:
+            session = await auth_service.login(
+                value.username,
+                value.password,
+                value.totp_code,
+                remote_address=remote_address,
+            )
+        except AuthenticationError as exc:
+            login_limiter.record_failure(limiter_key)
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        login_limiter.clear(limiter_key)
+        response = JSONResponse(
+            {
+                "username": session.username,
+                "expires_at": session.expires_at.isoformat(),
+            }
+        )
+        max_age = config.session_hours * 3600
+        response.set_cookie(
+            SESSION_COOKIE,
+            session.session_token,
+            max_age=max_age,
+            httponly=True,
+            secure=config.secure_cookies,
+            samesite="strict",
+        )
+        response.set_cookie(
+            CSRF_COOKIE,
+            session.csrf_token,
+            max_age=max_age,
+            httponly=False,
+            secure=config.secure_cookies,
+            samesite="strict",
+        )
+        return response
+
+    @app.get("/api/auth/session")
+    async def auth_session(request: Request) -> dict[str, str]:
+        return {"username": request.state.admin.username}
+
+    @app.post("/api/auth/logout")
+    async def logout(request: Request) -> Response:
+        if auth_service is None:
+            raise HTTPException(status_code=503, detail="authentication is unavailable")
+        await auth_service.logout(
+            request.cookies.get(SESSION_COOKIE),
+            actor=request.state.admin.username,
+        )
+        response = Response(status_code=204)
+        response.delete_cookie(SESSION_COOKIE)
+        response.delete_cookie(CSRF_COOKIE)
+        return response
 
     @app.get("/api/health/live")
     async def live() -> dict[str, str]:
@@ -98,6 +223,12 @@ def create_app(service: ScannerService | None = None, *, manage_lifecycle: bool 
 
     @app.websocket("/api/ws/opportunities")
     async def opportunity_stream(websocket: WebSocket) -> None:
+        if require_auth:
+            if auth_service is None or await auth_service.authenticate(
+                websocket.cookies.get(SESSION_COOKIE)
+            ) is None:
+                await websocket.close(code=4401)
+                return
         await websocket.accept()
         queue = scanner.subscribe()
         await websocket.send_json(

@@ -1,0 +1,78 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [backend]
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      BASIS_HAWK_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      BASIS_HAWK_LOG_LEVEL: ${BASIS_HAWK_LOG_LEVEL:-INFO}
+      BASIS_HAWK_HTTP_TIMEOUT_SECONDS: ${BASIS_HAWK_HTTP_TIMEOUT_SECONDS:-10}
+      BASIS_HAWK_HOST: 0.0.0.0
+      BASIS_HAWK_PORT: 8000
+      BASIS_HAWK_AUTH_REQUIRED: ${BASIS_HAWK_AUTH_REQUIRED:-true}
+      BASIS_HAWK_SECURE_COOKIES: ${BASIS_HAWK_SECURE_COOKIES:-true}
+      BASIS_HAWK_SESSION_HOURS: ${BASIS_HAWK_SESSION_HOURS:-12}
+      BASIS_HAWK_CREDENTIAL_MASTER_KEY: ${BASIS_HAWK_CREDENTIAL_MASTER_KEY}
+    command: ["sh", "-c", "alembic upgrade head && exec basis-hawk serve"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/live')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    read_only: true
+    tmpfs: [/tmp]
+    networks: [backend]
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    environment:
+      BASIS_HAWK_DOMAIN: ${BASIS_HAWK_DOMAIN}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [backend]
+
+networks:
+  backend:
+    internal: false
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

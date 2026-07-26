@@ -2,18 +2,22 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="BASIS_HAWK_", env_file=".env", extra="ignore")
 
-    database_url: str = "sqlite+aiosqlite:///./basis-hawk.db"
+    database_url: str = "postgresql+asyncpg://basis_hawk:basis_hawk@127.0.0.1/basis_hawk"
     log_level: str = "INFO"
     http_timeout_seconds: float = Field(default=10, gt=0, le=60)
-    host: str = "127.0.0.1"
+    host: str = "0.0.0.0"
     port: int = Field(default=8000, ge=1, le=65535)
+    auth_required: bool = True
+    secure_cookies: bool = True
+    session_hours: int = Field(default=12, ge=1, le=168)
+    credential_master_key: SecretStr | None = None
 
 
 @lru_cache

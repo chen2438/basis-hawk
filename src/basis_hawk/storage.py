@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import DateTime, Index, Integer, String, Text, delete, select, text
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    delete,
+    func,
+    select,
+    text,
+)
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     async_sessionmaker,
@@ -58,6 +71,52 @@ class SettingRow(Base):
     payload: Mapped[str] = mapped_column(Text)
 
 
+class AdminUserRow(Base):
+    __tablename__ = "admin_users"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(80), unique=True)
+    password_hash: Mapped[str] = mapped_column(Text)
+    totp_ciphertext: Mapped[str] = mapped_column(Text)
+    totp_nonce: Mapped[str] = mapped_column(String(80))
+    key_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AdminSessionRow(Base):
+    __tablename__ = "admin_sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    admin_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id", ondelete="CASCADE"))
+    csrf_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class ExchangeCredentialRow(Base):
+    __tablename__ = "exchange_credentials"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    exchange: Mapped[str] = mapped_column(String(20))
+    environment: Mapped[str] = mapped_column(String(20))
+    label: Mapped[str] = mapped_column(String(100))
+    masked_api_key: Mapped[str] = mapped_column(String(100))
+    ciphertext: Mapped[str] = mapped_column(Text)
+    nonce: Mapped[str] = mapped_column(String(80))
+    key_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("exchange", "environment", name="uq_exchange_credential"),
+    )
+
+
+class AuditEventRow(Base):
+    __tablename__ = "audit_events"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    event_type: Mapped[str] = mapped_column(String(100), index=True)
+    actor: Mapped[str] = mapped_column(String(100))
+    details: Mapped[str] = mapped_column(Text)
+
+
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
@@ -72,7 +131,7 @@ class Database:
             if self.engine.url.get_backend_name() == "sqlite":
                 await connection.execute(text("PRAGMA journal_mode=WAL"))
                 await connection.execute(text("PRAGMA busy_timeout=5000"))
-            await connection.run_sync(Base.metadata.create_all)
+                await connection.run_sync(Base.metadata.create_all)
 
     async def close(self) -> None:
         await self.engine.dispose()
@@ -91,6 +150,158 @@ class Database:
             else:
                 session.add(SettingRow(key="scanner", payload=payload))
             await session.commit()
+
+    async def admin_count(self) -> int:
+        async with self.sessions() as session:
+            return int(await session.scalar(select(func.count(AdminUserRow.id))) or 0)
+
+    async def create_admin(
+        self,
+        *,
+        username: str,
+        password_hash: str,
+        totp_ciphertext: str,
+        totp_nonce: str,
+        key_version: int,
+    ) -> AdminUserRow:
+        async with self.sessions() as session:
+            row = AdminUserRow(
+                username=username,
+                password_hash=password_hash,
+                totp_ciphertext=totp_ciphertext,
+                totp_nonce=totp_nonce,
+                key_version=key_version,
+                created_at=datetime.now(UTC),
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def get_admin_by_username(self, username: str) -> AdminUserRow | None:
+        async with self.sessions() as session:
+            return await session.scalar(
+                select(AdminUserRow).where(AdminUserRow.username == username)
+            )
+
+    async def create_session(
+        self,
+        *,
+        admin_id: int,
+        token_hash: str,
+        csrf_hash: str,
+        expires_at: datetime,
+    ) -> None:
+        async with self.sessions() as session:
+            session.add(
+                AdminSessionRow(
+                    token_hash=token_hash,
+                    admin_id=admin_id,
+                    csrf_hash=csrf_hash,
+                    created_at=datetime.now(UTC),
+                    expires_at=expires_at,
+                )
+            )
+            await session.commit()
+
+    async def admin_for_session(
+        self, *, token_hash: str, now: datetime
+    ) -> AdminUserRow | None:
+        async with self.sessions() as session:
+            return await session.scalar(
+                select(AdminUserRow)
+                .join(AdminSessionRow, AdminSessionRow.admin_id == AdminUserRow.id)
+                .where(
+                    AdminSessionRow.token_hash == token_hash,
+                    AdminSessionRow.expires_at > now,
+                )
+            )
+
+    async def csrf_hash_for_session(self, *, token_hash: str, now: datetime) -> str | None:
+        async with self.sessions() as session:
+            return await session.scalar(
+                select(AdminSessionRow.csrf_hash).where(
+                    AdminSessionRow.token_hash == token_hash,
+                    AdminSessionRow.expires_at > now,
+                )
+            )
+
+    async def delete_session(self, token_hash: str) -> None:
+        async with self.sessions() as session:
+            await session.execute(
+                delete(AdminSessionRow).where(AdminSessionRow.token_hash == token_hash)
+            )
+            await session.commit()
+
+    async def append_audit(
+        self, event_type: str, *, actor: str, details: dict[str, Any]
+    ) -> None:
+        async with self.sessions() as session:
+            session.add(
+                AuditEventRow(
+                    id=str(uuid.uuid4()),
+                    occurred_at=datetime.now(UTC),
+                    event_type=event_type,
+                    actor=actor,
+                    details=json.dumps(details, separators=(",", ":"), sort_keys=True),
+                )
+            )
+            await session.commit()
+
+    async def save_exchange_credential(
+        self,
+        *,
+        exchange: str,
+        environment: str,
+        label: str,
+        masked_api_key: str,
+        ciphertext: str,
+        nonce: str,
+        key_version: int,
+    ) -> ExchangeCredentialRow:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ExchangeCredentialRow).where(
+                    ExchangeCredentialRow.exchange == exchange,
+                    ExchangeCredentialRow.environment == environment,
+                )
+            )
+            now = datetime.now(UTC)
+            if row:
+                row.label = label
+                row.masked_api_key = masked_api_key
+                row.ciphertext = ciphertext
+                row.nonce = nonce
+                row.key_version = key_version
+                row.updated_at = now
+            else:
+                row = ExchangeCredentialRow(
+                    id=str(uuid.uuid4()),
+                    exchange=exchange,
+                    environment=environment,
+                    label=label,
+                    masked_api_key=masked_api_key,
+                    ciphertext=ciphertext,
+                    nonce=nonce,
+                    key_version=key_version,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def exchange_credential(
+        self, exchange: str, environment: str
+    ) -> ExchangeCredentialRow | None:
+        async with self.sessions() as session:
+            return await session.scalar(
+                select(ExchangeCredentialRow).where(
+                    ExchangeCredentialRow.exchange == exchange,
+                    ExchangeCredentialRow.environment == environment,
+                )
+            )
 
     async def replace_instruments(self, exchange: str, pairs: list[InstrumentPair]) -> None:
         async with self.sessions() as session:

@@ -1,7 +1,25 @@
 # 存储与运维
 
-数据库 URL 由 `BASIS_HAWK_DATABASE_URL` 指定，默认当前目录 SQLite。启动时启用 WAL 与 busy timeout 并创建当前 schema。分钟快照批量写入；每天分批删除超过设置保留期的数据。
+生产数据库固定使用 PostgreSQL，URL 由 `BASIS_HAWK_DATABASE_URL` 指定。Alembic 是生产 schema
+的唯一迁移入口；应用只为 SQLite 测试数据库自动建表，禁止在 PostgreSQL 启动时隐式 `create_all`。
 
-CLI 只有 `basis-hawk doctor` 与 `basis-hawk serve`。doctor 创建并检查数据库，依次探测四所公共目录/行情接口，不调用私有接口。
+Docker Compose 当前提供 PostgreSQL、FastAPI 和 Caddy。Caddy 自动管理 TLS，只暴露 80/443；
+数据库只在 Compose 网络可见。生产启动顺序为数据库健康检查、`alembic upgrade head`、API 健康检查、
+Caddy 接入。
 
-CI 对提交信息、后端 Ruff/Pytest 和前端 Vitest/TypeScript/Vite 分别验收。实时交易所探测不进入 CI，避免网络与地区限制造成不稳定结果。
+首次部署必须配置 32 字节 URL-safe Base64 主密钥
+`BASIS_HAWK_CREDENTIAL_MASTER_KEY`，再运行：
+
+```bash
+docker compose run --rm api basis-hawk admin-create --username admin
+```
+
+管理员密码使用 Argon2id，TOTP 密钥和后续交易所凭据使用 AES-256-GCM；关联数据绑定管理员或交易所环境，
+数据库只保存密文、nonce 和密钥版本。主密钥不得写入仓库、日志或数据库。
+
+`.env.example` 只包含占位符。修改它时不得读取、输出或提交本地 `.env`；交易所 Key 必须禁止提现并绑定
+VPS 出口 IP。
+
+CI 对提交信息、后端 Ruff/Pytest 和前端 Vitest/TypeScript/Vite 分别验收。容器层另执行
+`docker compose --env-file .env.example config --quiet`；PostgreSQL 可用时还必须实际运行 Alembic
+upgrade/current。

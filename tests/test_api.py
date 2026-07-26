@@ -41,7 +41,7 @@ async def test_rest_contract_and_settings() -> None:
     service = ScannerService(database, {})
     await service.initialize()
     service.opportunities["binance:BTC"] = opportunity()
-    app = create_app(service, manage_lifecycle=False)
+    app = create_app(service, manage_lifecycle=False, auth_required=False)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
@@ -59,7 +59,7 @@ async def test_rest_contract_and_settings() -> None:
 def test_websocket_starts_with_snapshot() -> None:
     service = ScannerService(Database("sqlite+aiosqlite:///:memory:"), {})
     service.opportunities["binance:BTC"] = opportunity()
-    app = create_app(service, manage_lifecycle=False)
+    app = create_app(service, manage_lifecycle=False, auth_required=False)
     with TestClient(app).websocket_connect("/api/ws/opportunities") as socket:
         message = socket.receive_json()
     assert message["type"] == "snapshot"

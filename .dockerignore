@@ -1,0 +1,12 @@
+.env
+.git
+.pytest_cache
+.ruff_cache
+.venv
+basis-hawk.db*
+frontend/dist
+frontend/node_modules
+node_modules
+output
+__pycache__
+*.pyc

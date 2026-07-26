@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
+import { LoginPage } from "./LoginPage";
 import { SettingsPanel } from "./SettingsPanel";
 import type { Exchange, ExchangeStatus, Opportunity, Quality, Settings } from "./types";
 
@@ -17,6 +18,22 @@ function Sparkline({ values }: { values: number[] }) {
 }
 
 export default function App() {
+  const [username, setUsername] = useState<string | null>(null);
+  const [checkingSession, setCheckingSession] = useState(true);
+
+  useEffect(() => {
+    api.session()
+      .then((session) => setUsername(session.username))
+      .catch(() => setUsername(null))
+      .finally(() => setCheckingSession(false));
+  }, []);
+
+  if (checkingSession) return <main className="login-shell"><p>正在验证会话…</p></main>;
+  if (!username) return <LoginPage onAuthenticated={setUsername} />;
+  return <Dashboard username={username} onLogout={() => setUsername(null)} />;
+}
+
+function Dashboard({ username, onLogout }: { username: string; onLogout: () => void }) {
   const [items, setItems] = useState<Opportunity[]>([]);
   const [statuses, setStatuses] = useState<ExchangeStatus[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -93,7 +110,7 @@ export default function App() {
   return <div className="app-shell">
     <header className="topbar">
       <div className="brand"><div className="mark"><span /></div><div><strong>BASIS HAWK</strong><small>FUNDING ARBITRAGE RADAR</small></div></div>
-      <div className="top-actions"><span className="read-only"><i /> 只读模式</span><button className="button secondary" onClick={() => setShowSettings(true)}>扫描设置</button></div>
+      <div className="top-actions"><span className="read-only"><i /> {username}</span><button className="button secondary" onClick={() => setShowSettings(true)}>扫描设置</button><button className="button secondary" onClick={() => void api.logout().finally(onLogout)}>退出</button></div>
     </header>
 
     <main>
