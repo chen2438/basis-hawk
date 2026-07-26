@@ -140,10 +140,12 @@ class PairedPositionView(BaseModel):
     exchange: Exchange
     environment: str
     base_asset: str
+    initial_quantity: Decimal
     quantity: Decimal
     spot_entry_price: Decimal
     perp_entry_price: Decimal
     opening_fees_usdt: Decimal
+    remaining_opening_fees_usdt: Decimal
     closing_fees_usdt: Decimal | None
     realized_pnl_usdt: Decimal | None
     status: str
@@ -151,10 +153,12 @@ class PairedPositionView(BaseModel):
     closed_at: datetime | None
 
     @field_serializer(
+        "initial_quantity",
         "quantity",
         "spot_entry_price",
         "perp_entry_price",
         "opening_fees_usdt",
+        "remaining_opening_fees_usdt",
         "closing_fees_usdt",
         "realized_pnl_usdt",
         when_used="json",
@@ -545,16 +549,26 @@ class PaperExecutionService:
         manual_review = 0
         for item in candidates:
             result = None
-            if item.action == "open" and item.status == TradeIntentStatus.COMPENSATING.value:
-                result = await self.database.execute_paper_compensation(
-                    intent_id=item.id,
-                    succeeds=self.compensation_succeeds,
+            if item.status == TradeIntentStatus.COMPENSATING.value:
+                result = (
+                    await self.database.execute_paper_compensation(
+                        intent_id=item.id,
+                        succeeds=self.compensation_succeeds,
+                    )
+                    if item.action == "open"
+                    else await self.database.execute_paper_close_compensation(
+                        intent_id=item.id,
+                        succeeds=self.compensation_succeeds,
+                    )
+                    if item.action == "close"
+                    else None
                 )
                 if result is not None and result[2]:
                     compensated += int(
                         result[0].status
                         in {
                             TradeIntentStatus.HEDGED.value,
+                            TradeIntentStatus.CLOSED.value,
                             TradeIntentStatus.FAILED.value,
                         }
                     )
@@ -593,7 +607,48 @@ class PaperExecutionService:
                                     result[0].status == TradeIntentStatus.MANUAL_REVIEW.value
                                 )
             elif item.action == "close":
-                result = await self.database.execute_paper_close(intent_id=item.id)
+                current = await self.database.trade_intent(item.id)
+                if current is not None:
+                    primary = {
+                        leg.leg: leg
+                        for leg in current[1]
+                        if leg.leg in {"spot", "perp"}
+                    }
+                    if set(primary) == {"spot", "perp"}:
+                        result = await self.database.record_paper_close_fills(
+                            intent_id=item.id,
+                            spot_fill_quantity=(
+                                primary["spot"].quantity
+                                * self.fill_ratios["spot"]
+                            ),
+                            perp_fill_quantity=(
+                                primary["perp"].quantity
+                                * self.fill_ratios["perp"]
+                            ),
+                        )
+                        if (
+                            result is not None
+                            and result[0].status
+                            == TradeIntentStatus.COMPENSATING.value
+                        ):
+                            result = (
+                                await self.database.execute_paper_close_compensation(
+                                    intent_id=item.id,
+                                    succeeds=self.compensation_succeeds,
+                                )
+                            )
+                            if result is not None and result[2]:
+                                compensated += int(
+                                    result[0].status
+                                    in {
+                                        TradeIntentStatus.CLOSED.value,
+                                        TradeIntentStatus.FAILED.value,
+                                    }
+                                )
+                                manual_review += int(
+                                    result[0].status
+                                    == TradeIntentStatus.MANUAL_REVIEW.value
+                                )
             if result is not None and result[2]:
                 executed += 1
         return PaperExecutionResult(
@@ -665,10 +720,12 @@ def _position_view(row: PairedPositionRow) -> PairedPositionView:
         exchange=Exchange(row.exchange),
         environment=row.environment,
         base_asset=row.base_asset,
+        initial_quantity=row.initial_quantity,
         quantity=row.quantity,
         spot_entry_price=row.spot_entry_price,
         perp_entry_price=row.perp_entry_price,
         opening_fees_usdt=row.opening_fees_usdt,
+        remaining_opening_fees_usdt=row.remaining_opening_fees_usdt,
         closing_fees_usdt=row.closing_fees_usdt,
         realized_pnl_usdt=row.realized_pnl_usdt,
         status=row.status,

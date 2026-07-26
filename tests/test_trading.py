@@ -311,6 +311,164 @@ async def test_successful_single_leg_compensation_leaves_no_exposure() -> None:
     await database.close()
 
 
+async def test_partial_paper_close_compensates_and_allows_remaining_close() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = TradeLedger(database)
+    opening, _ = await ledger.plan_paper_open(
+        opportunity=_opportunity(),
+        notional_usdt=Decimal("100"),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+    assert (await PaperExecutionService(database).run_once()).executed == 1
+    position = (await ledger.positions(status="open"))[0]
+    assert position.opening_intent_id == opening.id
+    assert position.initial_quantity == Decimal("2000")
+    assert position.remaining_opening_fees_usdt.quantize(
+        Decimal("0.001")
+    ) == Decimal("0.151")
+    first_close, _ = await ledger.plan_paper_close(
+        position_id=position.id,
+        opportunity=_opportunity(),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+
+    partial = PaperExecutionService(
+        database,
+        fill_ratios={"spot": Decimal("1"), "perp": Decimal("0.5")},
+    )
+    result = await partial.run_once()
+
+    assert result.executed == 1
+    assert result.compensated == 1
+    first_closed = await ledger.get(first_close.id)
+    assert first_closed is not None
+    assert first_closed.status == TradeIntentStatus.CLOSED
+    compensation = next(
+        leg for leg in first_closed.legs if leg.leg == "spot_compensation"
+    )
+    assert compensation.side == "buy"
+    assert compensation.reduce_only is False
+    remaining = (await ledger.positions(status="open"))[0]
+    assert remaining.id == position.id
+    assert remaining.quantity == Decimal("1000")
+    assert remaining.initial_quantity == Decimal("2000")
+    assert remaining.closing_intent_id is None
+    assert remaining.remaining_opening_fees_usdt.quantize(
+        Decimal("0.0001")
+    ) == Decimal("0.0755")
+    assert remaining.closing_fees_usdt is not None
+    assert remaining.closing_fees_usdt.quantize(
+        Decimal("0.001")
+    ) == Decimal("0.173")
+    assert remaining.realized_pnl_usdt is not None
+    assert remaining.realized_pnl_usdt.quantize(
+        Decimal("0.0001")
+    ) == Decimal("-2.2485")
+
+    final_close, created = await ledger.plan_paper_close(
+        position_id=position.id,
+        opportunity=_opportunity(),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+    assert created is True
+    assert final_close.id != first_close.id
+    assert (await PaperExecutionService(database).run_once()).executed == 1
+    closed = (await ledger.positions(status="closed"))[0]
+    assert closed.quantity == Decimal("0")
+    assert closed.remaining_opening_fees_usdt == Decimal("0")
+    assert closed.realized_pnl_usdt is not None
+    assert closed.realized_pnl_usdt.quantize(
+        Decimal("0.001")
+    ) == Decimal("-4.399")
+    await database.close()
+
+
+async def test_partial_close_compensation_recovers_after_restart() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = TradeLedger(database)
+    await ledger.plan_paper_open(
+        opportunity=_opportunity(),
+        notional_usdt=Decimal("100"),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+    await PaperExecutionService(database).run_once()
+    position = (await ledger.positions(status="open"))[0]
+    close_intent, _ = await ledger.plan_paper_close(
+        position_id=position.id,
+        opportunity=_opportunity(),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+    recorded = await database.record_paper_close_fills(
+        intent_id=close_intent.id,
+        spot_fill_quantity=Decimal("500"),
+        perp_fill_quantity=Decimal("2000"),
+    )
+    assert recorded is not None
+    assert recorded[0].status == TradeIntentStatus.COMPENSATING
+
+    result = await PaperExecutionService(database).run_once()
+
+    assert result.executed == 1
+    assert result.compensated == 1
+    recovered = await ledger.get(close_intent.id)
+    assert recovered is not None
+    compensation = next(
+        leg for leg in recovered.legs if leg.leg == "perp_compensation"
+    )
+    assert compensation.side == "sell"
+    assert compensation.reduce_only is False
+    assert compensation.status == "filled"
+    remaining = (await ledger.positions(status="open"))[0]
+    assert remaining.quantity == Decimal("1500")
+    await database.close()
+
+
+async def test_failed_partial_close_compensation_keeps_position_for_review() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = TradeLedger(database)
+    await ledger.plan_paper_open(
+        opportunity=_opportunity(),
+        notional_usdt=Decimal("100"),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+    await PaperExecutionService(database).run_once()
+    position = (await ledger.positions(status="open"))[0]
+    close_intent, _ = await ledger.plan_paper_close(
+        position_id=position.id,
+        opportunity=_opportunity(),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+
+    result = await PaperExecutionService(
+        database,
+        fill_ratios={"spot": Decimal("1"), "perp": Decimal("0")},
+        compensation_succeeds=False,
+    ).run_once()
+
+    assert result.manual_review == 1
+    failed = await ledger.get(close_intent.id)
+    assert failed is not None
+    assert failed.status == TradeIntentStatus.MANUAL_REVIEW
+    reviewing = (await ledger.positions(status="closing"))[0]
+    assert reviewing.id == position.id
+    assert reviewing.quantity == Decimal("2000")
+    assert reviewing.closing_intent_id == close_intent.id
+    control = await database.execution_control()
+    assert control is not None
+    assert control.state == "paused"
+    await database.close()
+
+
 async def test_paper_plan_rejects_stale_or_oversized_market_data() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()

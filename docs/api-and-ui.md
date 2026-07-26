@@ -58,6 +58,10 @@ taker 成交并创建配对仓位；
 多出的永续空仓会用 reduce-only 买回。补偿订单与成交使用同一意图下的独立订单腿持久化；worker 在
 主成交落库后重启可从 `compensating` 继续。补偿失败时意图进入 `manual_review`，全局执行状态进入
 `paused`，后续账户对账不得清除该安全暂停。该注入能力不通过生产 HTTP API 暴露。
+纸面部分平仓同样先补偿多出的一腿，再只扣减两腿共同成交量。持仓响应中的
+`initial_quantity` 保留初始数量，`quantity` 表示剩余数量，
+`remaining_opening_fees_usdt` 表示尚未分摊到已实现盈亏的开仓费用；每次安全完成部分平仓后仓位重新
+回到 `open`，可用新的幂等键继续平仓，数量归零后才进入 `closed`。
 
 WebSocket 首帧为 `snapshot`，后续帧为带单调 `sequence` 的 `update`；客户端发现序号断层或重连时重新读取 REST 快照。
 

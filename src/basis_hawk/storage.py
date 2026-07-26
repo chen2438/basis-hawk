@@ -213,7 +213,7 @@ class TradeIntentRow(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     paired_position_id: Mapped[str | None] = mapped_column(
         ForeignKey("paired_positions.id", ondelete="RESTRICT"),
-        unique=True,
+        index=True,
         nullable=True,
     )
     idempotency_key: Mapped[str] = mapped_column(String(36), unique=True)
@@ -301,10 +301,12 @@ class PairedPositionRow(Base):
     exchange: Mapped[str] = mapped_column(String(20), index=True)
     environment: Mapped[str] = mapped_column(String(20))
     base_asset: Mapped[str] = mapped_column(String(40))
+    initial_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     spot_entry_price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     perp_entry_price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     opening_fees_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    remaining_opening_fees_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     closing_fees_usdt: Mapped[Decimal | None] = mapped_column(
         Numeric(38, 18),
         nullable=True,
@@ -807,10 +809,12 @@ class Database:
                     exchange=intent.exchange,
                     environment=intent.environment,
                     base_asset=intent.base_asset,
+                    initial_quantity=common_quantity,
                     quantity=common_quantity,
                     spot_entry_price=by_leg["spot"].limit_price,
                     perp_entry_price=by_leg["perp"].limit_price,
                     opening_fees_usdt=total_fees,
+                    remaining_opening_fees_usdt=total_fees,
                     status="open",
                     opened_at=now,
                 )
@@ -934,10 +938,12 @@ class Database:
                     exchange=intent.exchange,
                     environment=intent.environment,
                     base_asset=intent.base_asset,
+                    initial_quantity=common_quantity,
                     quantity=common_quantity,
                     spot_entry_price=spot_leg.limit_price,
                     perp_entry_price=perp_leg.limit_price,
                     opening_fees_usdt=total_fees,
+                    remaining_opening_fees_usdt=total_fees,
                     status="open",
                     opened_at=now,
                 )
@@ -959,6 +965,26 @@ class Database:
         *,
         intent_id: str,
     ) -> tuple[TradeIntentRow, PairedPositionRow, bool] | None:
+        value = await self.trade_intent(intent_id)
+        if value is None:
+            return None
+        _, legs = value
+        primary = {item.leg: item for item in legs if item.leg in {"spot", "perp"}}
+        if set(primary) != {"spot", "perp"}:
+            return None
+        return await self.record_paper_close_fills(
+            intent_id=intent_id,
+            spot_fill_quantity=primary["spot"].quantity,
+            perp_fill_quantity=primary["perp"].quantity,
+        )
+
+    async def record_paper_close_fills(
+        self,
+        *,
+        intent_id: str,
+        spot_fill_quantity: Decimal,
+        perp_fill_quantity: Decimal,
+    ) -> tuple[TradeIntentRow, PairedPositionRow, bool] | None:
         async with self.sessions() as session:
             intent = await session.scalar(
                 select(TradeIntentRow).where(TradeIntentRow.id == intent_id).with_for_update()
@@ -972,7 +998,7 @@ class Database:
             )
             if position is None:
                 return None
-            if intent.status == "closed" and position.status == "closed":
+            if intent.status in {"closed", "failed"}:
                 return intent, position, False
             if (
                 intent.environment != "paper"
@@ -989,50 +1015,263 @@ class Database:
                     .with_for_update()
                 )
             )
-            by_leg = {item.leg: item for item in legs}
+            by_leg = {item.leg: item for item in legs if item.leg in {"spot", "perp"}}
             if set(by_leg) != {"spot", "perp"}:
                 return None
+            fill_quantities = {
+                "spot": spot_fill_quantity,
+                "perp": perp_fill_quantity,
+            }
+            if any(
+                quantity < 0 or quantity > by_leg[leg_name].quantity
+                for leg_name, quantity in fill_quantities.items()
+            ):
+                raise ValueError("paper fill quantity is outside the order quantity")
             now = datetime.now(UTC)
             fills: list[FillRow] = []
-            closing_fees = Decimal("0")
             for leg_name, leg in by_leg.items():
+                filled_quantity = fill_quantities[leg_name]
                 fee_rate = intent.spot_fee_rate if leg_name == "spot" else intent.perp_fee_rate
-                fee = leg.quantity * leg.limit_price * fee_rate
-                closing_fees += fee
+                fee = filled_quantity * leg.limit_price * fee_rate
                 leg.exchange_order_id = f"paper:{leg.id}"
-                leg.status = "filled"
-                leg.filled_quantity = leg.quantity
-                leg.average_price = leg.limit_price
+                leg.status = (
+                    "filled"
+                    if filled_quantity == leg.quantity
+                    else "partially_filled"
+                    if filled_quantity > 0
+                    else "canceled"
+                )
+                leg.filled_quantity = filled_quantity
+                leg.average_price = leg.limit_price if filled_quantity > 0 else None
                 leg.updated_at = now
-                fills.append(
-                    FillRow(
+                if filled_quantity > 0:
+                    fills.append(
+                        FillRow(
+                            id=str(uuid.uuid4()),
+                            order_leg_id=leg.id,
+                            exchange_trade_id=f"paper:{leg.id}:fill",
+                            quantity=filled_quantity,
+                            price=leg.limit_price,
+                            fee_amount=fee,
+                            fee_asset="USDT",
+                            liquidity="taker",
+                            occurred_at=now,
+                        )
+                    )
+            excess_quantity = abs(spot_fill_quantity - perp_fill_quantity)
+            if excess_quantity:
+                excess_leg = (
+                    by_leg["spot"] if spot_fill_quantity > perp_fill_quantity else by_leg["perp"]
+                )
+                compensation_side = "buy" if excess_leg.side == "sell" else "sell"
+                session.add(
+                    OrderLegRow(
                         id=str(uuid.uuid4()),
-                        order_leg_id=leg.id,
-                        exchange_trade_id=f"paper:{leg.id}:fill",
-                        quantity=leg.quantity,
-                        price=leg.limit_price,
-                        fee_amount=fee,
-                        fee_asset="USDT",
-                        liquidity="taker",
-                        occurred_at=now,
+                        trade_intent_id=intent.id,
+                        leg=f"{excess_leg.leg}_compensation",
+                        market=excess_leg.market,
+                        symbol=excess_leg.symbol,
+                        side=compensation_side,
+                        client_order_id=(f"{excess_leg.client_order_id.rsplit('-', 1)[0]}-c"),
+                        status="created",
+                        quantity=excess_quantity,
+                        limit_price=excess_leg.limit_price,
+                        filled_quantity=Decimal("0"),
+                        reduce_only=False,
+                        created_at=now,
+                        updated_at=now,
                     )
                 )
-            gross_pnl = (
-                (by_leg["spot"].limit_price - position.spot_entry_price)
-                + (position.perp_entry_price - by_leg["perp"].limit_price)
-            ) * position.quantity
-            position.closing_fees_usdt = closing_fees
-            position.realized_pnl_usdt = gross_pnl - position.opening_fees_usdt - closing_fees
-            position.status = "closed"
-            position.closed_at = now
-            intent.status = "closed"
-            intent.version += 1
-            intent.updated_at = now
+                intent.status = "compensating"
+                intent.version += 1
+                intent.updated_at = now
+            else:
+                self._apply_paper_close_outcome(
+                    intent=intent,
+                    position=position,
+                    spot_leg=by_leg["spot"],
+                    perp_leg=by_leg["perp"],
+                    compensation_fee=Decimal("0"),
+                    now=now,
+                )
             session.add_all(fills)
             await session.commit()
             await session.refresh(intent)
             await session.refresh(position)
             return intent, position, True
+
+    async def execute_paper_close_compensation(
+        self,
+        *,
+        intent_id: str,
+        succeeds: bool = True,
+    ) -> tuple[TradeIntentRow, PairedPositionRow, bool] | None:
+        async with self.sessions() as session:
+            intent = await session.scalar(
+                select(TradeIntentRow).where(TradeIntentRow.id == intent_id).with_for_update()
+            )
+            if intent is None or intent.paired_position_id is None:
+                return None
+            position = await session.scalar(
+                select(PairedPositionRow)
+                .where(PairedPositionRow.id == intent.paired_position_id)
+                .with_for_update()
+            )
+            if position is None:
+                return None
+            if intent.status in {"closed", "failed"}:
+                return intent, position, False
+            if (
+                intent.environment != "paper"
+                or intent.action != "close"
+                or intent.status != "compensating"
+                or position.status != "closing"
+                or position.closing_intent_id != intent.id
+            ):
+                return None
+            legs = list(
+                await session.scalars(
+                    select(OrderLegRow)
+                    .where(OrderLegRow.trade_intent_id == intent.id)
+                    .with_for_update()
+                )
+            )
+            by_leg = {item.leg: item for item in legs}
+            spot_leg = by_leg.get("spot")
+            perp_leg = by_leg.get("perp")
+            compensations = [
+                item for item in legs if item.leg.endswith("_compensation")
+            ]
+            if spot_leg is None or perp_leg is None or len(compensations) != 1:
+                return None
+            compensation = compensations[0]
+            now = datetime.now(UTC)
+            if not succeeds:
+                compensation.status = "failed"
+                compensation.updated_at = now
+                intent.status = "manual_review"
+                intent.version += 1
+                intent.updated_at = now
+                control = await session.get(ExecutionControlRow, 1)
+                reason = (
+                    "paired trade compensation failed; manual exposure review is required"
+                )
+                if control is None:
+                    session.add(
+                        ExecutionControlRow(
+                            id=1,
+                            state="paused",
+                            reason=reason,
+                            updated_at=now,
+                        )
+                    )
+                else:
+                    control.state = "paused"
+                    control.reason = reason
+                    control.updated_at = now
+                await session.commit()
+                await session.refresh(intent)
+                await session.refresh(position)
+                return intent, position, True
+
+            fee_rate = (
+                intent.spot_fee_rate
+                if compensation.market == "spot"
+                else intent.perp_fee_rate
+            )
+            compensation_fee = (
+                compensation.quantity * compensation.limit_price * fee_rate
+            )
+            compensation.exchange_order_id = f"paper:{compensation.id}"
+            compensation.status = "filled"
+            compensation.filled_quantity = compensation.quantity
+            compensation.average_price = compensation.limit_price
+            compensation.updated_at = now
+            session.add(
+                FillRow(
+                    id=str(uuid.uuid4()),
+                    order_leg_id=compensation.id,
+                    exchange_trade_id=f"paper:{compensation.id}:fill",
+                    quantity=compensation.quantity,
+                    price=compensation.limit_price,
+                    fee_amount=compensation_fee,
+                    fee_asset="USDT",
+                    liquidity="taker",
+                    occurred_at=now,
+                )
+            )
+            self._apply_paper_close_outcome(
+                intent=intent,
+                position=position,
+                spot_leg=spot_leg,
+                perp_leg=perp_leg,
+                compensation_fee=compensation_fee,
+                now=now,
+            )
+            await session.commit()
+            await session.refresh(intent)
+            await session.refresh(position)
+            return intent, position, True
+
+    @staticmethod
+    def _apply_paper_close_outcome(
+        *,
+        intent: TradeIntentRow,
+        position: PairedPositionRow,
+        spot_leg: OrderLegRow,
+        perp_leg: OrderLegRow,
+        compensation_fee: Decimal,
+        now: datetime,
+    ) -> None:
+        common_quantity = min(
+            spot_leg.filled_quantity,
+            perp_leg.filled_quantity,
+        )
+        if common_quantity > position.quantity:
+            raise ValueError("paper close fill exceeds the remaining position")
+        primary_fees = (
+            spot_leg.filled_quantity
+            * spot_leg.limit_price
+            * intent.spot_fee_rate
+            + perp_leg.filled_quantity
+            * perp_leg.limit_price
+            * intent.perp_fee_rate
+        )
+        attempt_fees = primary_fees + compensation_fee
+        opening_fee_allocation = (
+            position.remaining_opening_fees_usdt
+            if common_quantity == position.quantity
+            else (
+                position.remaining_opening_fees_usdt
+                * common_quantity
+                / position.quantity
+            )
+        )
+        gross_pnl = (
+            (spot_leg.limit_price - position.spot_entry_price)
+            + (position.perp_entry_price - perp_leg.limit_price)
+        ) * common_quantity
+        position.closing_fees_usdt = (
+            (position.closing_fees_usdt or Decimal("0")) + attempt_fees
+        )
+        position.realized_pnl_usdt = (
+            (position.realized_pnl_usdt or Decimal("0"))
+            + gross_pnl
+            - opening_fee_allocation
+            - attempt_fees
+        )
+        position.remaining_opening_fees_usdt -= opening_fee_allocation
+        position.quantity -= common_quantity
+        if position.quantity == 0:
+            position.status = "closed"
+            position.closed_at = now
+            intent.status = "closed"
+        else:
+            position.status = "open"
+            position.closing_intent_id = None
+            intent.status = "closed" if common_quantity > 0 else "failed"
+        intent.version += 1
+        intent.updated_at = now
 
     async def list_paired_positions(self, *, status: str | None = None) -> list[PairedPositionRow]:
         async with self.sessions() as session:
