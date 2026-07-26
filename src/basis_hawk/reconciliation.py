@@ -97,6 +97,8 @@ class ReconciliationService:
                     client.trading_state(),
                 )
                 reasons = ["private event streams have not been connected yet"]
+                order_reconciliation_complete = True
+                recovered_order_count = 0
                 fill_reconciliation_complete = True
                 fill_count = 0
                 local_legs = await self.database.order_legs_for_reconciliation(
@@ -104,10 +106,52 @@ class ReconciliationService:
                     environment=summary.environment.value,
                 )
                 for leg in local_legs:
+                    exchange_order_id = leg.exchange_order_id
+                    if (
+                        exchange_order_id is None
+                        and leg.status
+                        in {
+                            "submitted",
+                            "acknowledged",
+                            "partially_filled",
+                            "unknown",
+                        }
+                    ):
+                        lookup = await client.order_by_client_id(
+                            market=leg.market,
+                            symbol=leg.symbol,
+                            client_order_id=leg.client_order_id,
+                        )
+                        if not lookup.complete:
+                            order_reconciliation_complete = False
+                            reasons.append(
+                                lookup.incomplete_reason
+                                or "remote order lookup is incomplete"
+                            )
+                        elif lookup.order is None:
+                            order_reconciliation_complete = False
+                            reasons.append(
+                                "submitted order was not found by client order ID"
+                            )
+                        else:
+                            exchange_order_id = (
+                                await self.database.reconcile_remote_order(
+                                    order_leg_id=leg.id,
+                                    order=lookup.order,
+                                )
+                            )
+                            recovered_order_count += 1
+                    if exchange_order_id is None:
+                        if leg.status not in {"created", "failed", "canceled"}:
+                            fill_reconciliation_complete = False
+                            reasons.append(
+                                "remote fills require a recovered exchange order ID"
+                            )
+                        continue
                     batch = await client.fills_for_order(
                         market=leg.market,
                         symbol=leg.symbol,
-                        exchange_order_id=leg.exchange_order_id,
+                        exchange_order_id=exchange_order_id,
                         client_order_id=leg.client_order_id,
                         since=leg.created_at - timedelta(minutes=5),
                     )
@@ -141,6 +185,8 @@ class ReconciliationService:
                     reason="; ".join(reasons),
                     snapshot=snapshot,
                     trading_state=trading_state,
+                    order_reconciliation_complete=order_reconciliation_complete,
+                    recovered_order_count=recovered_order_count,
                     fill_reconciliation_complete=fill_reconciliation_complete,
                     fill_count=fill_count,
                 )

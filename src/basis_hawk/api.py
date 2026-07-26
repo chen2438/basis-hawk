@@ -302,12 +302,16 @@ def create_app(
                     "status": item.status,
                     "reason": item.reason,
                     "trading_state_complete": item.trading_state_complete,
+                    "order_reconciliation_complete": (
+                        item.order_reconciliation_complete
+                    ),
                     "fill_reconciliation_complete": (
                         item.fill_reconciliation_complete
                     ),
                     "open_order_count": item.open_order_count,
                     "position_count": item.position_count,
                     "fill_count": item.fill_count,
+                    "recovered_order_count": item.recovered_order_count,
                     "checked_at": item.checked_at.isoformat(),
                 }
                 for item in reconciliations

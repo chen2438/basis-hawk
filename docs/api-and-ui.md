@@ -52,6 +52,10 @@ Bybit 游标会读取到末页；其余接口一旦达到单页上限或交易�
 客户端 ID 和交易所订单 ID 后幂等写入本地 `fills`，再由全部成交重算订单腿累计数量、加权均价及状态。
 `GET /api/system/execution` 的账户项包含 `fill_reconciliation_complete` 和 `fill_count`；分页不完整
 或缺少必需的交易所订单 ID 时前者为 `false`。
+六所客户端也可按客户端订单 ID 查询单笔订单。worker 仅对明确进入已提交状态但缺少交易所订单 ID 的
+本地订单腿执行该恢复，并在严格核对市场、标的、方向、数量及 reduce-only 后保存关联；`created`
+订单不会被误当成 ACK 丢失订单。查不到订单仍是不确定状态，禁止自动重发。执行状态账户项新增
+`order_reconciliation_complete` 和 `recovered_order_count`，用于区分查单完整性与成交完整性。
 
 纸面开仓计划只接受 15 秒内的 `healthy` 行情，且名义金额不得超过当前两腿最优档容量。服务在任何执行前
 写入交易意图、配置哈希和两腿唯一客户端订单 ID；重复 UUID 加相同请求返回原意图，不同请求复用 UUID

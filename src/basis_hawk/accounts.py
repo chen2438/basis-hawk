@@ -140,6 +140,14 @@ class RemoteFillBatch(BaseModel):
     incomplete_reason: str | None = None
 
 
+class RemoteOrderLookup(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    order: RemoteOrder | None
+    complete: bool
+    incomplete_reason: str | None = None
+
+
 class RemoteTradingState(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -215,6 +223,15 @@ class PrivateAccountClient(ABC):
         client_order_id: str | None,
         since: datetime,
     ) -> RemoteFillBatch: ...
+
+    @abstractmethod
+    async def order_by_client_id(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        client_order_id: str,
+    ) -> RemoteOrderLookup: ...
 
     @abstractmethod
     async def close(self) -> None: ...
@@ -397,6 +414,34 @@ class BinanceAccountClient(PrivateAccountClient):
             if str(item.get("orderId") or "") == exchange_order_id
         ]
         return _fill_batch(fills, limit_reached=len(items) >= 1000, exchange="Binance")
+
+    async def order_by_client_id(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        client_order_id: str,
+    ) -> RemoteOrderLookup:
+        client = self.spot if market == "spot" else self.perp
+        path = "/api/v3/order" if market == "spot" else "/fapi/v1/order"
+        item = await self._get(
+            client,
+            path,
+            symbol=symbol,
+            origClientOrderId=client_order_id,
+        )
+        return RemoteOrderLookup(
+            order=_order(
+                item,
+                market=market,
+                order_id="orderId",
+                client_id="clientOrderId",
+                quantity="origQty",
+                filled="executedQty",
+                reduce_only=bool(item.get("reduceOnly")),
+            ),
+            complete=True,
+        )
 
     async def close(self) -> None:
         if self._owned_spot:
@@ -585,6 +630,42 @@ class OkxAccountClient(PrivateAccountClient):
             )
         ]
         return _fill_batch(fills, limit_reached=len(items) >= 100, exchange="OKX")
+
+    async def order_by_client_id(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        client_order_id: str,
+    ) -> RemoteOrderLookup:
+        payload = await self._get(
+            "/api/v5/trade/order",
+            instId=symbol,
+            clOrdId=client_order_id,
+        )
+        _okx_success(payload)
+        items = payload.get("data") or []
+        if not items:
+            return RemoteOrderLookup(order=None, complete=True)
+        item = items[0]
+        return RemoteOrderLookup(
+            order=RemoteOrder(
+                exchange_order_id=str(item.get("ordId") or ""),
+                client_order_id=(
+                    str(item["clOrdId"]) if item.get("clOrdId") else None
+                ),
+                market=market,
+                symbol=str(item.get("instId") or symbol),
+                side=str(item.get("side") or "").lower(),
+                status=str(item.get("state") or ""),
+                price=Decimal(str(item.get("px") or item.get("avgPx") or "0")),
+                original_quantity=Decimal(str(item.get("sz") or "0")),
+                filled_quantity=Decimal(str(item.get("accFillSz") or "0")),
+                reduce_only=str(item.get("reduceOnly") or "false").lower()
+                == "true",
+            ),
+            complete=True,
+        )
 
     async def close(self) -> None:
         if self._owned:
@@ -793,6 +874,27 @@ class BybitAccountClient(PrivateAccountClient):
             for item in items
         ]
         return RemoteFillBatch(fills=fills, complete=True)
+
+    async def order_by_client_id(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        client_order_id: str,
+    ) -> RemoteOrderLookup:
+        params = {
+            "category": "spot" if market == "spot" else "linear",
+            "symbol": symbol,
+            "orderLinkId": client_order_id,
+            "limit": 50,
+        }
+        items = await self._paged("/v5/order/realtime", **params)
+        if not items:
+            items = await self._paged("/v5/order/history", **params)
+        return RemoteOrderLookup(
+            order=_bybit_order(items[0], market=market) if items else None,
+            complete=True,
+        )
 
     async def close(self) -> None:
         if self._owned:
@@ -1004,6 +1106,34 @@ class BitgetAccountClient(PrivateAccountClient):
             for item in items
         ]
         return _fill_batch(fills, limit_reached=len(items) >= 100, exchange="Bitget")
+
+    async def order_by_client_id(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        client_order_id: str,
+    ) -> RemoteOrderLookup:
+        if market == "spot":
+            payload = await self._get(
+                "/api/v2/spot/trade/orderInfo",
+                symbol=symbol,
+                clientOid=client_order_id,
+            )
+        else:
+            payload = await self._get(
+                "/api/v2/mix/order/detail",
+                symbol=symbol,
+                productType="USDT-FUTURES",
+                clientOid=client_order_id,
+            )
+        _bitget_success(payload)
+        data = payload.get("data")
+        items = data if isinstance(data, list) else [data] if data else []
+        return RemoteOrderLookup(
+            order=_bitget_order(items[0], market=market) if items else None,
+            complete=True,
+        )
 
     async def close(self) -> None:
         if self._owned:
@@ -1218,6 +1348,26 @@ class GateAccountClient(PrivateAccountClient):
                 )
             )
         return _fill_batch(fills, limit_reached=len(items) >= 1000, exchange="Gate")
+
+    async def order_by_client_id(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        client_order_id: str,
+    ) -> RemoteOrderLookup:
+        if market == "spot":
+            item = await self._get(
+                f"/api/v4/spot/orders/{client_order_id}",
+                currency_pair=symbol,
+            )
+            order = _gate_spot_order(item)
+        else:
+            item = await self._get(
+                f"/api/v4/futures/usdt/orders/{client_order_id}",
+            )
+            order = _gate_perp_order(item)
+        return RemoteOrderLookup(order=order, complete=True)
 
     async def close(self) -> None:
         if self._owned:
@@ -1454,6 +1604,37 @@ class MexcAccountClient(PrivateAccountClient):
         ]
         return RemoteFillBatch(fills=fills, complete=True)
 
+    async def order_by_client_id(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        client_order_id: str,
+    ) -> RemoteOrderLookup:
+        if market == "spot":
+            item = await self._spot_get(
+                "/api/v3/order",
+                symbol=symbol,
+                origClientOrderId=client_order_id,
+            )
+            order = _order(
+                item,
+                market=market,
+                order_id="orderId",
+                client_id="clientOrderId",
+                quantity="origQty",
+                filled="executedQty",
+            )
+        else:
+            payload = await self._perp_get(
+                f"/api/v1/private/order/external/{symbol}/{client_order_id}"
+            )
+            if not payload.get("success"):
+                raise PrivateRequestError("MEXC order reconciliation failed")
+            item = payload.get("data")
+            order = _mexc_perp_order(item) if item else None
+        return RemoteOrderLookup(order=order, complete=True)
+
     async def close(self) -> None:
         if self._owned_spot:
             await self.spot.aclose()
@@ -1621,7 +1802,7 @@ def _bitget_order(item: dict[str, Any], *, market: str) -> RemoteOrder:
         market=market,
         symbol=str(item.get("symbol") or ""),
         side=str(item.get("side") or "").lower(),
-        status=str(item.get("status") or ""),
+        status=str(item.get("status") or item.get("state") or ""),
         price=Decimal(str(item.get("priceAvg") or item.get("price") or "0")),
         original_quantity=Decimal(str(item.get("size") or "0")),
         filled_quantity=Decimal(
@@ -1658,7 +1839,7 @@ def _gate_perp_order(item: dict[str, Any]) -> RemoteOrder:
         price=Decimal(str(item.get("price") or "0")),
         original_quantity=abs(quantity),
         filled_quantity=max(Decimal("0"), abs(quantity) - abs(remaining)),
-        reduce_only=bool(item.get("reduce_only")),
+        reduce_only=bool(item.get("is_reduce_only") or item.get("reduce_only")),
     )
 
 

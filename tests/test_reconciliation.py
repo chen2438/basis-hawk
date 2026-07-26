@@ -2,6 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import func, select
 
 from basis_hawk.accounts import (
@@ -11,6 +12,7 @@ from basis_hawk.accounts import (
     RemoteFill,
     RemoteFillBatch,
     RemoteOrder,
+    RemoteOrderLookup,
     RemotePosition,
     RemoteTradingState,
 )
@@ -35,9 +37,11 @@ class FakeAccountClient:
         *,
         fail: bool = False,
         fills: dict[str, list[RemoteFill]] | None = None,
+        orders: dict[str, RemoteOrder] | None = None,
     ) -> None:
         self.fail = fail
         self.fills = fills or {}
+        self.orders = orders or {}
         self.closed = False
 
     async def snapshot(self) -> AccountSnapshot:
@@ -102,6 +106,18 @@ class FakeAccountClient:
     ) -> RemoteFillBatch:
         return RemoteFillBatch(
             fills=self.fills.get(client_order_id or "", []),
+            complete=True,
+        )
+
+    async def order_by_client_id(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        client_order_id: str,
+    ) -> RemoteOrderLookup:
+        return RemoteOrderLookup(
+            order=self.orders.get(client_order_id),
             complete=True,
         )
 
@@ -265,6 +281,175 @@ async def test_reconciliation_persists_remote_fills_idempotently() -> None:
     states = await database.reconciliation_states()
     assert states[0].fill_reconciliation_complete is True
     assert states[0].fill_count == 1
+    await database.close()
+
+
+async def test_reconciliation_recovers_ack_lost_order_before_querying_fills() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials = await _credentials(database)
+    intent_id = str(uuid.uuid4())
+    now = datetime(2026, 7, 26, 18, 0, tzinfo=UTC)
+    _, legs, _ = await database.create_trade_intent(
+        intent={
+            "id": intent_id,
+            "idempotency_key": str(uuid.uuid4()),
+            "request_fingerprint": "c" * 64,
+            "exchange": "binance",
+            "environment": "live",
+            "base_asset": "ORDER",
+            "action": "open",
+            "status": "executing",
+            "requested_notional": Decimal("1"),
+            "base_quantity": Decimal("20"),
+            "spot_fee_rate": Decimal("0.001"),
+            "perp_fee_rate": Decimal("0.0005"),
+            "market_observed_at": now,
+            "config_version": "d" * 64,
+            "version": 1,
+            "created_at": now,
+            "updated_at": now,
+        },
+        legs=[
+            {
+                "id": str(uuid.uuid4()),
+                "trade_intent_id": intent_id,
+                "leg": "spot",
+                "market": "spot",
+                "symbol": "ORDERUSDT",
+                "side": "buy",
+                "client_order_id": "bh-ack-lost-s",
+                "exchange_order_id": None,
+                "status": "submitted",
+                "quantity": Decimal("20"),
+                "limit_price": Decimal("0.05"),
+                "filled_quantity": Decimal("0"),
+                "reduce_only": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+        ],
+    )
+    remote_order = RemoteOrder(
+        exchange_order_id="remote-ack-1",
+        client_order_id="bh-ack-lost-s",
+        market="spot",
+        symbol="ORDERUSDT",
+        side="buy",
+        status="FILLED",
+        price=Decimal("0.05"),
+        original_quantity=Decimal("20"),
+        filled_quantity=Decimal("20"),
+    )
+    remote_fill = RemoteFill(
+        exchange_trade_id="trade-ack-1",
+        exchange_order_id="remote-ack-1",
+        client_order_id="bh-ack-lost-s",
+        market="spot",
+        symbol="ORDERUSDT",
+        side="buy",
+        quantity=Decimal("20"),
+        price=Decimal("0.049"),
+        fee_amount=Decimal("0.001"),
+        fee_asset="ORDER",
+        liquidity="taker",
+        occurred_at=now,
+    )
+    client = FakeAccountClient(
+        orders={"bh-ack-lost-s": remote_order},
+        fills={"bh-ack-lost-s": [remote_fill]},
+    )
+    reconciler = ReconciliationService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    )
+
+    await reconciler.run_once()
+
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    assert stored[1][0].exchange_order_id == "remote-ack-1"
+    assert stored[1][0].status == "filled"
+    assert stored[1][0].filled_quantity == Decimal("20")
+    states = await database.reconciliation_states()
+    assert states[0].order_reconciliation_complete is True
+    assert states[0].recovered_order_count == 1
+    assert states[0].fill_reconciliation_complete is True
+    assert states[0].fill_count == 1
+    with pytest.raises(ValueError, match="client ID"):
+        await database.reconcile_remote_order(
+            order_leg_id=legs[0].id,
+            order=remote_order.model_copy(
+                update={"client_order_id": "different-client-id"}
+            ),
+        )
+    await database.close()
+
+
+async def test_reconciliation_blocks_when_submitted_order_cannot_be_found() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials = await _credentials(database)
+    intent_id = str(uuid.uuid4())
+    now = datetime(2026, 7, 26, 18, 0, tzinfo=UTC)
+    await database.create_trade_intent(
+        intent={
+            "id": intent_id,
+            "idempotency_key": str(uuid.uuid4()),
+            "request_fingerprint": "e" * 64,
+            "exchange": "binance",
+            "environment": "live",
+            "base_asset": "ORDER",
+            "action": "open",
+            "status": "executing",
+            "requested_notional": Decimal("1"),
+            "base_quantity": Decimal("20"),
+            "spot_fee_rate": Decimal("0.001"),
+            "perp_fee_rate": Decimal("0.0005"),
+            "market_observed_at": now,
+            "config_version": "f" * 64,
+            "version": 1,
+            "created_at": now,
+            "updated_at": now,
+        },
+        legs=[
+            {
+                "id": str(uuid.uuid4()),
+                "trade_intent_id": intent_id,
+                "leg": "spot",
+                "market": "spot",
+                "symbol": "ORDERUSDT",
+                "side": "buy",
+                "client_order_id": "bh-missing-s",
+                "exchange_order_id": None,
+                "status": "submitted",
+                "quantity": Decimal("20"),
+                "limit_price": Decimal("0.05"),
+                "filled_quantity": Decimal("0"),
+                "reduce_only": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+        ],
+    )
+    client = FakeAccountClient()
+    reconciler = ReconciliationService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    )
+
+    await reconciler.run_once()
+
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    assert stored[1][0].exchange_order_id is None
+    assert stored[1][0].status == "submitted"
+    states = await database.reconciliation_states()
+    assert states[0].order_reconciliation_complete is False
+    assert states[0].fill_reconciliation_complete is False
+    assert "not found by client order ID" in states[0].reason
     await database.close()
 
 

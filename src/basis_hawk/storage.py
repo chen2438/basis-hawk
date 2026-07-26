@@ -36,7 +36,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from basis_hawk.models import FundingObservation, InstrumentPair, Opportunity, ScannerSettings
 
 if TYPE_CHECKING:
-    from basis_hawk.accounts import RemoteFill
+    from basis_hawk.accounts import RemoteFill, RemoteOrder
 
 
 class Base(DeclarativeBase):
@@ -163,9 +163,14 @@ class AccountReconciliationRow(Base):
         Boolean,
         default=False,
     )
+    order_reconciliation_complete: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+    )
     open_order_count: Mapped[int] = mapped_column(Integer, default=0)
     position_count: Mapped[int] = mapped_column(Integer, default=0)
     fill_count: Mapped[int] = mapped_column(Integer, default=0)
+    recovered_order_count: Mapped[int] = mapped_column(Integer, default=0)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -394,6 +399,8 @@ class Database:
         reason: str,
         snapshot: Any | None = None,
         trading_state: Any | None = None,
+        order_reconciliation_complete: bool = False,
+        recovered_order_count: int = 0,
         fill_reconciliation_complete: bool = False,
         fill_count: int = 0,
     ) -> None:
@@ -466,10 +473,12 @@ class Database:
                     reason=reason,
                     snapshot_id=snapshot_id,
                     trading_state_complete=state_complete,
+                    order_reconciliation_complete=order_reconciliation_complete,
                     fill_reconciliation_complete=fill_reconciliation_complete,
                     open_order_count=open_order_count,
                     position_count=position_count,
                     fill_count=fill_count,
+                    recovered_order_count=recovered_order_count,
                     checked_at=checked_at,
                 )
                 session.add(row)
@@ -478,10 +487,12 @@ class Database:
                 row.reason = reason
                 row.snapshot_id = snapshot_id
                 row.trading_state_complete = state_complete
+                row.order_reconciliation_complete = order_reconciliation_complete
                 row.fill_reconciliation_complete = fill_reconciliation_complete
                 row.open_order_count = open_order_count
                 row.position_count = position_count
                 row.fill_count = fill_count
+                row.recovered_order_count = recovered_order_count
                 row.checked_at = checked_at
             await session.commit()
 
@@ -795,6 +806,71 @@ class Database:
             leg.updated_at = datetime.now(UTC)
             await session.commit()
             return len(new_rows)
+
+    async def reconcile_remote_order(
+        self,
+        *,
+        order_leg_id: str,
+        order: RemoteOrder,
+    ) -> str:
+        async with self.sessions() as session:
+            leg = await session.scalar(
+                select(OrderLegRow)
+                .where(OrderLegRow.id == order_leg_id)
+                .with_for_update()
+            )
+            if leg is None:
+                raise ValueError("order leg was not found")
+            if not order.exchange_order_id:
+                raise ValueError("remote order is missing an exchange order ID")
+            if order.client_order_id != leg.client_order_id:
+                raise ValueError(
+                    "remote order client ID does not match the local order leg"
+                )
+            if order.market != leg.market or order.symbol != leg.symbol:
+                raise ValueError("remote order does not match the local order leg")
+            if order.side != leg.side:
+                raise ValueError("remote order side does not match the local order leg")
+            if not _numeric_equal(order.original_quantity, leg.quantity):
+                raise ValueError(
+                    "remote order quantity does not match the local order leg"
+                )
+            if order.filled_quantity < 0 or order.filled_quantity > order.original_quantity:
+                raise ValueError("remote order filled quantity is invalid")
+            if order.reduce_only != leg.reduce_only:
+                raise ValueError(
+                    "remote order reduce-only flag does not match the local order leg"
+                )
+            if (
+                leg.exchange_order_id is not None
+                and leg.exchange_order_id != order.exchange_order_id
+            ):
+                raise ValueError(
+                    "remote order ID does not match the linked local order leg"
+                )
+            leg.exchange_order_id = order.exchange_order_id
+            remote_status = order.status.strip().lower()
+            if order.filled_quantity == 0 and remote_status in {
+                "cancelled",
+                "canceled",
+                "deactivated",
+                "4",
+            }:
+                leg.status = "canceled"
+            elif order.filled_quantity == 0 and remote_status in {
+                "failed",
+                "invalid",
+                "rejected",
+                "5",
+            }:
+                leg.status = "failed"
+            elif leg.status in {"submitted", "unknown"}:
+                # A query response proves exchange acceptance, not execution.
+                # Filled state remains derived from persisted trade records.
+                leg.status = "acknowledged"
+            leg.updated_at = datetime.now(UTC)
+            await session.commit()
+            return order.exchange_order_id
 
     async def list_trade_intents(self, *, limit: int = 100) -> list[TradeIntentRow]:
         async with self.sessions() as session:
