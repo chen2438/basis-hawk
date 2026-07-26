@@ -1238,8 +1238,8 @@ class Database:
             )
             if intent.environment not in {"sandbox", "live"}:
                 raise ValueError("only exchange-backed intents can be submitted")
-            if intent.action != "open":
-                raise ValueError("only live opening intents are currently supported")
+            if intent.action not in {"open", "close"}:
+                raise ValueError("unsupported live intent action")
             primary = {item.leg: item for item in legs if item.leg in {"spot", "perp"}}
             if set(primary) != {"spot", "perp"} or len(legs) != 2:
                 raise ValueError("live intent must contain exactly two primary legs")
@@ -1247,6 +1247,41 @@ class Database:
                 return intent, legs, False
             if any(item.status != "created" for item in primary.values()):
                 raise ValueError("live order legs are not ready for first submission")
+            if intent.action == "close":
+                if intent.paired_position_id is None:
+                    raise ValueError("live close intent is missing its paired position")
+                position = await session.scalar(
+                    select(PairedPositionRow)
+                    .where(PairedPositionRow.id == intent.paired_position_id)
+                    .with_for_update()
+                )
+                if (
+                    position is None
+                    or position.status != "closing"
+                    or position.closing_intent_id != intent.id
+                ):
+                    raise ValueError(
+                        "paired position is not reserved by the live close intent"
+                    )
+                spot_base = (
+                    primary["spot"].quantity
+                    * primary["spot"].base_multiplier
+                )
+                perp_base = (
+                    primary["perp"].quantity
+                    * primary["perp"].base_multiplier
+                )
+                if (
+                    not _numeric_equal(spot_base, position.quantity)
+                    or not _numeric_equal(perp_base, position.quantity)
+                    or primary["spot"].side != "sell"
+                    or primary["spot"].reduce_only
+                    or primary["perp"].side != "buy"
+                    or not primary["perp"].reduce_only
+                ):
+                    raise ValueError(
+                        "live close legs do not exactly reduce the paired position"
+                    )
             now = datetime.now(UTC)
             intent.status = "executing"
             intent.version += 1
@@ -1426,6 +1461,139 @@ class Database:
             intent.updated_at = now
             await session.commit()
             return intent, position, changed
+
+    async def settle_live_close(
+        self,
+        *,
+        intent_id: str,
+    ) -> tuple[TradeIntentRow, PairedPositionRow | None, bool] | None:
+        async with self.sessions() as session:
+            intent = await session.scalar(
+                select(TradeIntentRow)
+                .where(TradeIntentRow.id == intent_id)
+                .with_for_update()
+            )
+            if intent is None:
+                return None
+            if intent.paired_position_id is None:
+                return intent, None, False
+            position = await session.scalar(
+                select(PairedPositionRow)
+                .where(PairedPositionRow.id == intent.paired_position_id)
+                .with_for_update()
+            )
+            if position is None:
+                return intent, None, False
+            if intent.status in {"closed", "failed"}:
+                return intent, position, False
+            if (
+                intent.environment not in {"sandbox", "live"}
+                or intent.action != "close"
+                or intent.status != "executing"
+                or position.status != "closing"
+                or position.closing_intent_id != intent.id
+            ):
+                return intent, position, False
+            legs = list(
+                await session.scalars(
+                    select(OrderLegRow)
+                    .where(OrderLegRow.trade_intent_id == intent.id)
+                    .order_by(OrderLegRow.leg)
+                    .with_for_update()
+                )
+            )
+            primary = {
+                item.leg: item
+                for item in legs
+                if item.leg in {"spot", "perp"}
+            }
+            if set(primary) != {"spot", "perp"} or len(legs) != 2:
+                raise ValueError("live intent must contain exactly two primary legs")
+            terminal = {"filled", "canceled", "failed"}
+            if any(item.status not in terminal for item in primary.values()):
+                return intent, position, False
+            spot_base = (
+                primary["spot"].filled_quantity
+                * primary["spot"].base_multiplier
+            )
+            perp_base = (
+                primary["perp"].filled_quantity
+                * primary["perp"].base_multiplier
+            )
+            now = datetime.now(UTC)
+            if spot_base == 0 and perp_base == 0:
+                intent.status = "failed"
+                position.status = "open"
+                position.closing_intent_id = None
+            elif (
+                not _numeric_equal(spot_base, perp_base)
+                or spot_base > position.quantity
+                or primary["spot"].average_price is None
+                or primary["perp"].average_price is None
+            ):
+                intent.status = "manual_review"
+                await self._pause_live_settlement(session, now)
+            else:
+                fill_rows = list(
+                    await session.scalars(
+                        select(FillRow)
+                        .join(
+                            OrderLegRow,
+                            FillRow.order_leg_id == OrderLegRow.id,
+                        )
+                        .where(OrderLegRow.trade_intent_id == intent.id)
+                    )
+                )
+                try:
+                    closing_fees = _live_fees_usdt(
+                        fill_rows,
+                        intent.base_asset,
+                    )
+                except ValueError:
+                    intent.status = "manual_review"
+                    await self._pause_live_settlement(session, now)
+                else:
+                    opening_fee_allocation = (
+                        position.remaining_opening_fees_usdt
+                        if _numeric_equal(spot_base, position.quantity)
+                        else (
+                            position.remaining_opening_fees_usdt
+                            * spot_base
+                            / position.quantity
+                        )
+                    )
+                    gross_pnl = (
+                        (
+                            primary["spot"].average_price
+                            - position.spot_entry_price
+                        )
+                        + (
+                            position.perp_entry_price
+                            - primary["perp"].average_price
+                        )
+                    ) * spot_base
+                    position.closing_fees_usdt = (
+                        position.closing_fees_usdt or Decimal("0")
+                    ) + closing_fees
+                    position.realized_pnl_usdt = (
+                        position.realized_pnl_usdt or Decimal("0")
+                    ) + gross_pnl - opening_fee_allocation - closing_fees
+                    position.remaining_opening_fees_usdt -= (
+                        opening_fee_allocation
+                    )
+                    position.quantity -= spot_base
+                    intent.status = "closed"
+                    if _numeric_equal(position.quantity, Decimal("0")):
+                        position.quantity = Decimal("0")
+                        position.status = "closed"
+                        position.closed_at = now
+                    else:
+                        position.status = "open"
+                        position.closing_intent_id = None
+            intent.version += 1
+            intent.updated_at = now
+            await session.commit()
+            return intent, position, True
 
     @staticmethod
     async def _pause_live_settlement(

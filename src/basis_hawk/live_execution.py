@@ -12,6 +12,7 @@ from basis_hawk.accounts import (
     LimitIocOrder,
     PositionMode,
     PrivateAccountClient,
+    RemotePosition,
     create_account_client,
 )
 from basis_hawk.credentials import (
@@ -61,7 +62,7 @@ class LiveExecutionService:
             item
             for item in recoverable
             if item.environment in {"sandbox", "live"}
-            and item.action == "open"
+            and item.action in {"open", "close"}
             and item.status == "planned"
         ]
         submitted = 0
@@ -84,7 +85,7 @@ class LiveExecutionService:
                 break
             submitted += int(did_submit)
             uncertain += uncertain_legs
-            if uncertain_legs:
+            if did_submit or uncertain_legs:
                 break
         return LiveExecutionResult(
             examined=examined,
@@ -115,12 +116,10 @@ class LiveExecutionService:
                 raise RuntimeError("two-leg trade permission is not confirmed")
             if snapshot.position_mode == PositionMode.UNKNOWN:
                 raise RuntimeError("perpetual position mode is unknown")
-            if (
-                not remote_state.complete
-                or remote_state.open_orders
-                or remote_state.positions
-            ):
-                raise RuntimeError("remote account state is not empty and complete")
+            if not remote_state.complete:
+                raise RuntimeError("remote account state is incomplete")
+            if remote_state.open_orders:
+                raise RuntimeError("remote account has open orders")
             current = await self.database.trade_intent(intent.id)
             if current is None:
                 raise RuntimeError("trade intent disappeared before submission")
@@ -128,12 +127,21 @@ class LiveExecutionService:
             primary = {item.leg: item for item in legs if item.leg in {"spot", "perp"}}
             if set(primary) != {"spot", "perp"}:
                 raise RuntimeError("trade intent does not contain two primary legs")
-            self._validate_balance(snapshot, intent, primary)
-            await client.configure_perp(
-                symbol=primary["perp"].symbol,
-                leverage=intent.leverage,
-                position_mode=snapshot.position_mode,
-            )
+            if intent.action == "open":
+                if remote_state.positions:
+                    raise RuntimeError("remote account has an existing position")
+                self._validate_balance(snapshot, intent, primary)
+                await client.configure_perp(
+                    symbol=primary["perp"].symbol,
+                    leverage=intent.leverage,
+                    position_mode=snapshot.position_mode,
+                )
+            else:
+                await self._validate_close_state(
+                    intent,
+                    primary,
+                    remote_state.positions,
+                )
             prepared = await self.database.prepare_live_submission(
                 intent_id=intent.id
             )
@@ -210,3 +218,92 @@ class LiveExecutionService:
             or snapshot.perp_usdt_available < perp_required
         ):
             raise RuntimeError("spot or perpetual USDT balance is insufficient")
+
+    async def _validate_close_state(
+        self,
+        intent: TradeIntentRow,
+        primary: dict[str, OrderLegRow],
+        remote_positions: list[RemotePosition],
+    ) -> None:
+        if intent.paired_position_id is None:
+            raise RuntimeError("live close intent has no paired position")
+        position = await self.database.paired_position(
+            intent.paired_position_id
+        )
+        if (
+            position is None
+            or position.status != "closing"
+            or position.closing_intent_id != intent.id
+        ):
+            raise RuntimeError("paired position is not reserved for closing")
+        spot_base = (
+            primary["spot"].quantity * primary["spot"].base_multiplier
+        )
+        perp_base = (
+            primary["perp"].quantity * primary["perp"].base_multiplier
+        )
+        if (
+            not _decimal_equal(spot_base, position.quantity)
+            or not _decimal_equal(perp_base, position.quantity)
+            or primary["spot"].side != "sell"
+            or primary["spot"].reduce_only
+            or primary["perp"].side != "buy"
+            or not primary["perp"].reduce_only
+        ):
+            raise RuntimeError(
+                "live close legs do not exactly reduce the paired position"
+            )
+        expected_rows = await self.database.paired_perp_exposures(
+            exchange=intent.exchange,
+            environment=intent.environment,
+        )
+        expected: dict[str, tuple[Decimal, int]] = {}
+        for symbol, quantity, leverage in expected_rows:
+            previous = expected.get(symbol)
+            if previous is not None and previous[1] != leverage:
+                raise RuntimeError(
+                    "local paired positions use conflicting leverage"
+                )
+            expected[symbol] = (
+                (previous[0] if previous is not None else Decimal("0"))
+                + quantity,
+                leverage,
+            )
+        remote: dict[str, tuple[Decimal, Decimal, bool | None]] = {}
+        for item in remote_positions:
+            if item.side != "short":
+                raise RuntimeError(
+                    "remote position is not a strategy short position"
+                )
+            previous = remote.get(item.symbol)
+            if previous is not None and previous[1] != item.leverage:
+                raise RuntimeError(
+                    "remote short positions use conflicting leverage"
+                )
+            remote[item.symbol] = (
+                (previous[0] if previous is not None else Decimal("0"))
+                + item.quantity,
+                item.leverage,
+                (
+                    item.isolated
+                    if previous is None
+                    else previous[2] is True and item.isolated is True
+                ),
+            )
+        for symbol, (quantity, leverage) in expected.items():
+            actual = remote.pop(symbol, None)
+            if (
+                actual is None
+                or not _decimal_equal(actual[0], quantity)
+                or actual[1] != Decimal(leverage)
+                or actual[2] is not True
+            ):
+                raise RuntimeError(
+                    "remote short position conflicts with the local pair"
+                )
+        if remote:
+            raise RuntimeError("remote position has no matching local pair")
+
+
+def _decimal_equal(left: Decimal, right: Decimal) -> bool:
+    return abs(left - right) <= Decimal("0.000000000000001")

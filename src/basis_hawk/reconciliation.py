@@ -208,15 +208,19 @@ class ReconciliationService:
                         if (
                             intent.exchange == summary.exchange.value
                             and intent.environment == summary.environment.value
-                            and intent.action == "open"
                             and intent.status == "executing"
                             and len(intent_legs) == 2
                             and {leg.leg for leg in intent_legs}
                             == {"spot", "perp"}
                         ):
-                            await self.database.settle_live_open(
-                                intent_id=intent.id
-                            )
+                            if intent.action == "open":
+                                await self.database.settle_live_open(
+                                    intent_id=intent.id
+                                )
+                            elif intent.action == "close":
+                                await self.database.settle_live_close(
+                                    intent_id=intent.id
+                                )
                 if not trading_state.complete:
                     reasons.append(
                         trading_state.incomplete_reason or "remote trading state is incomplete"

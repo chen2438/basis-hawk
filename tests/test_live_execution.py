@@ -8,6 +8,7 @@ from basis_hawk.accounts import (
     OrderSubmission,
     PerpConfiguration,
     PositionMode,
+    RemotePosition,
     RemoteTradingState,
 )
 from basis_hawk.credentials import (
@@ -24,7 +25,7 @@ from basis_hawk.models import (
     Quality,
     ScannerSettings,
 )
-from basis_hawk.storage import Database
+from basis_hawk.storage import Database, PairedPositionRow
 from basis_hawk.trading import TradeLedger
 
 
@@ -81,9 +82,11 @@ class FakeLiveAccountClient:
         database: Database,
         *,
         fail_market: str | None = None,
+        positions: list[RemotePosition] | None = None,
     ) -> None:
         self.database = database
         self.fail_market = fail_market
+        self.positions = positions or []
         self.placed: list[LimitIocOrder] = []
         self.configured: list[tuple[str, int, PositionMode]] = []
         self.closed = False
@@ -108,7 +111,7 @@ class FakeLiveAccountClient:
             environment=ExchangeEnvironment.LIVE,
             observed_at=datetime.now(UTC),
             open_orders=[],
-            positions=[],
+            positions=self.positions,
             complete=True,
         )
 
@@ -129,7 +132,10 @@ class FakeLiveAccountClient:
 
     async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
         recoverable = await self.database.recoverable_trade_intents()
-        current = await self.database.trade_intent(recoverable[0].id)
+        executing = next(
+            item for item in recoverable if item.status == "executing"
+        )
+        current = await self.database.trade_intent(executing.id)
         assert current is not None
         assert current[0].status == "executing"
         assert {item.status for item in current[1]} == {"submitted"}
@@ -177,6 +183,45 @@ async def _planned_live_intent(
     return credentials, intent.id
 
 
+async def _planned_live_close(
+    database: Database,
+) -> tuple[CredentialService, str, str]:
+    credentials, opening_intent_id = await _planned_live_intent(database)
+    opening = await database.trade_intent(opening_intent_id)
+    assert opening is not None
+    now = datetime.now(UTC)
+    position = PairedPositionRow(
+        id=str(uuid.uuid4()),
+        opening_intent_id=opening_intent_id,
+        exchange=Exchange.OKX.value,
+        environment=ExchangeEnvironment.LIVE.value,
+        base_asset="ORDER",
+        initial_quantity=opening[0].base_quantity,
+        quantity=opening[0].base_quantity,
+        spot_entry_price=Decimal("0.05"),
+        perp_entry_price=Decimal("0.051"),
+        opening_fees_usdt=Decimal("0.1"),
+        remaining_opening_fees_usdt=Decimal("0.1"),
+        status="open",
+        opened_at=now,
+    )
+    async with database.sessions() as session:
+        stored_opening = await session.get(type(opening[0]), opening_intent_id)
+        assert stored_opening is not None
+        stored_opening.status = "hedged"
+        session.add(position)
+        await session.commit()
+    closing, _ = await TradeLedger(database).plan_live_close(
+        position_id=position.id,
+        opportunity=_opportunity(),
+        pair=_pair(),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+        environment=ExchangeEnvironment.LIVE,
+    )
+    return credentials, closing.id, position.id
+
+
 async def test_live_executor_persists_both_submissions_before_parallel_orders() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()
@@ -209,6 +254,89 @@ async def test_live_executor_persists_both_submissions_before_parallel_orders() 
         ("ORDER-USDT-SWAP", 2, PositionMode.ONE_WAY)
     ]
     assert client.closed is True
+    await database.close()
+
+
+async def test_live_executor_submits_exact_reduce_only_close() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials, intent_id, position_id = await _planned_live_close(database)
+    await database.set_execution_control(state="ready", reason="test")
+    client = FakeLiveAccountClient(
+        database,
+        positions=[
+            RemotePosition(
+                symbol="ORDER-USDT-SWAP",
+                side="short",
+                quantity=Decimal("200"),
+                entry_price=Decimal("0.051"),
+                mark_price=Decimal("0.05"),
+                liquidation_price=Decimal("0.09"),
+                leverage=Decimal("2"),
+                isolated=True,
+            )
+        ],
+    )
+    executor = LiveExecutionService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    )
+
+    result = await executor.run_once()
+
+    assert result.submitted == 1
+    assert result.preflight_failed == 0
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    assert stored[0].status == "executing"
+    orders = {item.market: item for item in client.placed}
+    assert orders["spot"].side == "sell"
+    assert orders["spot"].reduce_only is False
+    assert orders["perp"].side == "buy"
+    assert orders["perp"].reduce_only is True
+    assert orders["perp"].quantity == Decimal("200")
+    assert client.configured == []
+    position = await database.paired_position(position_id)
+    assert position is not None and position.status == "closing"
+    await database.close()
+
+
+async def test_live_executor_rejects_close_when_remote_position_drifted() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials, intent_id, _ = await _planned_live_close(database)
+    await database.set_execution_control(state="ready", reason="test")
+    client = FakeLiveAccountClient(
+        database,
+        positions=[
+            RemotePosition(
+                symbol="ORDER-USDT-SWAP",
+                side="short",
+                quantity=Decimal("199"),
+                entry_price=Decimal("0.051"),
+                mark_price=Decimal("0.05"),
+                liquidation_price=Decimal("0.09"),
+                leverage=Decimal("2"),
+                isolated=True,
+            )
+        ],
+    )
+    executor = LiveExecutionService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    )
+
+    result = await executor.run_once()
+
+    assert result.submitted == 0
+    assert result.preflight_failed == 1
+    assert client.placed == []
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None and stored[0].status == "planned"
+    control = await database.execution_control()
+    assert control is not None and control.state == "paused"
     await database.close()
 
 
