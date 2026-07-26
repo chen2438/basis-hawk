@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,6 +19,16 @@ class AppConfig(BaseSettings):
     secure_cookies: bool = True
     session_hours: int = Field(default=12, ge=1, le=168)
     credential_master_key: SecretStr | None = None
+    telegram_bot_token: SecretStr | None = None
+    telegram_chat_id: str | None = None
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_security: Literal["starttls", "smtps"] = "starttls"
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_from: str | None = None
+    smtp_to: str | None = None
+    notification_batch_size: int = Field(default=20, ge=1, le=100)
 
 
 @lru_cache

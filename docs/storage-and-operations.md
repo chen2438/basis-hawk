@@ -146,6 +146,24 @@ MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
 最高 1 小时的指数退避重试，默认第 8 次失败进入 dead。数据库仅保存预定义的小写错误码，禁止存储
 可能包含 Bot token、SMTP 凭据、请求 URL 或远端响应正文的异常字符串。邮件和 Telegram 互不阻塞，
 通知失败也不得回滚或阻塞交易状态机。
+常驻 worker 与对账、私有流任务并行运行通知投递器；`worker --once` 也会在对账后消费一批。Telegram
+使用官方 `sendMessage` HTTPS 接口，消息为不解析标记的受保护纯文本且限制为 4096 字符；Bot token
+只保留在进程内，请求异常及完整 URL 不进入日志或数据库。SMTP 支持 `starttls` 和连接即 TLS 的
+`smtps`，使用系统证书校验，阻塞 SMTP 客户端通过工作线程执行。配置项如下；某一通道的必要字段未完整
+提供时该通道不创建发送器，已入队记录会以 `channel_unconfigured` 脱敏失败码退避，交易循环不受影响：
+
+```text
+BASIS_HAWK_TELEGRAM_BOT_TOKEN
+BASIS_HAWK_TELEGRAM_CHAT_ID
+BASIS_HAWK_SMTP_HOST
+BASIS_HAWK_SMTP_PORT
+BASIS_HAWK_SMTP_SECURITY=starttls|smtps
+BASIS_HAWK_SMTP_USERNAME
+BASIS_HAWK_SMTP_PASSWORD
+BASIS_HAWK_SMTP_FROM
+BASIS_HAWK_SMTP_TO=owner@example.com,backup@example.com
+BASIS_HAWK_NOTIFICATION_BATCH_SIZE
+```
 真实意图额外固化 1–10 倍请求杠杆，旧记录迁移为安全默认值 1；
 `order_legs` 同一意图固定一条现货腿和一条永续腿，并在提交交易所前生成唯一客户端订单 ID；每条腿还
 保存严格为正的 `base_multiplier`，使交易所原生数量及成交量可以无歧义换算成基础币。已有纸面订单腿
