@@ -13,6 +13,8 @@ describe("Basis Hawk dashboard", () => {
         : url.includes("opportunities?") ? { items: [], sequence: 0 }
         : url.includes("exchanges/status") ? { items: [] }
         : url.includes("system/execution") ? { state: "blocked", reason: "worker pending", updated_at: null, accounts: [] }
+        : url.includes("operations/audit") ? { items: [] }
+        : url.includes("operations/notifications") ? { items: [] }
         : url.includes("accounts/credentials") ? { items: [] }
         : url.includes("trades/positions") ? { items: [] }
         : url.includes("transfers") ? { items: [] }
@@ -83,5 +85,16 @@ describe("Basis Hawk dashboard", () => {
     const saveCall = vi.mocked(fetch).mock.calls.find(([url]) => url === "/api/automation/config");
     expect(JSON.parse(String((saveCall?.[1] as RequestInit).body)).enabled_exchanges).toEqual(["binance"]);
     confirmation.mockRestore();
+  });
+
+  it("shows redacted audit and notification history workspaces", async () => {
+    render(<App />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "运营控制台" }));
+    await user.click(await screen.findByRole("button", { name: "审计与通知" }));
+    expect(screen.getByText("管理员审计")).toBeTruthy();
+    expect(screen.getByText("通知投递")).toBeTruthy();
+    expect(screen.getByText(/敏感键由服务端递归脱敏/)).toBeTruthy();
+    expect(screen.getByText(/不返回消息正文或去重键/)).toBeTruthy();
   });
 });

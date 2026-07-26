@@ -2,6 +2,7 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import type {
   AccountSnapshot,
+  AuditEvent,
   AutoStrategyConfig,
   AutomationStatus,
   CredentialSummary,
@@ -11,6 +12,7 @@ import type {
   InternalTransfer,
   LiveClosePreview,
   LiveOpenPreview,
+  NotificationHistoryItem,
   Opportunity,
   PairedPosition,
 } from "./types";
@@ -24,7 +26,7 @@ const exchangeNames: Record<Exchange, string> = {
   gate: "Gate",
 };
 const exchanges = Object.keys(exchangeNames) as Exchange[];
-type Tab = "system" | "accounts" | "trades" | "positions" | "transfers" | "automation";
+type Tab = "system" | "accounts" | "trades" | "positions" | "transfers" | "automation" | "history";
 
 const time = (value: string | null) =>
   value ? new Date(value).toLocaleString("zh-CN") : "—";
@@ -44,24 +46,38 @@ export function OperationsPanel({
   const [positions, setPositions] = useState<PairedPosition[]>([]);
   const [transfers, setTransfers] = useState<InternalTransfer[]>([]);
   const [automation, setAutomation] = useState<AutomationStatus | null>(null);
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [notifications, setNotifications] = useState<NotificationHistoryItem[]>([]);
   const [snapshots, setSnapshots] = useState<Record<string, AccountSnapshot>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    const [executionValue, credentialValue, positionValue, transferValue, automationValue] =
+    const [
+      executionValue,
+      credentialValue,
+      positionValue,
+      transferValue,
+      automationValue,
+      auditValue,
+      notificationValue,
+    ] =
       await Promise.all([
         api.execution(),
         api.credentials(),
         api.positions(),
         api.transfers(),
         api.automation(),
+        api.auditHistory(),
+        api.notificationHistory(),
       ]);
     setExecution(executionValue);
     setCredentials(credentialValue.items);
     setPositions(positionValue.items);
     setTransfers(transferValue.items);
     setAutomation(automationValue);
+    setAuditEvents(auditValue.items);
+    setNotifications(notificationValue.items);
   }, []);
 
   useEffect(() => {
@@ -99,6 +115,7 @@ export function OperationsPanel({
           ["positions", "配对持仓"],
           ["transfers", "内部划转"],
           ["automation", "自动策略"],
+          ["history", "审计与通知"],
         ] as [Tab, string][]).map(([key, label]) =>
           <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{label}</button>
         )}
@@ -132,6 +149,10 @@ export function OperationsPanel({
           execution={execution}
           busy={busy}
           action={action}
+        />}
+        {tab === "history" && <HistoryView
+          auditEvents={auditEvents}
+          notifications={notifications}
         />}
       </div>
     </section>
@@ -617,4 +638,35 @@ function strategyForm(value?: AutoStrategyConfig): AutoStrategyConfig {
     take_profit_usdt: "25",
     stop_loss_usdt: "20",
   };
+}
+
+function HistoryView({
+  auditEvents,
+  notifications,
+}: {
+  auditEvents: AuditEvent[];
+  notifications: NotificationHistoryItem[];
+}) {
+  return <div className="history-grid">
+    <section>
+      <header><div><h3>管理员审计</h3><p>最新 100 条；敏感键由服务端递归脱敏。</p></div><strong>{auditEvents.length}</strong></header>
+      <div className="ops-table-wrap"><table><thead><tr><th>时间</th><th>事件</th><th>操作者</th><th>安全详情</th></tr></thead>
+        <tbody>{auditEvents.map((item) => <tr key={item.id}>
+          <td>{time(item.occurred_at)}</td><td><code>{item.event_type}</code></td><td>{item.actor}</td>
+          <td><code className="details-json">{JSON.stringify(item.details)}</code></td>
+        </tr>)}</tbody>
+      </table>{!auditEvents.length && <div className="empty">尚无审计事件</div>}</div>
+    </section>
+    <section>
+      <header><div><h3>通知投递</h3><p>只展示投递元数据，不返回消息正文或去重键。</p></div><strong>{notifications.length}</strong></header>
+      <div className="ops-table-wrap"><table><thead><tr><th>时间</th><th>通道</th><th>主题</th><th>级别</th><th>状态</th><th>尝试</th><th>错误码</th></tr></thead>
+        <tbody>{notifications.map((item) => <tr key={item.id}>
+          <td>{time(item.created_at)}</td><td>{item.channel}</td><td>{item.subject}</td>
+          <td><span className={`status-pill ${item.severity}`}>{item.severity}</span></td>
+          <td><span className={`status-pill ${item.status}`}>{item.status}</span></td><td>{item.attempts}</td>
+          <td>{item.last_error_code ?? "—"}</td>
+        </tr>)}</tbody>
+      </table>{!notifications.length && <div className="empty">尚无通知投递记录</div>}</div>
+    </section>
+  </div>;
 }

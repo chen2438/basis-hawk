@@ -445,6 +445,16 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
 .exchange-checks { display: flex; grid-column: span 3; gap: 14px; min-height: 37px; align-items: center; }
 .exchange-checks label { color: #344e5f; font-size: 10px; white-space: nowrap; }
 .exchange-checks input { display: inline-block; width: auto; margin: 0 5px 0 0; vertical-align: middle; }
+.history-grid { display: grid; gap: 18px; }
+.history-grid > section > header { display: flex; padding: 13px 16px; background: #fff; border: 1px solid var(--line); border-bottom: 0; border-radius: 9px 9px 0 0; align-items: center; justify-content: space-between; }
+.history-grid h3, .history-grid p { margin: 0; }
+.history-grid h3 { color: #263d50; font-size: 13px; }
+.history-grid p { margin-top: 4px; color: var(--muted); font-size: 9px; }
+.history-grid > section > header > strong { color: var(--accent-dark); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.history-grid .ops-table-wrap { max-height: 300px; border-radius: 0 0 9px 9px; }
+.details-json { display: block; max-width: 520px; overflow: hidden; color: #486475; text-overflow: ellipsis; white-space: nowrap; }
+.status-pill.critical, .status-pill.dead { color: #a13c4c; background: #fbe5e8; }
+.status-pill.warning, .status-pill.retry { color: #8a6118; background: #fff2ce; }
 
 @media (max-width: 1250px) {
   .workspace { grid-template-columns: 1fr 330px; }

@@ -175,6 +175,29 @@ export interface AutomationStatus {
   latest_strategy: StrategySummary | null;
 }
 
+export interface AuditEvent {
+  id: string;
+  occurred_at: string;
+  event_type: string;
+  actor: string;
+  details: Record<string, unknown>;
+}
+
+export interface NotificationHistoryItem {
+  id: string;
+  event_type: string;
+  severity: "info" | "warning" | "critical";
+  channel: "telegram" | "email";
+  subject: string;
+  status: "pending" | "sending" | "retry" | "sent" | "dead";
+  attempts: number;
+  next_attempt_at: string;
+  last_error_code: string | null;
+  created_at: string;
+  updated_at: string;
+  sent_at: string | null;
+}
+
 export interface LiveOpenPreview {
   exchange: Exchange;
   environment: Environment;

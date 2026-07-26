@@ -236,6 +236,15 @@ class NotificationOutboxItem:
 
 
 @dataclass(frozen=True)
+class AuditEventItem:
+    id: str
+    occurred_at: datetime
+    event_type: str
+    actor: str
+    details: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class DailyNotificationSummary:
     period_start: datetime
     period_end: datetime
@@ -3439,6 +3448,38 @@ class Database:
             )
             await session.commit()
 
+    async def audit_events(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        event_type: str | None = None,
+    ) -> list[AuditEventItem]:
+        if limit < 1 or limit > 200:
+            raise ValueError("audit list limit must be between 1 and 200")
+        if offset < 0 or offset > 10000:
+            raise ValueError("audit list offset must be between 0 and 10000")
+        statement = select(AuditEventRow)
+        if event_type:
+            statement = statement.where(AuditEventRow.event_type == event_type)
+        statement = (
+            statement.order_by(AuditEventRow.occurred_at.desc(), AuditEventRow.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        async with self.sessions() as session:
+            rows = list(await session.scalars(statement))
+            return [
+                AuditEventItem(
+                    id=row.id,
+                    occurred_at=_utc(row.occurred_at),
+                    event_type=row.event_type,
+                    actor=row.actor,
+                    details=json.loads(row.details),
+                )
+                for row in rows
+            ]
+
     async def enqueue_notification(
         self,
         *,
@@ -3609,17 +3650,33 @@ class Database:
         self,
         *,
         limit: int = 100,
+        offset: int = 0,
+        status: str | None = None,
+        channel: str | None = None,
     ) -> list[NotificationOutboxItem]:
         if limit < 1 or limit > 500:
             raise ValueError("notification list limit must be between 1 and 500")
-        async with self.sessions() as session:
-            rows = list(
-                await session.scalars(
-                    select(NotificationOutboxRow)
-                    .order_by(NotificationOutboxRow.created_at.desc())
-                    .limit(limit)
-                )
+        if offset < 0 or offset > 10000:
+            raise ValueError("notification list offset must be between 0 and 10000")
+        if status is not None and status not in {"pending", "sending", "retry", "sent", "dead"}:
+            raise ValueError("unsupported notification status")
+        if channel is not None and channel not in {"telegram", "email"}:
+            raise ValueError("unsupported notification channel")
+        statement = select(NotificationOutboxRow)
+        if status is not None:
+            statement = statement.where(NotificationOutboxRow.status == status)
+        if channel is not None:
+            statement = statement.where(NotificationOutboxRow.channel == channel)
+        statement = (
+            statement.order_by(
+                NotificationOutboxRow.created_at.desc(),
+                NotificationOutboxRow.id.desc(),
             )
+            .offset(offset)
+            .limit(limit)
+        )
+        async with self.sessions() as session:
+            rows = list(await session.scalars(statement))
             return [_notification_item(row) for row in rows]
 
     async def project_notification(

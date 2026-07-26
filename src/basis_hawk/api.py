@@ -135,6 +135,27 @@ class InternalTransferConfirmRequest(BaseModel):
     confirmed: Literal[True]
 
 
+def safe_audit_details(value: object, *, key: str = "") -> object:
+    lowered = key.lower()
+    if any(
+        marker in lowered
+        for marker in ("secret", "password", "token", "signature", "cipher", "nonce", "api_key")
+    ):
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {
+            str(child_key)[:100]: safe_audit_details(child_value, key=str(child_key))
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list):
+        return [safe_audit_details(item, key=key) for item in value[:50]]
+    if isinstance(value, str):
+        return value[:300]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:300]
+
+
 def create_app(
     service: ScannerService | None = None,
     *,
@@ -558,6 +579,67 @@ def create_app(
         return {
             "state": "reconciling",
             "reason": "worker must pass a fresh reconciliation before ready",
+        }
+
+    @app.get("/api/operations/audit")
+    async def audit_history(
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+        offset: Annotated[int, Query(ge=0, le=10000)] = 0,
+        event_type: Annotated[str | None, Query(max_length=100)] = None,
+    ) -> dict[str, object]:
+        rows = await scanner.database.audit_events(
+            limit=limit,
+            offset=offset,
+            event_type=event_type,
+        )
+        return {
+            "items": [
+                {
+                    "id": row.id,
+                    "occurred_at": row.occurred_at.isoformat(),
+                    "event_type": row.event_type,
+                    "actor": row.actor,
+                    "details": safe_audit_details(row.details),
+                }
+                for row in rows
+            ],
+            "limit": limit,
+            "offset": offset,
+        }
+
+    @app.get("/api/operations/notifications")
+    async def notification_history(
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+        offset: Annotated[int, Query(ge=0, le=10000)] = 0,
+        status: Literal["pending", "sending", "retry", "sent", "dead"] | None = None,
+        channel: Literal["telegram", "email"] | None = None,
+    ) -> dict[str, object]:
+        rows = await scanner.database.notification_outbox(
+            limit=limit,
+            offset=offset,
+            status=status,
+            channel=channel,
+        )
+        return {
+            "items": [
+                {
+                    "id": row.id,
+                    "event_type": row.event_type,
+                    "severity": row.severity,
+                    "channel": row.channel,
+                    "subject": row.subject,
+                    "status": row.status,
+                    "attempts": row.attempts,
+                    "next_attempt_at": row.next_attempt_at.isoformat(),
+                    "last_error_code": row.last_error_code,
+                    "created_at": row.created_at.isoformat(),
+                    "updated_at": row.updated_at.isoformat(),
+                    "sent_at": row.sent_at.isoformat() if row.sent_at else None,
+                }
+                for row in rows
+            ],
+            "limit": limit,
+            "offset": offset,
         }
 
     @app.get("/api/transfers")

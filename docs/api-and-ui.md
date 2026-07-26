@@ -19,7 +19,8 @@
 平仓和紧急平仓生成 15 秒票据，展示双腿保护价/数量、资金需求、费用、基差与预计盈亏，并在实盘确认
 前醒目标记；确认只持久化 UUID 幂等意图，浏览器不直接向交易所发单。自动策略编辑器覆盖后端全部
 必填风控参数，保存仅创建不可变新版本；启用最新版本和恢复原生效版本是两个独立动作，且都要求全局
-执行 ready。审计和通知历史仍在后续前端阶段。
+执行 ready。审计与通知页分别展示最新 100 条管理员动作和投递状态；审计详情由服务端递归脱敏，
+通知不返回正文或去重键。
 
 交易所凭据接口为：
 
@@ -61,6 +62,11 @@
   所有账户的远端活动订单，已对冲仓位保持不动。
 - `POST /api/system/execution/resume`：要求 `confirmed=true`，只把状态改为 `reconciling`；不能由
   HTTP 请求直接宣称 `ready`，必须等待 worker 完成全量安全对账。
+- `GET /api/operations/audit`：按 `limit`/`offset` 读取不可修改的管理员审计，可用完整
+  `event_type` 过滤；响应中的敏感键递归替换为 `[redacted]`，长字符串受限。
+- `GET /api/operations/notifications`：按 `limit`/`offset` 读取投递历史，可按 `status` 和
+  `channel` 过滤；只返回事件类型、主题、级别、通道、尝试次数、时间和脱敏错误码，不返回消息正文
+  或内部去重键。
 - `GET /api/transfers`：返回最近内部划转及提交前/预期余额、远端 ID、状态和脱敏错误码；金额均为
   十进制字符串。
 - `POST /api/transfers`：仅允许 USDT 现货↔USDT 永续，要求 `confirmed=true` 和 UUID

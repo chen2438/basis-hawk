@@ -1,5 +1,6 @@
 import type {
   AccountSnapshot,
+  AuditEvent,
   AutoStrategyConfig,
   AutomationStatus,
   CredentialSummary,
@@ -10,6 +11,7 @@ import type {
   InternalTransfer,
   LiveClosePreview,
   LiveOpenPreview,
+  NotificationHistoryItem,
   Opportunity,
   PairedPosition,
   Settings,
@@ -62,6 +64,9 @@ export const api = {
   history: (item: Opportunity, range: string) =>
     request<{ items: Opportunity[] }>(`/api/opportunities/${item.exchange}/${item.base_asset}/history?range=${range}`),
   execution: () => request<ExecutionStatus>("/api/system/execution"),
+  auditHistory: () => request<{ items: AuditEvent[] }>("/api/operations/audit?limit=100"),
+  notificationHistory: () =>
+    request<{ items: NotificationHistoryItem[] }>("/api/operations/notifications?limit=100"),
   pauseExecution: (reason: string) => request<ExecutionStatus>("/api/system/execution/pause", {
     method: "POST",
     body: JSON.stringify({ confirmed: true, reason }),
