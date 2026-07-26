@@ -1,8 +1,23 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+from pydantic import ValidationError
+
 from basis_hawk.models import Exchange, FundingObservation, ScannerSettings
 from basis_hawk.storage import Database
+
+
+async def test_default_settings_scan_up_to_500_symbols() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    assert (await database.load_settings()).universe_size == 500
+    await database.close()
+
+
+def test_settings_reject_more_than_500_symbols() -> None:
+    with pytest.raises(ValidationError):
+        ScannerSettings(universe_size=501)
 
 
 async def test_settings_and_funding_round_trip() -> None:

@@ -80,7 +80,7 @@ DEFAULT_FEES: dict[Exchange, FeeRate] = {
 
 
 class ScannerSettings(BaseModel):
-    universe_size: int = Field(default=100, ge=10, le=300)
+    universe_size: int = Field(default=500, ge=10, le=500)
     minimum_quote_volume: Decimal = Field(default=Decimal("1000000"), ge=0)
     holding_period_days: int = Field(default=30, ge=1, le=365)
     retention_days: int = Field(default=30, ge=1, le=365)
