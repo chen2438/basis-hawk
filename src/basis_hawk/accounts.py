@@ -1621,6 +1621,9 @@ class BitgetAccountClient(PrivateAccountClient):
         self._account_generation = "classic"
         return "classic"
 
+    async def account_generation(self) -> Literal["classic", "uta"]:
+        return await self._detect_account_generation()
+
     async def _settings(self, *, refresh: bool = False) -> dict[str, Any]:
         if not refresh and self._uta_settings is not None:
             return self._uta_settings

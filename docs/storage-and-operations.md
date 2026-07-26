@@ -69,7 +69,12 @@ Bybit 使用生产或测试网 V5 私有 WebSocket，以 `GET/realtime + expires
 认证成功后一次订阅全品类 `order`、`execution`、`position` 和 `wallet`。订单、独立成交及仓位主题
 分别满足三类健康条件，钱包主题提供账户余额变化；整个订阅请求明确成功后才登记就绪。空闲连接发送
 Bybit 应用层 JSON `ping` 并等待读循环收到 `pong`，任一失败响应或连接错误都会触发断线阻断。常驻
-worker 已装配 Bybit；Bitget、Gate 和 MEXC 仍保持私有流阻断。
+worker 已装配 Bybit。
+Bitget 私有流连接前复用交易适配器的只读账户代际探测：UTA 使用 V3 域名及 `UTA` 的 `order`、
+`fill`、`position`、`account` 主题；Classic 使用 V2 域名并分别订阅现货/USDT 永续订单与成交、
+USDT 永续仓位及两类账户频道。模拟盘使用对应 `wspap` V2/V3 域名。所有实际请求频道逐项确认后才
+登记就绪，文本 `ping`/`pong` 用于空闲保活；代际不明、升级/切换中、登录或任一订阅失败均整条断开，
+绝不在 V2/V3 之间失败回退。常驻 worker 已装配 Bitget；Gate 和 MEXC 仍保持私有流阻断。
 每轮对账对每个账户独立汇总阻断原因；只有全部已配置账户都没有原因且没有请求失败，才把账户状态写为
 `ready`。写入全局 `ready` 前会再次检查每个账户的私有流心跳，避免把本轮处理中已经陈旧的连接放行。
 任一账户为 `blocked`/`error` 或已有补偿失败等安全暂停时，全局状态不会进入 `ready`。
