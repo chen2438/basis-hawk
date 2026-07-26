@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -669,6 +670,49 @@ async def test_sqlite_executor_lock_is_available_for_tests() -> None:
     await database.initialize()
     async with database.executor_lock() as acquired:
         assert acquired is True
+    await database.close()
+
+
+async def test_private_event_wakes_serial_reconciliation_loop() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials = CredentialService(
+        database,
+        SecretCipher(SecretCipher.generate_key()),
+    )
+    reconciler = ReconciliationService(
+        database,
+        credentials,
+        event_debounce_seconds=0,
+    )
+    calls = 0
+    first = asyncio.Event()
+    second = asyncio.Event()
+
+    async def run_once() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first.set()
+        elif calls == 2:
+            second.set()
+
+    reconciler.run_once = run_once  # type: ignore[method-assign]
+    task = asyncio.create_task(
+        reconciler.run_forever(interval_seconds=3_600)
+    )
+    await asyncio.wait_for(first.wait(), timeout=1)
+
+    reconciler.request_reconciliation()
+    reconciler.request_reconciliation()
+    reconciler.request_reconciliation()
+    await asyncio.wait_for(second.wait(), timeout=1)
+    await asyncio.sleep(0.01)
+
+    assert calls == 2
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     await database.close()
 
 

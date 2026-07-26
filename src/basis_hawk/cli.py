@@ -125,7 +125,17 @@ async def run_worker(*, once: bool) -> int:
             credentials,
             timeout_seconds=config.http_timeout_seconds,
         )
-        supervisor = PrivateStreamSupervisor(PrivateStreamRegistry(database))
+
+        async def reconcile_private_event(
+            _connection: object,
+            _event: object,
+        ) -> None:
+            reconciler.request_reconciliation()
+
+        supervisor = PrivateStreamSupervisor(
+            PrivateStreamRegistry(database),
+            event_handler=reconcile_private_event,
+        )
         tasks = [
             asyncio.create_task(supervisor.run(connections)),
             asyncio.create_task(reconciler.run_forever()),

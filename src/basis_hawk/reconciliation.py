@@ -48,11 +48,19 @@ class ReconciliationService:
             PrivateAccountClient,
         ] = create_account_client,
         paper_executor: PaperExecutionService | None = None,
+        event_debounce_seconds: float = 0.25,
     ) -> None:
+        if event_debounce_seconds < 0:
+            raise ValueError("event reconciliation debounce cannot be negative")
         self.database = database
         self.credentials = credentials
         self.account_client_factory = account_client_factory
         self.paper_executor = paper_executor or PaperExecutionService(database)
+        self.event_debounce_seconds = event_debounce_seconds
+        self._reconciliation_requested = asyncio.Event()
+
+    def request_reconciliation(self) -> None:
+        self._reconciliation_requested.set()
 
     async def run_once(self) -> ReconciliationResult:
         await self.paper_executor.run_once()
@@ -303,6 +311,8 @@ class ReconciliationService:
         )
 
     async def run_forever(self, *, interval_seconds: float = 60) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("reconciliation interval must be positive")
         async with self.database.executor_lock() as acquired:
             if not acquired:
                 raise WorkerLockUnavailable(
@@ -310,7 +320,17 @@ class ReconciliationService:
                 )
             while True:
                 await self.run_once()
-                await asyncio.sleep(interval_seconds)
+                try:
+                    await asyncio.wait_for(
+                        self._reconciliation_requested.wait(),
+                        timeout=interval_seconds,
+                    )
+                except TimeoutError:
+                    continue
+                self._reconciliation_requested.clear()
+                if self.event_debounce_seconds:
+                    await asyncio.sleep(self.event_debounce_seconds)
+                    self._reconciliation_requested.clear()
 
     async def run_once_exclusive(self) -> ReconciliationResult:
         async with self.database.executor_lock() as acquired:
