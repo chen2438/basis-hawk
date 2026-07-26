@@ -106,6 +106,40 @@ class RemotePosition(BaseModel):
         return format(value, "f") if value is not None else None
 
 
+class RemoteFill(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    exchange_trade_id: str
+    exchange_order_id: str
+    client_order_id: str | None = None
+    market: str
+    symbol: str
+    side: str
+    quantity: Decimal
+    price: Decimal
+    fee_amount: Decimal
+    fee_asset: str
+    liquidity: str
+    occurred_at: datetime
+
+    @field_serializer(
+        "quantity",
+        "price",
+        "fee_amount",
+        when_used="json",
+    )
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+
+class RemoteFillBatch(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    fills: list[RemoteFill]
+    complete: bool
+    incomplete_reason: str | None = None
+
+
 class RemoteTradingState(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -170,6 +204,17 @@ class PrivateAccountClient(ABC):
 
     @abstractmethod
     async def trading_state(self) -> RemoteTradingState: ...
+
+    @abstractmethod
+    async def fills_for_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+        since: datetime,
+    ) -> RemoteFillBatch: ...
 
     @abstractmethod
     async def close(self) -> None: ...
@@ -308,6 +353,51 @@ class BinanceAccountClient(PrivateAccountClient):
             normalized_positions,
         )
 
+    async def fills_for_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+        since: datetime,
+    ) -> RemoteFillBatch:
+        if exchange_order_id is None:
+            return _missing_order_id("Binance")
+        client = self.spot if market == "spot" else self.perp
+        path = "/api/v3/myTrades" if market == "spot" else "/fapi/v1/userTrades"
+        items = await self._get(
+            client,
+            path,
+            symbol=symbol,
+            orderId=exchange_order_id,
+            startTime=_milliseconds(since),
+            limit=1000,
+        )
+        fills = [
+            RemoteFill(
+                exchange_trade_id=str(item.get("id") or ""),
+                exchange_order_id=str(item.get("orderId") or exchange_order_id),
+                client_order_id=client_order_id,
+                market=market,
+                symbol=str(item.get("symbol") or symbol),
+                side=(
+                    "buy"
+                    if item.get("isBuyer") is True or item.get("buyer") is True
+                    else "sell"
+                ),
+                quantity=Decimal(str(item.get("qty") or "0")),
+                price=Decimal(str(item.get("price") or "0")),
+                fee_amount=Decimal(str(item.get("commission") or "0")),
+                fee_asset=str(item.get("commissionAsset") or ""),
+                liquidity="maker" if item.get("isMaker") is True else "taker",
+                occurred_at=_from_milliseconds(item.get("time")),
+            )
+            for item in items
+            if str(item.get("orderId") or "") == exchange_order_id
+        ]
+        return _fill_batch(fills, limit_reached=len(items) >= 1000, exchange="Binance")
+
     async def close(self) -> None:
         if self._owned_spot:
             await self.spot.aclose()
@@ -439,6 +529,62 @@ class OkxAccountClient(PrivateAccountClient):
             complete=complete,
             incomplete_reason=None if complete else "OKX reconciliation result may be paginated",
         )
+
+    async def fills_for_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+        since: datetime,
+    ) -> RemoteFillBatch:
+        params: dict[str, object] = {
+            "instType": "SPOT" if market == "spot" else "SWAP",
+            "instId": symbol,
+            "begin": _milliseconds(since),
+            "limit": 100,
+        }
+        if exchange_order_id:
+            params["ordId"] = exchange_order_id
+        payload = await self._get("/api/v5/trade/fills-history", **params)
+        _okx_success(payload)
+        items = payload.get("data") or []
+        fills = [
+            RemoteFill(
+                exchange_trade_id=str(item.get("tradeId") or item.get("billId") or ""),
+                exchange_order_id=str(item.get("ordId") or exchange_order_id or ""),
+                client_order_id=(
+                    str(item["clOrdId"])
+                    if item.get("clOrdId")
+                    else client_order_id
+                ),
+                market=market,
+                symbol=str(item.get("instId") or symbol),
+                side=str(item.get("side") or "").lower(),
+                quantity=Decimal(str(item.get("fillSz") or "0")),
+                price=Decimal(str(item.get("fillPx") or "0")),
+                fee_amount=-Decimal(str(item.get("fee") or "0")),
+                fee_asset=str(item.get("feeCcy") or ""),
+                liquidity=(
+                    "maker"
+                    if str(item.get("execType") or "").upper() == "M"
+                    else "taker"
+                ),
+                occurred_at=_from_milliseconds(item.get("ts")),
+            )
+            for item in items
+            if (
+                exchange_order_id is None
+                or str(item.get("ordId") or "") == exchange_order_id
+            )
+            and (
+                client_order_id is None
+                or not item.get("clOrdId")
+                or str(item.get("clOrdId")) == client_order_id
+            )
+        ]
+        return _fill_batch(fills, limit_reached=len(items) >= 100, exchange="OKX")
 
     async def close(self) -> None:
         if self._owned:
@@ -598,6 +744,56 @@ class BybitAccountClient(PrivateAccountClient):
             normalized_positions,
         )
 
+    async def fills_for_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+        since: datetime,
+    ) -> RemoteFillBatch:
+        params: dict[str, object] = {
+            "category": "spot" if market == "spot" else "linear",
+            "symbol": symbol,
+            "startTime": _milliseconds(since),
+            "endTime": self.clock_ms(),
+            "execType": "Trade",
+            "limit": 100,
+        }
+        if exchange_order_id:
+            params["orderId"] = exchange_order_id
+        elif client_order_id:
+            params["orderLinkId"] = client_order_id
+        else:
+            return _missing_order_id("Bybit")
+        items = await self._paged("/v5/execution/list", **params)
+        fills = [
+            RemoteFill(
+                exchange_trade_id=str(item.get("execId") or ""),
+                exchange_order_id=str(item.get("orderId") or exchange_order_id or ""),
+                client_order_id=(
+                    str(item["orderLinkId"])
+                    if item.get("orderLinkId")
+                    else client_order_id
+                ),
+                market=market,
+                symbol=str(item.get("symbol") or symbol),
+                side=str(item.get("side") or "").lower(),
+                quantity=Decimal(str(item.get("execQty") or "0")),
+                price=Decimal(str(item.get("execPrice") or "0")),
+                fee_amount=Decimal(str(item.get("execFee") or "0")),
+                fee_asset=str(item.get("feeCurrency") or ""),
+                liquidity=(
+                    str(item.get("liquidity") or "").lower()
+                    or ("maker" if item.get("isMaker") is True else "taker")
+                ),
+                occurred_at=_from_milliseconds(item.get("execTime")),
+            )
+            for item in items
+        ]
+        return RemoteFillBatch(fills=fills, complete=True)
+
     async def close(self) -> None:
         if self._owned:
             await self.http.aclose()
@@ -731,6 +927,83 @@ class BitgetAccountClient(PrivateAccountClient):
                 None if complete else "Bitget open-order result requires another page"
             ),
         )
+
+    async def fills_for_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+        since: datetime,
+    ) -> RemoteFillBatch:
+        params: dict[str, object] = {
+            "symbol": symbol,
+            "startTime": _milliseconds(since),
+            "endTime": self.clock_ms(),
+            "limit": 100,
+        }
+        if exchange_order_id:
+            params["orderId"] = exchange_order_id
+        elif market == "perp" and client_order_id:
+            params["clientOid"] = client_order_id
+        else:
+            return _missing_order_id("Bitget")
+        path = (
+            "/api/v2/spot/trade/fills"
+            if market == "spot"
+            else "/api/v2/mix/order/fill-history"
+        )
+        if market == "perp":
+            params["productType"] = "USDT-FUTURES"
+        payload = await self._get(path, **params)
+        _bitget_success(payload)
+        data = payload.get("data") or {}
+        items = data if isinstance(data, list) else data.get("fillList") or []
+        fills = [
+            RemoteFill(
+                exchange_trade_id=str(item.get("tradeId") or ""),
+                exchange_order_id=str(item.get("orderId") or exchange_order_id or ""),
+                client_order_id=(
+                    str(item["clientOid"])
+                    if item.get("clientOid")
+                    else client_order_id
+                ),
+                market=market,
+                symbol=str(item.get("symbol") or symbol),
+                side=str(item.get("side") or "").lower(),
+                quantity=Decimal(
+                    str(
+                        item.get("size")
+                        or item.get("baseVolume")
+                        or item.get("fillQuantity")
+                        or "0"
+                    )
+                ),
+                price=Decimal(
+                    str(
+                        item.get("priceAvg")
+                        or item.get("price")
+                        or item.get("fillPrice")
+                        or "0"
+                    )
+                ),
+                fee_amount=_bitget_fee(item),
+                fee_asset=_bitget_fee_asset(item),
+                liquidity=str(
+                    item.get("tradeScope")
+                    or item.get("tradeSide")
+                    or "taker"
+                ).lower(),
+                occurred_at=_from_milliseconds(
+                    item.get("cTime")
+                    or item.get("createdTime")
+                    or item.get("uTime")
+                ),
+            )
+            for item in items
+        ]
+        return _fill_batch(fills, limit_reached=len(items) >= 100, exchange="Bitget")
 
     async def close(self) -> None:
         if self._owned:
@@ -871,6 +1144,80 @@ class GateAccountClient(PrivateAccountClient):
             complete=complete,
             incomplete_reason=None if complete else "Gate open-order result is paginated",
         )
+
+    async def fills_for_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+        since: datetime,
+    ) -> RemoteFillBatch:
+        if exchange_order_id is None:
+            return _missing_order_id("Gate")
+        if market == "spot":
+            items = await self._get(
+                "/api/v4/spot/my_trades",
+                currency_pair=symbol,
+                order_id=exchange_order_id,
+                limit=1000,
+                page=1,
+            )
+        else:
+            items = await self._get(
+                "/api/v4/futures/usdt/my_trades",
+                contract=symbol,
+                order=exchange_order_id,
+                limit=1000,
+            )
+        fills = []
+        for item in items:
+            quantity = Decimal(
+                str(
+                    item.get("amount")
+                    if market == "spot"
+                    else abs(Decimal(str(item.get("size") or "0")))
+                )
+            )
+            raw_fee = Decimal(str(item.get("fee") or "0"))
+            fills.append(
+                RemoteFill(
+                    exchange_trade_id=str(item.get("id") or ""),
+                    exchange_order_id=str(
+                        item.get("order_id") or exchange_order_id
+                    ),
+                    client_order_id=client_order_id,
+                    market=market,
+                    symbol=str(
+                        item.get("currency_pair")
+                        or item.get("contract")
+                        or symbol
+                    ),
+                    side=(
+                        str(item.get("side") or "").lower()
+                        if market == "spot"
+                        else "buy"
+                        if Decimal(str(item.get("size") or "0")) > 0
+                        else "sell"
+                    ),
+                    quantity=quantity,
+                    price=Decimal(str(item.get("price") or "0")),
+                    fee_amount=raw_fee,
+                    fee_asset=str(
+                        item.get("fee_currency")
+                        or item.get("settle")
+                        or "USDT"
+                    ),
+                    liquidity=str(item.get("role") or "taker").lower(),
+                    occurred_at=(
+                        _from_milliseconds(item.get("create_time_ms"))
+                        if item.get("create_time_ms")
+                        else _from_seconds(item.get("create_time"))
+                    ),
+                )
+            )
+        return _fill_batch(fills, limit_reached=len(items) >= 1000, exchange="Gate")
 
     async def close(self) -> None:
         if self._owned:
@@ -1033,6 +1380,80 @@ class MexcAccountClient(PrivateAccountClient):
             incomplete_reason=None if complete else "MEXC open-order result is paginated",
         )
 
+    async def fills_for_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+        since: datetime,
+    ) -> RemoteFillBatch:
+        if exchange_order_id is None:
+            return _missing_order_id("MEXC")
+        if market == "spot":
+            items = await self._spot_get(
+                "/api/v3/myTrades",
+                symbol=symbol,
+                orderId=exchange_order_id,
+                startTime=_milliseconds(since),
+                limit=1000,
+            )
+            fills = [
+                RemoteFill(
+                    exchange_trade_id=str(item.get("id") or ""),
+                    exchange_order_id=str(item.get("orderId") or exchange_order_id),
+                    client_order_id=(
+                        str(item["clientOrderId"])
+                        if item.get("clientOrderId")
+                        else client_order_id
+                    ),
+                    market=market,
+                    symbol=str(item.get("symbol") or symbol),
+                    side="buy" if item.get("isBuyer") is True else "sell",
+                    quantity=Decimal(str(item.get("qty") or "0")),
+                    price=Decimal(str(item.get("price") or "0")),
+                    fee_amount=Decimal(str(item.get("commission") or "0")),
+                    fee_asset=str(item.get("commissionAsset") or ""),
+                    liquidity="maker" if item.get("isMaker") is True else "taker",
+                    occurred_at=_from_milliseconds(item.get("time")),
+                )
+                for item in items
+            ]
+            return _fill_batch(
+                fills,
+                limit_reached=len(items) >= 1000,
+                exchange="MEXC",
+            )
+        payload = await self._perp_get(
+            f"/api/v1/private/order/deal_details/{exchange_order_id}"
+        )
+        if not payload.get("success"):
+            raise PrivateRequestError("MEXC fill reconciliation failed")
+        items = payload.get("data") or []
+        fills = [
+            RemoteFill(
+                exchange_trade_id=str(item.get("id") or ""),
+                exchange_order_id=str(item.get("orderId") or exchange_order_id),
+                client_order_id=client_order_id,
+                market=market,
+                symbol=str(item.get("symbol") or symbol),
+                side=(
+                    "buy"
+                    if int(item.get("side") or 0) in {1, 2}
+                    else "sell"
+                ),
+                quantity=Decimal(str(item.get("vol") or "0")),
+                price=Decimal(str(item.get("price") or "0")),
+                fee_amount=Decimal(str(item.get("fee") or "0")),
+                fee_asset=str(item.get("feeCurrency") or ""),
+                liquidity="taker" if item.get("taker") is True else "maker",
+                occurred_at=_from_milliseconds(item.get("timestamp")),
+            )
+            for item in items
+        ]
+        return RemoteFillBatch(fills=fills, complete=True)
+
     async def close(self) -> None:
         if self._owned_spot:
             await self.spot.aclose()
@@ -1081,6 +1502,77 @@ def _optional_decimal(value: object) -> Decimal | None:
     if value in (None, ""):
         return None
     return Decimal(str(value))
+
+
+def _milliseconds(value: datetime) -> int:
+    return int(value.astimezone(UTC).timestamp() * 1000)
+
+
+def _from_milliseconds(value: object) -> datetime:
+    return datetime.fromtimestamp(int(value or 0) / 1000, tz=UTC)
+
+
+def _from_seconds(value: object) -> datetime:
+    return datetime.fromtimestamp(int(value or 0), tz=UTC)
+
+
+def _missing_order_id(exchange: str) -> RemoteFillBatch:
+    return RemoteFillBatch(
+        fills=[],
+        complete=False,
+        incomplete_reason=(
+            f"{exchange} requires an exchange order ID before fills can be reconciled"
+        ),
+    )
+
+
+def _fill_batch(
+    fills: list[RemoteFill],
+    *,
+    limit_reached: bool,
+    exchange: str,
+) -> RemoteFillBatch:
+    return RemoteFillBatch(
+        fills=fills,
+        complete=not limit_reached,
+        incomplete_reason=(
+            f"{exchange} order fills reached the response limit"
+            if limit_reached
+            else None
+        ),
+    )
+
+
+def _bitget_fee_details(item: dict[str, Any]) -> list[dict[str, Any]]:
+    details = item.get("feeDetail") or []
+    return details if isinstance(details, list) else [details]
+
+
+def _bitget_fee(item: dict[str, Any]) -> Decimal:
+    details = _bitget_fee_details(item)
+    if details:
+        return -sum(
+            (
+                Decimal(
+                    str(
+                        detail.get("totalFee")
+                        or detail.get("fee")
+                        or detail.get("totalDeductionFee")
+                        or "0"
+                    )
+                )
+                for detail in details
+            ),
+            Decimal("0"),
+        )
+    return -Decimal(str(item.get("fee") or "0"))
+
+
+def _bitget_fee_asset(item: dict[str, Any]) -> str:
+    details = _bitget_fee_details(item)
+    if details:
+        return str(details[0].get("feeCoin") or item.get("marginCoin") or "")
+    return str(item.get("feeCoin") or item.get("marginCoin") or "")
 
 
 def _order(
