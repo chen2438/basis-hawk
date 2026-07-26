@@ -177,6 +177,10 @@ Telegram 入站固定为 `POST /api/integrations/telegram/webhook`，这是唯�
 `message` 更新并配置上述 secret。重复 update ID 通过 outbox 去重，不会重复回复。机器人只识别
 `/status`、`/positions`、`/alerts`、`/health`，所有回复为只读数据库摘要；任何 `/pause`、`/resume`、
 `/trade` 或配置命令都不会执行，并只返回只读命令清单。
+投影器跨过 UTC 日界时汇总刚结束的完整自然日，并同时入队 Telegram/邮件。日报包含
+`pnl_realizations` 的实际净 PnL 与事件数、当日完成开仓/平仓数、失败或人工复核数，以及发送时仍活动
+的配对仓位和非 ready 账户数量。日期也是持久化投影指纹，所以同一日报只发送一次；进程启动时只建立
+最近已结束日期的基线，不补发可能已经人工处理的历史日报。
 真实意图额外固化 1–10 倍请求杠杆，旧记录迁移为安全默认值 1；
 `order_legs` 同一意图固定一条现货腿和一条永续腿，并在提交交易所前生成唯一客户端订单 ID；每条腿还
 保存严格为正的 `base_multiplier`，使交易所原生数量及成交量可以无歧义换算成基础币。已有纸面订单腿

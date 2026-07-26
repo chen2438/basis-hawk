@@ -291,7 +291,9 @@ class NotificationProjectionService:
         self,
         *,
         emit_initial_alerts: bool = True,
+        now: datetime | None = None,
     ) -> int:
+        observed_at = now or datetime.now(UTC)
         projected = 0
         control = await self.database.execution_control()
         if control is not None:
@@ -309,6 +311,7 @@ class NotificationProjectionService:
                         f"Execution is {control.state}. "
                         "Review system health and reconciliation before resuming."
                     ),
+                    now=observed_at,
                 )
             )
         for account in await self.database.reconciliation_states():
@@ -332,9 +335,10 @@ class NotificationProjectionService:
                         f"reconciliation is {account.status}. "
                         "Review the account health page before trading."
                     ),
+                    now=observed_at,
                 )
             )
-        updated_since = datetime.now(UTC) - timedelta(hours=1)
+        updated_since = observed_at - timedelta(hours=1)
         for intent in await self.database.notification_trade_intents(
             updated_since=updated_since
         ):
@@ -369,8 +373,45 @@ class NotificationProjectionService:
                         if notification is not None
                         else "Trade state updated."
                     ),
+                    now=observed_at,
                 )
             )
+        summary_end = datetime.combine(
+            observed_at.date(),
+            datetime.min.time(),
+            tzinfo=UTC,
+        )
+        summary_start = summary_end - timedelta(days=1)
+        summary = await self.database.notification_daily_summary(
+            period_start=summary_start,
+            period_end=summary_end,
+        )
+        projected += int(
+            await self.database.project_notification(
+                source_key="daily-summary",
+                fingerprint=_fingerprint(summary_start.date().isoformat()),
+                notify=emit_initial_alerts,
+                event_type="system.daily_summary",
+                severity="info",
+                channels={"telegram", "email"},
+                subject=(
+                    f"Basis Hawk daily summary "
+                    f"{summary_start.date().isoformat()}"
+                ),
+                body=(
+                    f"UTC period: {summary_start.date().isoformat()}\n"
+                    f"Realized PnL: "
+                    f"{format(summary.realized_net_pnl_usdt, 'f')} USDT "
+                    f"({summary.realized_event_count} realizations)\n"
+                    f"Opened: {summary.opened_trade_count}; "
+                    f"Closed: {summary.closed_trade_count}; "
+                    f"Failed/review: {summary.failed_trade_count}\n"
+                    f"Active positions: {summary.active_position_count}; "
+                    f"Unhealthy accounts: {summary.unhealthy_account_count}"
+                ),
+                now=observed_at,
+            )
+        )
         return projected
 
     async def run_forever(self) -> None:

@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from basis_hawk.notifications import NotificationProjectionService
@@ -127,4 +127,29 @@ async def test_projection_routes_trade_success_and_imbalance() -> None:
     hedged = [item for item in rows if item.event_type == "trade.hedged"]
     assert len(hedged) == 1
     assert hedged[0].channel == "telegram"
+    await database.close()
+
+
+async def test_projection_sends_one_summary_for_completed_utc_day() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    projector = NotificationProjectionService(database)
+    first_day = datetime(2026, 7, 26, 12, tzinfo=UTC)
+
+    assert (
+        await projector.run_once(
+            emit_initial_alerts=False,
+            now=first_day,
+        )
+        == 0
+    )
+    assert await projector.run_once(now=first_day + timedelta(hours=6)) == 0
+    assert await projector.run_once(now=first_day + timedelta(days=1)) == 1
+    rows = await database.notification_outbox()
+    assert len(rows) == 2
+    assert {item.channel for item in rows} == {"telegram", "email"}
+    assert {item.event_type for item in rows} == {"system.daily_summary"}
+    assert all("2026-07-26" in item.subject for item in rows)
+    assert all("Realized PnL: 0 USDT" in item.body for item in rows)
+    assert await projector.run_once(now=first_day + timedelta(days=1, hours=1)) == 0
     await database.close()

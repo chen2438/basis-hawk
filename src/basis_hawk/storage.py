@@ -235,6 +235,19 @@ class NotificationOutboxItem:
     sent_at: datetime | None
 
 
+@dataclass(frozen=True)
+class DailyNotificationSummary:
+    period_start: datetime
+    period_end: datetime
+    realized_event_count: int
+    realized_net_pnl_usdt: Decimal
+    opened_trade_count: int
+    closed_trade_count: int
+    failed_trade_count: int
+    active_position_count: int
+    unhealthy_account_count: int
+
+
 class AccountSnapshotRow(Base):
     __tablename__ = "account_snapshots"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -3642,6 +3655,75 @@ class Database:
                     )
                     .order_by(TradeIntentRow.created_at)
                 )
+            )
+
+    async def notification_daily_summary(
+        self,
+        *,
+        period_start: datetime,
+        period_end: datetime,
+    ) -> DailyNotificationSummary:
+        start = _utc(period_start)
+        end = _utc(period_end)
+        if end <= start:
+            raise ValueError("notification summary period must be positive")
+        async with self.sessions() as session:
+            realized = await session.execute(
+                select(
+                    func.count(PnlRealizationRow.id),
+                    func.coalesce(
+                        func.sum(PnlRealizationRow.net_pnl_usdt),
+                        0,
+                    ),
+                ).where(
+                    PnlRealizationRow.realized_at >= start,
+                    PnlRealizationRow.realized_at < end,
+                )
+            )
+            realized_count, realized_pnl = realized.one()
+            opened_count = await session.scalar(
+                select(func.count(TradeIntentRow.id)).where(
+                    TradeIntentRow.action == "open",
+                    TradeIntentRow.status == "hedged",
+                    TradeIntentRow.updated_at >= start,
+                    TradeIntentRow.updated_at < end,
+                )
+            )
+            closed_count = await session.scalar(
+                select(func.count(TradeIntentRow.id)).where(
+                    TradeIntentRow.action == "close",
+                    TradeIntentRow.status == "closed",
+                    TradeIntentRow.updated_at >= start,
+                    TradeIntentRow.updated_at < end,
+                )
+            )
+            failed_count = await session.scalar(
+                select(func.count(TradeIntentRow.id)).where(
+                    TradeIntentRow.status.in_({"failed", "manual_review"}),
+                    TradeIntentRow.updated_at >= start,
+                    TradeIntentRow.updated_at < end,
+                )
+            )
+            active_count = await session.scalar(
+                select(func.count(PairedPositionRow.id)).where(
+                    PairedPositionRow.status.in_({"open", "closing"})
+                )
+            )
+            unhealthy_count = await session.scalar(
+                select(func.count()).select_from(AccountReconciliationRow).where(
+                    AccountReconciliationRow.status != "ready"
+                )
+            )
+            return DailyNotificationSummary(
+                period_start=start,
+                period_end=end,
+                realized_event_count=int(realized_count or 0),
+                realized_net_pnl_usdt=Decimal(realized_pnl or 0),
+                opened_trade_count=int(opened_count or 0),
+                closed_trade_count=int(closed_count or 0),
+                failed_trade_count=int(failed_count or 0),
+                active_position_count=int(active_count or 0),
+                unhealthy_account_count=int(unhealthy_count or 0),
             )
 
     async def save_exchange_credential(
