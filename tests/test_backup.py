@@ -13,6 +13,7 @@ from basis_hawk.backup import (
     _pipe_decrypted,
     _prune,
     _write_checksum,
+    backup_status,
     decrypt_stream,
     encrypt_stream,
 )
@@ -54,6 +55,32 @@ def test_retention_keeps_newest_files_and_checksums(tmp_path: Path) -> None:
 
     assert len(list(tmp_path.glob("*-daily.bhbk"))) == 7
     assert len(list(tmp_path.glob("*-daily.bhbk.sha256"))) == 7
+
+
+def test_backup_status_reports_only_archive_metadata(tmp_path: Path) -> None:
+    assert backup_status(tmp_path / "missing") == {
+        "directory_available": False,
+        "archive_count": 0,
+        "latest": None,
+    }
+    older = tmp_path / "basis-hawk-20260725T000000Z-daily.bhbk"
+    latest = tmp_path / "basis-hawk-20260726T000000Z-daily.bhbk"
+    older.write_bytes(b"old")
+    latest.write_bytes(b"new archive")
+    latest.with_suffix(".bhbk.sha256").write_text("checksum", encoding="ascii")
+    os.utime(older, (1, 1))
+    os.utime(latest, (2, 2))
+
+    value = backup_status(tmp_path)
+
+    assert value["directory_available"] is True
+    assert value["archive_count"] == 2
+    assert value["latest"] == {
+        "name": latest.name,
+        "size_bytes": 11,
+        "modified_at": datetime.fromtimestamp(2, UTC),
+        "checksum_present": True,
+    }
 
 
 def test_backup_key_must_be_independent_valid_material(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -5,6 +5,7 @@ import type {
   AuditEvent,
   AutoStrategyConfig,
   AutomationStatus,
+  BackupStatus,
   CredentialSummary,
   Environment,
   Exchange,
@@ -56,6 +57,7 @@ export function OperationsPanel({
   const [automation, setAutomation] = useState<AutomationStatus | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [notifications, setNotifications] = useState<NotificationHistoryItem[]>([]);
+  const [backup, setBackup] = useState<BackupStatus | null>(null);
   const [snapshots, setSnapshots] = useState<Record<string, AccountSnapshot>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +75,7 @@ export function OperationsPanel({
       automationValue,
       auditValue,
       notificationValue,
+      backupValue,
     ] =
       await Promise.all([
         api.execution(),
@@ -86,6 +89,7 @@ export function OperationsPanel({
         api.automation(),
         api.auditHistory(),
         api.notificationHistory(),
+        api.backupStatus(),
       ]);
     setExecution(executionValue);
     setCredentials(credentialValue.items);
@@ -98,6 +102,7 @@ export function OperationsPanel({
     setAutomation(automationValue);
     setAuditEvents(auditValue.items);
     setNotifications(notificationValue.items);
+    setBackup(backupValue);
   }, []);
 
   useEffect(() => {
@@ -143,7 +148,12 @@ export function OperationsPanel({
       </nav>
       {error && <div className="error-banner">{error}<button onClick={() => setError(null)}>×</button></div>}
       <div className="operations-content">
-        {tab === "system" && <SystemView execution={execution} busy={busy} action={action} />}
+        {tab === "system" && <SystemView
+          execution={execution}
+          backup={backup}
+          busy={busy}
+          action={action}
+        />}
         {tab === "accounts" && <AccountsView
           credentials={credentials}
           snapshots={snapshots}
@@ -180,6 +190,8 @@ export function OperationsPanel({
         {tab === "history" && <HistoryView
           auditEvents={auditEvents}
           notifications={notifications}
+          busy={busy}
+          action={action}
         />}
       </div>
     </section>
@@ -188,10 +200,12 @@ export function OperationsPanel({
 
 function SystemView({
   execution,
+  backup,
   busy,
   action,
 }: {
   execution: ExecutionStatus | null;
+  backup: BackupStatus | null;
   busy: boolean;
   action: (operation: () => Promise<unknown>) => Promise<void>;
 }) {
@@ -201,6 +215,11 @@ function SystemView({
       <div><span>全局执行</span><strong className={`state-text ${execution.state}`}>{execution.state}</strong></div>
       <div><span>账户数</span><strong>{execution.accounts.length}</strong></div>
       <div><span>最近更新</span><strong>{time(execution.updated_at)}</strong></div>
+    </div>
+    <div className="ops-summary">
+      <div><span>加密备份数</span><strong>{backup?.archive_count ?? "—"}</strong></div>
+      <div><span>最近备份</span><strong>{time(backup?.latest?.modified_at ?? null)}</strong></div>
+      <div><span>校验文件</span><strong>{backup?.latest ? (backup.latest.checksum_present ? "存在" : "缺失") : "—"}</strong></div>
     </div>
     <div className="safety-callout"><strong>当前原因</strong><p>{execution.reason}</p>
       <div className="inline-actions">
@@ -727,9 +746,13 @@ function strategyForm(value?: AutoStrategyConfig): AutoStrategyConfig {
 function HistoryView({
   auditEvents,
   notifications,
+  busy,
+  action,
 }: {
   auditEvents: AuditEvent[];
   notifications: NotificationHistoryItem[];
+  busy: boolean;
+  action: (operation: () => Promise<unknown>) => Promise<void>;
 }) {
   return <div className="history-grid">
     <section>
@@ -742,7 +765,21 @@ function HistoryView({
       </table>{!auditEvents.length && <div className="empty">尚无审计事件</div>}</div>
     </section>
     <section>
-      <header><div><h3>通知投递</h3><p>只展示投递元数据，不返回消息正文或去重键。</p></div><strong>{notifications.length}</strong></header>
+      <header><div><h3>通知投递</h3><p>只展示投递元数据，不返回消息正文或去重键。</p></div>
+        <div className="inline-actions">
+          <button className="button secondary" disabled={busy} onClick={() => {
+            if (window.confirm("确认向已配置的 Telegram 发送测试通知？")) {
+              void action(() => api.testNotifications(["telegram"]));
+            }
+          }}>测试 Telegram</button>
+          <button className="button secondary" disabled={busy} onClick={() => {
+            if (window.confirm("确认向已配置的邮箱发送测试通知？")) {
+              void action(() => api.testNotifications(["email"]));
+            }
+          }}>测试邮件</button>
+          <strong>{notifications.length}</strong>
+        </div>
+      </header>
       <div className="ops-table-wrap"><table><thead><tr><th>时间</th><th>通道</th><th>主题</th><th>级别</th><th>状态</th><th>尝试</th><th>错误码</th></tr></thead>
         <tbody>{notifications.map((item) => <tr key={item.id}>
           <td>{time(item.created_at)}</td><td>{item.channel}</td><td>{item.subject}</td>

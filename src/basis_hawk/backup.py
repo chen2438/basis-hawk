@@ -108,6 +108,44 @@ def _verify_checksum(path: Path) -> None:
         raise BackupError("backup checksum mismatch")
 
 
+def backup_status(directory: Path) -> dict[str, object]:
+    if not directory.is_dir():
+        return {
+            "directory_available": False,
+            "archive_count": 0,
+            "latest": None,
+        }
+    archives: list[tuple[Path, os.stat_result]] = []
+    for path in directory.glob("basis-hawk-*.bhbk"):
+        try:
+            archives.append((path, path.stat()))
+        except FileNotFoundError:
+            continue
+    archives.sort(
+        key=lambda item: (item[1].st_mtime, item[0].name),
+        reverse=True,
+    )
+    if not archives:
+        return {
+            "directory_available": True,
+            "archive_count": 0,
+            "latest": None,
+        }
+    latest, stat = archives[0]
+    return {
+        "directory_available": True,
+        "archive_count": len(archives),
+        "latest": {
+            "name": latest.name,
+            "size_bytes": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime, UTC),
+            "checksum_present": latest.with_suffix(
+                latest.suffix + ".sha256"
+            ).is_file(),
+        },
+    }
+
+
 def _prune(directory: Path, suffix: str, keep: int) -> None:
     backups = sorted(directory.glob(f"basis-hawk-*-{suffix}.bhbk"), reverse=True)
     for path in backups[keep:]:

@@ -31,6 +31,7 @@ services:
       BASIS_HAWK_SECURE_COOKIES: ${BASIS_HAWK_SECURE_COOKIES:-true}
       BASIS_HAWK_SESSION_HOURS: ${BASIS_HAWK_SESSION_HOURS:-12}
       BASIS_HAWK_CREDENTIAL_MASTER_KEY: ${BASIS_HAWK_CREDENTIAL_MASTER_KEY}
+      BASIS_HAWK_BACKUP_DIRECTORY: /backups
     command: ["sh", "-c", "alembic upgrade head && exec basis-hawk serve"]
     depends_on:
       postgres:
@@ -48,6 +49,8 @@ services:
       retries: 12
     read_only: true
     tmpfs: [/tmp]
+    volumes:
+      - postgres_backups:/backups:ro
     networks: [backend]
 
   worker:

@@ -75,6 +75,11 @@
 - `GET /api/operations/notifications`：按 `limit`/`offset` 读取投递历史，可按 `status` 和
   `channel` 过滤；只返回事件类型、主题、级别、通道、尝试次数、时间和脱敏错误码，不返回消息正文
   或内部去重键。
+- `POST /api/operations/notifications/test`：要求 `confirmed=true` 并明确选择 Telegram、邮件或两者；
+  只对已完整配置的通道创建独立 `notification.test` outbox 项，随后仍由 worker 按普通重试规则投递。
+  未配置通道返回冲突，不直接从 API 进程发送，也不在响应中返回正文。
+- `GET /api/operations/backup`：从 API 容器的只读备份卷返回归档数量、最近归档文件名、大小、修改时间
+  及校验文件是否存在；不会读取备份密钥、解密归档或把恢复能力暴露为 HTTP 接口。
 - `GET /api/transfers`：返回最近内部划转及提交前/预期余额、远端 ID、状态和脱敏错误码；金额均为
   十进制字符串。
 - `POST /api/transfers`：仅允许 USDT 现货↔USDT 永续，要求 `confirmed=true` 和 UUID

@@ -31,6 +31,7 @@ from basis_hawk.accounts import (
 )
 from basis_hawk.auth import AuthenticationError, AuthService, LoginAttemptLimiter
 from basis_hawk.automation import AutoStrategyConfig
+from basis_hawk.backup import backup_status
 from basis_hawk.config import get_config
 from basis_hawk.credentials import (
     CredentialService,
@@ -132,6 +133,11 @@ class InternalTransferConfirmRequest(BaseModel):
     environment: ExchangeEnvironment
     direction: InternalTransferDirection
     amount_usdt: Decimal = Field(gt=0, decimal_places=18)
+    confirmed: Literal[True]
+
+
+class NotificationTestRequest(BaseModel):
+    channels: set[Literal["telegram", "email"]] = Field(min_length=1)
     confirmed: Literal[True]
 
 
@@ -641,6 +647,73 @@ def create_app(
             "limit": limit,
             "offset": offset,
         }
+
+    @app.post("/api/operations/notifications/test")
+    async def test_notifications(
+        payload: NotificationTestRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        available = {
+            "telegram": bool(
+                config.telegram_bot_token
+                and config.telegram_chat_id
+            ),
+            "email": bool(
+                config.smtp_host
+                and config.smtp_from
+                and config.smtp_to
+            ),
+        }
+        unavailable = sorted(
+            channel
+            for channel in payload.channels
+            if not available[channel]
+        )
+        if unavailable:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "notification channels are not configured: "
+                    + ", ".join(unavailable)
+                ),
+            )
+        actor = request_actor(request)
+        request_id = str(uuid4())
+        created_at = datetime.now(UTC)
+        items = await scanner.database.enqueue_notification(
+            dedupe_key=f"notification-test:{request_id}",
+            event_type="notification.test",
+            severity="info",
+            channels=set(payload.channels),
+            subject="Basis Hawk notification test",
+            body=(
+                "Basis Hawk notification delivery test requested by "
+                f"{actor} at {created_at.isoformat()}."
+            ),
+        )
+        await scanner.database.append_audit(
+            "notification.test_requested",
+            actor=actor,
+            details={
+                "request_id": request_id,
+                "channels": sorted(payload.channels),
+            },
+        )
+        return {
+            "request_id": request_id,
+            "items": [
+                {
+                    "id": item.id,
+                    "channel": item.channel,
+                    "status": item.status,
+                }
+                for item in items
+            ],
+        }
+
+    @app.get("/api/operations/backup")
+    async def operation_backup_status() -> dict[str, object]:
+        return backup_status(config.backup_directory)
 
     @app.get("/api/transfers")
     async def internal_transfers(

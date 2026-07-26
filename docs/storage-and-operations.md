@@ -318,3 +318,8 @@ API 进程重启、PostgreSQL 重启及连接池恢复、advisory lock 排他 wo
 验证、空库恢复和非空库拒绝覆盖。应用及备份运行均使用只读根文件系统和 `/tmp` tmpfs。无论成功或
 失败都只按本次随机名称清理资源，不会连接 Compose 项目、读取真实凭据或接触交易所。CI 的
 `container-acceptance` job 会执行同一命令。
+
+API 容器只读挂载同一 `postgres_backups` 卷到 `/backups`，仅用于
+`GET /api/operations/backup` 展示归档元数据和旁路 SHA-256 文件是否存在。API 不接收
+`BASIS_HAWK_BACKUP_KEY`，因此不能解密、验证内容或恢复数据库；实际认证验证和恢复仍只允许通过专用
+备份镜像命令执行。管理员通知测试同样只创建 outbox 项，不让 API 进程直接连接 Telegram 或 SMTP。

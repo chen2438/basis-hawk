@@ -3,6 +3,7 @@ import type {
   AuditEvent,
   AutoStrategyConfig,
   AutomationStatus,
+  BackupStatus,
   CredentialSummary,
   Environment,
   Exchange,
@@ -71,6 +72,15 @@ export const api = {
   auditHistory: () => request<{ items: AuditEvent[] }>("/api/operations/audit?limit=100"),
   notificationHistory: () =>
     request<{ items: NotificationHistoryItem[] }>("/api/operations/notifications?limit=100"),
+  backupStatus: () => request<BackupStatus>("/api/operations/backup"),
+  testNotifications: (channels: ("telegram" | "email")[]) =>
+    request<{ request_id: string; items: { id: string; channel: string; status: string }[] }>(
+      "/api/operations/notifications/test",
+      {
+        method: "POST",
+        body: JSON.stringify({ channels, confirmed: true }),
+      },
+    ),
   pauseExecution: (reason: string) => request<ExecutionStatus>("/api/system/execution/pause", {
     method: "POST",
     body: JSON.stringify({ confirmed: true, reason }),

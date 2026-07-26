@@ -267,6 +267,17 @@ export interface NotificationHistoryItem {
   sent_at: string | null;
 }
 
+export interface BackupStatus {
+  directory_available: boolean;
+  archive_count: number;
+  latest: {
+    name: string;
+    size_bytes: number;
+    modified_at: string;
+    checksum_present: boolean;
+  } | null;
+}
+
 export interface LiveOpenPreview {
   exchange: Exchange;
   environment: Environment;
