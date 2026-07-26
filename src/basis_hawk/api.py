@@ -81,6 +81,19 @@ class LiveOpenConfirmRequest(BaseModel):
     confirmed: Literal[True]
 
 
+class LiveClosePreviewRequest(BaseModel):
+    maximum_slippage: Decimal = Field(
+        default=Decimal("0.001"),
+        gt=0,
+        le=Decimal("0.1"),
+    )
+
+
+class LiveCloseConfirmRequest(BaseModel):
+    preview_id: UUID
+    confirmed: Literal[True]
+
+
 def create_app(
     service: ScannerService | None = None,
     *,
@@ -439,6 +452,8 @@ def create_app(
                 "id": preview_id,
                 "actor": actor,
                 "request_fingerprint": preview.request_fingerprint,
+                "action": "open",
+                "paired_position_id": None,
                 "exchange": preview.exchange.value,
                 "environment": preview.environment.value,
                 "base_asset": preview.base_asset,
@@ -485,6 +500,11 @@ def create_app(
             raise HTTPException(
                 status_code=404,
                 detail="trade preview was not found",
+            )
+        if stored.action != "open" or stored.paired_position_id is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="trade preview is not an opening preview",
             )
         exchange = Exchange(stored.exchange)
         environment = ExchangeEnvironment(stored.environment)
@@ -550,6 +570,200 @@ def create_app(
                     "environment": intent.environment,
                     "base_asset": intent.base_asset,
                     "action": intent.action,
+                },
+            )
+        return {
+            "created": created,
+            "intent": intent.model_dump(mode="json"),
+        }
+
+    @app.post("/api/trades/positions/{position_id}/close/preview")
+    async def preview_live_close(
+        position_id: UUID,
+        value: LiveClosePreviewRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        position = await scanner.database.paired_position(str(position_id))
+        if position is None:
+            raise HTTPException(
+                status_code=404,
+                detail="paired position was not found",
+            )
+        if position.environment not in {
+            ExchangeEnvironment.SANDBOX.value,
+            ExchangeEnvironment.LIVE.value,
+        }:
+            raise HTTPException(
+                status_code=409,
+                detail="paired position is not exchange-backed",
+            )
+        exchange = Exchange(position.exchange)
+        environment = ExchangeEnvironment(position.environment)
+        if credential_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        if await credential_service.load(exchange, environment) is None:
+            raise HTTPException(
+                status_code=409,
+                detail="exchange credential is not configured",
+            )
+        opportunity = scanner.opportunities.get(
+            f"{exchange.value}:{position.base_asset}"
+        )
+        pair = scanner.instrument_pair(exchange, position.base_asset)
+        if opportunity is None or pair is None:
+            raise HTTPException(
+                status_code=409,
+                detail="current market or trading rules are not available",
+            )
+        try:
+            preview = await trade_ledger.preview_live_close(
+                position_id=position.id,
+                opportunity=opportunity,
+                pair=pair,
+                settings=scanner.settings,
+                environment=environment,
+                maximum_slippage=value.maximum_slippage,
+            )
+        except TradeValidationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        preview_id = str(uuid4())
+        actor = request_actor(request)
+        created_at = datetime.now(UTC)
+        await scanner.database.create_trade_preview(
+            preview={
+                "id": preview_id,
+                "actor": actor,
+                "request_fingerprint": preview.request_fingerprint,
+                "action": "close",
+                "paired_position_id": position.id,
+                "exchange": preview.exchange.value,
+                "environment": preview.environment.value,
+                "base_asset": preview.base_asset,
+                "requested_notional": (
+                    preview.spot_quantity * preview.spot_limit_price
+                ),
+                "leverage": preview.leverage,
+                "maximum_slippage": preview.maximum_slippage,
+                "market_observed_at": preview.market_observed_at,
+                "confirmation_idempotency_key": None,
+                "created_at": created_at,
+                "expires_at": preview.expires_at,
+                "confirmed_at": None,
+            }
+        )
+        await scanner.database.append_audit(
+            "trade.close_preview_created",
+            actor=actor,
+            details={
+                "preview_id": preview_id,
+                "position_id": position.id,
+                "exchange": preview.exchange.value,
+                "environment": preview.environment.value,
+                "base_asset": preview.base_asset,
+                "expires_at": preview.expires_at.isoformat(),
+            },
+        )
+        return {
+            "preview_id": preview_id,
+            "preview": preview.model_dump(mode="json"),
+        }
+
+    @app.post("/api/trades/positions/{position_id}/close/confirm")
+    async def confirm_live_close(
+        position_id: UUID,
+        value: LiveCloseConfirmRequest,
+        request: Request,
+        idempotency_key: Annotated[UUID, Header(alias="Idempotency-Key")],
+    ) -> dict[str, object]:
+        control = await scanner.database.execution_control()
+        if control is None or control.state != "ready":
+            raise HTTPException(
+                status_code=409,
+                detail="execution is not ready for live confirmation",
+            )
+        stored = await scanner.database.trade_preview(str(value.preview_id))
+        if stored is None:
+            raise HTTPException(
+                status_code=404,
+                detail="trade preview was not found",
+            )
+        if (
+            stored.action != "close"
+            or stored.paired_position_id != str(position_id)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="trade preview does not match the closing position",
+            )
+        exchange = Exchange(stored.exchange)
+        environment = ExchangeEnvironment(stored.environment)
+        if credential_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        if await credential_service.load(exchange, environment) is None:
+            raise HTTPException(
+                status_code=409,
+                detail="exchange credential is not configured",
+            )
+        opportunity = scanner.opportunities.get(
+            f"{exchange.value}:{stored.base_asset}"
+        )
+        pair = scanner.instrument_pair(exchange, stored.base_asset)
+        if opportunity is None or pair is None:
+            raise HTTPException(
+                status_code=409,
+                detail="current market or trading rules are not available",
+            )
+        try:
+            if stored.confirmation_idempotency_key is None:
+                current_preview = await trade_ledger.preview_live_close(
+                    position_id=str(position_id),
+                    opportunity=opportunity,
+                    pair=pair,
+                    settings=scanner.settings,
+                    environment=environment,
+                    maximum_slippage=stored.maximum_slippage,
+                )
+                fingerprint = current_preview.request_fingerprint
+            else:
+                fingerprint = stored.request_fingerprint
+            await scanner.database.reserve_trade_preview(
+                preview_id=stored.id,
+                actor=request_actor(request),
+                request_fingerprint=fingerprint,
+                idempotency_key=str(idempotency_key),
+            )
+            intent, created = await trade_ledger.plan_live_close(
+                position_id=str(position_id),
+                opportunity=opportunity,
+                pair=pair,
+                idempotency_key=idempotency_key,
+                settings=scanner.settings,
+                environment=environment,
+                maximum_slippage=stored.maximum_slippage,
+            )
+        except (
+            IdempotencyConflict,
+            TradeValidationError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if created:
+            await scanner.database.append_audit(
+                "trade.close_intent_confirmed",
+                actor=request_actor(request),
+                details={
+                    "preview_id": stored.id,
+                    "position_id": str(position_id),
+                    "intent_id": intent.id,
+                    "exchange": intent.exchange.value,
+                    "environment": intent.environment,
+                    "base_asset": intent.base_asset,
                 },
             )
         return {

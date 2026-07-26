@@ -235,6 +235,56 @@ class LiveOpenPreview(BaseModel):
         return format(value, "f")
 
 
+class LiveClosePreview(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    request_fingerprint: str = Field(exclude=True)
+    config_version: str = Field(exclude=True)
+    position_id: str
+    exchange: Exchange
+    environment: ExchangeEnvironment
+    base_asset: str
+    leverage: int
+    market_observed_at: datetime
+    expires_at: datetime
+    maximum_slippage: Decimal
+    base_quantity: Decimal
+    spot_symbol: str
+    spot_reference_price: Decimal
+    spot_limit_price: Decimal
+    spot_quantity: Decimal
+    spot_usdt_proceeds_before_fee: Decimal
+    perp_symbol: str
+    perp_reference_price: Decimal
+    perp_limit_price: Decimal
+    perp_quantity: Decimal
+    perp_base_multiplier: Decimal
+    estimated_total_fees_usdt: Decimal
+    estimated_gross_pnl_usdt: Decimal
+    estimated_net_pnl_usdt: Decimal
+    worst_case_basis: Decimal
+
+    @field_serializer(
+        "maximum_slippage",
+        "base_quantity",
+        "spot_reference_price",
+        "spot_limit_price",
+        "spot_quantity",
+        "spot_usdt_proceeds_before_fee",
+        "perp_reference_price",
+        "perp_limit_price",
+        "perp_quantity",
+        "perp_base_multiplier",
+        "estimated_total_fees_usdt",
+        "estimated_gross_pnl_usdt",
+        "estimated_net_pnl_usdt",
+        "worst_case_basis",
+        when_used="json",
+    )
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+
 class PaperExecutionResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -427,6 +477,189 @@ class TradeLedger:
             ),
             base_quantity=sizing.base_quantity,
             estimated_total_fees_usdt=spot_fee + perp_fee,
+            worst_case_basis=(perp_limit - spot_limit) / spot_limit,
+        )
+
+    async def preview_live_close(
+        self,
+        *,
+        position_id: str,
+        opportunity: Opportunity,
+        pair: InstrumentPair,
+        settings: ScannerSettings,
+        environment: ExchangeEnvironment,
+        maximum_slippage: Decimal = Decimal("0.001"),
+        now: datetime | None = None,
+    ) -> LiveClosePreview:
+        if maximum_slippage <= 0 or maximum_slippage > Decimal("0.1"):
+            raise TradeValidationError(
+                "maximum slippage must be above 0 and at most 0.1"
+            )
+        if (
+            environment == ExchangeEnvironment.SANDBOX
+            and opportunity.exchange in {Exchange.MEXC, Exchange.GATE}
+        ):
+            raise TradeValidationError(
+                f"{opportunity.exchange.value} does not provide a supported sandbox"
+            )
+        position = await self.database.paired_position(position_id)
+        if position is None:
+            raise TradeValidationError("paired position was not found")
+        if (
+            position.environment != environment.value
+            or position.status != "open"
+            or position.closing_intent_id is not None
+        ):
+            raise TradeValidationError("paired position is not open for live closing")
+        if (
+            position.exchange != opportunity.exchange.value
+            or position.base_asset != opportunity.base_asset
+        ):
+            raise TradeValidationError("opportunity does not match paired position")
+        if (
+            pair.exchange != opportunity.exchange
+            or pair.base_asset != opportunity.base_asset
+            or pair.spot_symbol != opportunity.spot_symbol
+            or pair.perp_symbol != opportunity.perp_symbol
+        ):
+            raise TradeValidationError(
+                "instrument rules do not match the selected opportunity"
+            )
+        opening = await self.database.trade_intent(position.opening_intent_id)
+        if opening is None:
+            raise TradeValidationError("opening trade intent was not found")
+        opening_intent, opening_legs = opening
+        opening_perp = next(
+            (item for item in opening_legs if item.leg == "perp"),
+            None,
+        )
+        if opening_perp is None:
+            raise TradeValidationError("opening perpetual order leg was not found")
+        if (
+            opening_intent.exchange != position.exchange
+            or opening_intent.environment != position.environment
+            or opening_perp.symbol != pair.perp_symbol
+            or opening_perp.base_multiplier != pair.perp_contract_size
+        ):
+            raise TradeValidationError(
+                "current instrument rules do not match the opening position"
+            )
+        observed_now = now or datetime.now(UTC)
+        if opportunity.quality != Quality.HEALTHY:
+            raise TradeValidationError("only healthy opportunities can be closed normally")
+        if opportunity.observed_at > observed_now + timedelta(seconds=5):
+            raise TradeValidationError("market quote timestamp is in the future")
+        if observed_now - opportunity.observed_at > timedelta(seconds=15):
+            raise TradeValidationError("market quote is stale")
+        if opportunity.spot_bid <= 0 or opportunity.perp_ask <= 0:
+            raise TradeValidationError("closing market prices must be positive")
+        required_capacity = max(
+            position.quantity * opportunity.spot_bid,
+            position.quantity * opportunity.perp_ask,
+        )
+        if required_capacity > opportunity.close_top_book_notional:
+            raise TradeValidationError("position exceeds current closing top-book capacity")
+        try:
+            sizing = size_paired_order(
+                pair,
+                requested_notional=position.quantity * opportunity.spot_bid,
+                spot_price=opportunity.spot_bid,
+                perp_price=opportunity.perp_ask,
+            )
+            if sizing.base_quantity != position.quantity:
+                raise OrderSizingError(
+                    "position quantity is no longer aligned to current trading rules"
+                )
+            spot_limit = protective_limit_price(
+                reference_price=opportunity.spot_bid,
+                maximum_slippage=maximum_slippage,
+                side="sell",
+                price_increment=pair.spot_price_increment,
+            )
+            perp_limit = protective_limit_price(
+                reference_price=opportunity.perp_ask,
+                maximum_slippage=maximum_slippage,
+                side="buy",
+                price_increment=pair.perp_price_increment,
+            )
+        except OrderSizingError as exc:
+            raise TradeValidationError(str(exc)) from exc
+        fees = settings.fees[opportunity.exchange]
+        spot_notional = sizing.spot_quantity * spot_limit
+        perp_notional = sizing.base_quantity * perp_limit
+        closing_fees = (
+            spot_notional * fees.spot_taker
+            + perp_notional * fees.perp_taker
+        )
+        gross_pnl = (
+            (spot_limit - position.spot_entry_price)
+            + (position.perp_entry_price - perp_limit)
+        ) * sizing.base_quantity
+        config_version = hashlib.sha256(
+            json.dumps(
+                {
+                    "scanner": settings.model_dump(mode="json"),
+                    "environment": environment.value,
+                    "maximum_slippage": _canonical_decimal(maximum_slippage),
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "action": "close",
+                    "position_id": position.id,
+                    "exchange": opportunity.exchange.value,
+                    "environment": environment.value,
+                    "base_asset": opportunity.base_asset,
+                    "base_quantity": _canonical_decimal(sizing.base_quantity),
+                    "spot_symbol": pair.spot_symbol,
+                    "perp_symbol": pair.perp_symbol,
+                    "spot_quantity": _canonical_decimal(sizing.spot_quantity),
+                    "perp_quantity": _canonical_decimal(sizing.perp_quantity),
+                    "perp_contract_size": _canonical_decimal(
+                        pair.perp_contract_size
+                    ),
+                    "spot_limit": _canonical_decimal(spot_limit),
+                    "perp_limit": _canonical_decimal(perp_limit),
+                    "market_observed_at": opportunity.observed_at.isoformat(),
+                    "config_version": config_version,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        return LiveClosePreview(
+            request_fingerprint=fingerprint,
+            config_version=config_version,
+            position_id=position.id,
+            exchange=opportunity.exchange,
+            environment=environment,
+            base_asset=opportunity.base_asset,
+            leverage=opening_intent.leverage,
+            market_observed_at=opportunity.observed_at,
+            expires_at=opportunity.observed_at + timedelta(seconds=15),
+            maximum_slippage=maximum_slippage,
+            base_quantity=sizing.base_quantity,
+            spot_symbol=pair.spot_symbol,
+            spot_reference_price=opportunity.spot_bid,
+            spot_limit_price=spot_limit,
+            spot_quantity=sizing.spot_quantity,
+            spot_usdt_proceeds_before_fee=spot_notional,
+            perp_symbol=pair.perp_symbol,
+            perp_reference_price=opportunity.perp_ask,
+            perp_limit_price=perp_limit,
+            perp_quantity=sizing.perp_quantity,
+            perp_base_multiplier=pair.perp_contract_size,
+            estimated_total_fees_usdt=closing_fees,
+            estimated_gross_pnl_usdt=gross_pnl,
+            estimated_net_pnl_usdt=(
+                gross_pnl
+                - position.remaining_opening_fees_usdt
+                - closing_fees
+            ),
             worst_case_basis=(perp_limit - spot_limit) / spot_limit,
         )
 
@@ -679,6 +912,119 @@ class TradeLedger:
                 },
             ],
         )
+        if row.request_fingerprint != preview.request_fingerprint:
+            raise IdempotencyConflict(
+                "idempotency key was already used for a different trade request"
+            )
+        return _view(row, legs), created
+
+    async def plan_live_close(
+        self,
+        *,
+        position_id: str,
+        opportunity: Opportunity,
+        pair: InstrumentPair,
+        idempotency_key: uuid.UUID,
+        settings: ScannerSettings,
+        environment: ExchangeEnvironment,
+        maximum_slippage: Decimal = Decimal("0.001"),
+        now: datetime | None = None,
+    ) -> tuple[TradeIntentView, bool]:
+        existing = await self.database.trade_intent_by_idempotency(
+            str(idempotency_key)
+        )
+        if existing is not None:
+            row, legs = existing
+            if (
+                row.environment == environment.value
+                and row.action == "close"
+                and row.paired_position_id == position_id
+            ):
+                return _view(row, legs), False
+            raise IdempotencyConflict(
+                "idempotency key was already used for a different trade request"
+            )
+        preview = await self.preview_live_close(
+            position_id=position_id,
+            opportunity=opportunity,
+            pair=pair,
+            settings=settings,
+            environment=environment,
+            maximum_slippage=maximum_slippage,
+            now=now,
+        )
+        fees = settings.fees[opportunity.exchange]
+        intent_id = str(uuid.uuid4())
+        spot_client_id, perp_client_id = _live_client_order_ids(
+            opportunity.exchange,
+            intent_id,
+        )
+        now_value = datetime.now(UTC)
+        try:
+            row, legs, created = await self.database.create_paper_close_intent(
+                position_id=position_id,
+                intent={
+                    "id": intent_id,
+                    "paired_position_id": position_id,
+                    "idempotency_key": str(idempotency_key),
+                    "request_fingerprint": preview.request_fingerprint,
+                    "exchange": opportunity.exchange.value,
+                    "environment": environment.value,
+                    "base_asset": opportunity.base_asset,
+                    "action": "close",
+                    "status": TradeIntentStatus.PLANNED.value,
+                    "leverage": preview.leverage,
+                    "requested_notional": (
+                        preview.spot_quantity * preview.spot_limit_price
+                    ),
+                    "base_quantity": preview.base_quantity,
+                    "spot_fee_rate": fees.spot_taker,
+                    "perp_fee_rate": fees.perp_taker,
+                    "market_observed_at": opportunity.observed_at,
+                    "config_version": preview.config_version,
+                    "version": 1,
+                    "created_at": now_value,
+                    "updated_at": now_value,
+                },
+                legs=[
+                    {
+                        "id": str(uuid.uuid4()),
+                        "trade_intent_id": intent_id,
+                        "leg": "spot",
+                        "market": "spot",
+                        "symbol": pair.spot_symbol,
+                        "side": "sell",
+                        "client_order_id": spot_client_id,
+                        "status": OrderLegStatus.CREATED.value,
+                        "quantity": preview.spot_quantity,
+                        "base_multiplier": Decimal("1"),
+                        "limit_price": preview.spot_limit_price,
+                        "filled_quantity": Decimal("0"),
+                        "reduce_only": False,
+                        "created_at": now_value,
+                        "updated_at": now_value,
+                    },
+                    {
+                        "id": str(uuid.uuid4()),
+                        "trade_intent_id": intent_id,
+                        "leg": "perp",
+                        "market": "perp",
+                        "symbol": pair.perp_symbol,
+                        "side": "buy",
+                        "client_order_id": perp_client_id,
+                        "status": OrderLegStatus.CREATED.value,
+                        "quantity": preview.perp_quantity,
+                        "base_multiplier": preview.perp_base_multiplier,
+                        "limit_price": preview.perp_limit_price,
+                        "filled_quantity": Decimal("0"),
+                        "reduce_only": True,
+                        "created_at": now_value,
+                        "updated_at": now_value,
+                    },
+                ],
+            )
+        except ValueError as exc:
+            raise TradeValidationError(str(exc)) from exc
         if row.request_fingerprint != preview.request_fingerprint:
             raise IdempotencyConflict(
                 "idempotency key was already used for a different trade request"

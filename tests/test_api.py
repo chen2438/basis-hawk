@@ -5,6 +5,7 @@ from decimal import Decimal
 import httpx
 from fastapi.testclient import TestClient
 
+from basis_hawk.accounts import RemoteFill
 from basis_hawk.api import create_app
 from basis_hawk.credentials import (
     CredentialService,
@@ -20,7 +21,7 @@ from basis_hawk.models import (
 )
 from basis_hawk.service import ScannerService
 from basis_hawk.storage import Database
-from basis_hawk.trading import PaperExecutionService
+from basis_hawk.trading import PaperExecutionService, TradeLedger
 
 
 def opportunity() -> Opportunity:
@@ -50,6 +51,67 @@ def opportunity() -> Opportunity:
         perp_taker_fee=Decimal("0.0005"),
         quality=Quality.HEALTHY,
     )
+
+
+def instrument_pair() -> InstrumentPair:
+    return InstrumentPair(
+        exchange=Exchange.BINANCE,
+        base_asset="BTC",
+        spot_symbol="BTCUSDT",
+        perp_symbol="BTCUSDT",
+        spot_price_increment=Decimal("0.01"),
+        spot_quantity_increment=Decimal("0.001"),
+        spot_min_quantity=Decimal("0.001"),
+        spot_min_notional=Decimal("5"),
+        perp_price_increment=Decimal("0.01"),
+        perp_quantity_increment=Decimal("0.001"),
+        perp_min_quantity=Decimal("0.001"),
+        perp_min_notional=Decimal("5"),
+        perp_contract_size=Decimal("1"),
+    )
+
+
+async def create_live_position(database: Database) -> str:
+    intent, _ = await TradeLedger(database).plan_live_open(
+        opportunity=opportunity(),
+        pair=instrument_pair(),
+        notional_usdt=Decimal("100"),
+        idempotency_key=uuid.uuid4(),
+        settings=await database.load_settings(),
+        environment=ExchangeEnvironment.LIVE,
+        leverage=2,
+    )
+    stored = await database.trade_intent(intent.id)
+    assert stored is not None
+    now = datetime.now(UTC)
+    for leg in stored[1]:
+        await database.persist_remote_fills(
+            order_leg_id=leg.id,
+            fills=[
+                RemoteFill(
+                    exchange_trade_id=f"fill-{leg.market}",
+                    exchange_order_id=f"order-{leg.market}",
+                    client_order_id=leg.client_order_id,
+                    market=leg.market,
+                    symbol=leg.symbol,
+                    side=leg.side,
+                    quantity=leg.quantity,
+                    price=leg.limit_price,
+                    fee_amount=Decimal("0.01"),
+                    fee_asset="USDT",
+                    liquidity="taker",
+                    occurred_at=now,
+                )
+            ],
+        )
+    async with database.sessions() as session:
+        row = await session.get(type(stored[0]), intent.id)
+        assert row is not None
+        row.status = "executing"
+        await session.commit()
+    settled = await database.settle_live_open(intent_id=intent.id)
+    assert settled is not None and settled[1] is not None
+    return settled[1].id
 
 
 async def test_rest_contract_and_settings() -> None:
@@ -131,23 +193,7 @@ async def test_live_open_requires_persisted_preview_and_confirmation() -> None:
     service = ScannerService(database, {})
     await service.initialize()
     service.opportunities["binance:BTC"] = opportunity()
-    service.pairs[Exchange.BINANCE] = [
-        InstrumentPair(
-            exchange=Exchange.BINANCE,
-            base_asset="BTC",
-            spot_symbol="BTCUSDT",
-            perp_symbol="BTCUSDT",
-            spot_price_increment=Decimal("0.01"),
-            spot_quantity_increment=Decimal("0.001"),
-            spot_min_quantity=Decimal("0.001"),
-            spot_min_notional=Decimal("5"),
-            perp_price_increment=Decimal("0.01"),
-            perp_quantity_increment=Decimal("0.001"),
-            perp_min_quantity=Decimal("0.001"),
-            perp_min_notional=Decimal("5"),
-            perp_contract_size=Decimal("1"),
-        )
-    ]
+    service.pairs[Exchange.BINANCE] = [instrument_pair()]
     credentials = CredentialService(
         database,
         SecretCipher(SecretCipher.generate_key()),
@@ -226,6 +272,94 @@ async def test_live_open_requires_persisted_preview_and_confirmation() -> None:
             json={"preview_id": preview_id, "confirmed": True},
         )
         assert conflict.status_code == 409
+    await database.close()
+
+
+async def test_live_close_requires_position_bound_preview_and_confirmation() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    service = ScannerService(database, {})
+    await service.initialize()
+    service.opportunities["binance:BTC"] = opportunity()
+    service.pairs[Exchange.BINANCE] = [instrument_pair()]
+    credentials = CredentialService(
+        database,
+        SecretCipher(SecretCipher.generate_key()),
+    )
+    await credentials.save(
+        exchange=Exchange.BINANCE,
+        environment=ExchangeEnvironment.LIVE,
+        label="primary",
+        secrets=ExchangeSecrets(
+            api_key="test-api-key",
+            api_secret="test-api-secret",
+        ),
+        actor="test",
+    )
+    position_id = await create_live_position(database)
+    app = create_app(
+        service,
+        manage_lifecycle=False,
+        auth_required=False,
+        credential_service=credentials,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        preview_response = await client.post(
+            f"/api/trades/positions/{position_id}/close/preview",
+            json={"maximum_slippage": "0.002"},
+        )
+        assert preview_response.status_code == 200, preview_response.text
+        preview_id = preview_response.json()["preview_id"]
+        preview = preview_response.json()["preview"]
+        assert preview["position_id"] == position_id
+        assert Decimal(preview["base_quantity"]) == Decimal("1")
+        assert Decimal(preview["spot_quantity"]) == Decimal("1")
+        assert Decimal(preview["perp_quantity"]) == Decimal("1")
+        assert Decimal(preview["spot_limit_price"]) < Decimal("99")
+        assert Decimal(preview["perp_limit_price"]) > Decimal("102")
+        assert Decimal(preview["estimated_total_fees_usdt"]) > 0
+        assert "request_fingerprint" not in preview
+        assert "config_version" not in preview
+        position = await database.paired_position(position_id)
+        assert position is not None and position.status == "open"
+
+        unconfirmed = await client.post(
+            f"/api/trades/positions/{position_id}/close/confirm",
+            headers={"Idempotency-Key": str(uuid.uuid4())},
+            json={"preview_id": preview_id, "confirmed": False},
+        )
+        assert unconfirmed.status_code == 422
+        await database.set_execution_control(state="ready", reason="test")
+        key = str(uuid.uuid4())
+        confirmed = await client.post(
+            f"/api/trades/positions/{position_id}/close/confirm",
+            headers={"Idempotency-Key": key},
+            json={"preview_id": preview_id, "confirmed": True},
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        assert confirmed.json()["created"] is True
+        intent = confirmed.json()["intent"]
+        assert intent["action"] == "close"
+        assert intent["paired_position_id"] == position_id
+        legs = {item["market"]: item for item in intent["legs"]}
+        assert legs["spot"]["side"] == "sell"
+        assert legs["spot"]["reduce_only"] is False
+        assert legs["perp"]["side"] == "buy"
+        assert legs["perp"]["reduce_only"] is True
+        position = await database.paired_position(position_id)
+        assert position is not None
+        assert position.status == "closing"
+        assert position.closing_intent_id == intent["id"]
+
+        repeated = await client.post(
+            f"/api/trades/positions/{position_id}/close/confirm",
+            headers={"Idempotency-Key": key},
+            json={"preview_id": preview_id, "confirmed": True},
+        )
+        assert repeated.status_code == 200
+        assert repeated.json()["created"] is False
     await database.close()
 
 

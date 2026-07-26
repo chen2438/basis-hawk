@@ -262,6 +262,12 @@ class TradePreviewRow(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     actor: Mapped[str] = mapped_column(String(100))
     request_fingerprint: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(20), default="open")
+    paired_position_id: Mapped[str | None] = mapped_column(
+        ForeignKey("paired_positions.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=True,
+    )
     exchange: Mapped[str] = mapped_column(String(20), index=True)
     environment: Mapped[str] = mapped_column(String(20))
     base_asset: Mapped[str] = mapped_column(String(40))
@@ -284,6 +290,15 @@ class TradePreviewRow(Base):
         nullable=True,
     )
     __table_args__ = (
+        CheckConstraint(
+            "action IN ('open', 'close')",
+            name="ck_trade_preview_action",
+        ),
+        CheckConstraint(
+            "(action = 'open' AND paired_position_id IS NULL) OR "
+            "(action = 'close' AND paired_position_id IS NOT NULL)",
+            name="ck_trade_preview_position_action",
+        ),
         CheckConstraint(
             "requested_notional > 0",
             name="ck_trade_preview_notional_positive",
