@@ -58,6 +58,66 @@ class AccountSnapshot(BaseModel):
         return format(value, "f")
 
 
+class RemoteOrder(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    exchange_order_id: str
+    client_order_id: str | None = None
+    market: str
+    symbol: str
+    side: str
+    status: str
+    price: Decimal
+    original_quantity: Decimal
+    filled_quantity: Decimal
+    reduce_only: bool = False
+
+    @field_serializer(
+        "price",
+        "original_quantity",
+        "filled_quantity",
+        when_used="json",
+    )
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+
+class RemotePosition(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    side: str
+    quantity: Decimal
+    entry_price: Decimal
+    mark_price: Decimal
+    liquidation_price: Decimal | None = None
+    leverage: Decimal
+    isolated: bool | None = None
+
+    @field_serializer(
+        "quantity",
+        "entry_price",
+        "mark_price",
+        "liquidation_price",
+        "leverage",
+        when_used="json",
+    )
+    def serialize_decimal(self, value: Decimal | None) -> str | None:
+        return format(value, "f") if value is not None else None
+
+
+class RemoteTradingState(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    exchange: Exchange
+    environment: ExchangeEnvironment
+    observed_at: datetime
+    open_orders: list[RemoteOrder]
+    positions: list[RemotePosition]
+    complete: bool
+    incomplete_reason: str | None = None
+
+
 def _query(params: dict[str, object]) -> str:
     return urlencode(sorted((key, str(value)) for key, value in params.items()))
 
@@ -107,6 +167,9 @@ class PrivateAccountClient(ABC):
 
     @abstractmethod
     async def snapshot(self) -> AccountSnapshot: ...
+
+    @abstractmethod
+    async def trading_state(self) -> RemoteTradingState: ...
 
     @abstractmethod
     async def close(self) -> None: ...
@@ -192,6 +255,59 @@ class BinanceAccountClient(PrivateAccountClient):
             trade_permission=bool(spot.get("canTrade")) and bool(perp.get("canTrade")),
         )
 
+    async def trading_state(self) -> RemoteTradingState:
+        spot_orders, perp_orders, positions = await _gather(
+            self._get(self.spot, "/api/v3/openOrders"),
+            self._get(self.perp, "/fapi/v1/openOrders"),
+            self._get(self.perp, "/fapi/v3/positionRisk"),
+        )
+        orders = [
+            _order(
+                item,
+                market="spot",
+                order_id="orderId",
+                client_id="clientOrderId",
+                quantity="origQty",
+                filled="executedQty",
+            )
+            for item in spot_orders
+        ]
+        orders.extend(
+            _order(
+                item,
+                market="perp",
+                order_id="orderId",
+                client_id="clientOrderId",
+                quantity="origQty",
+                filled="executedQty",
+                reduce_only=bool(item.get("reduceOnly")),
+            )
+            for item in perp_orders
+        )
+        normalized_positions = []
+        for item in positions:
+            quantity = Decimal(str(item.get("positionAmt") or "0"))
+            if quantity == 0:
+                continue
+            normalized_positions.append(
+                RemotePosition(
+                    symbol=str(item.get("symbol") or ""),
+                    side="long" if quantity > 0 else "short",
+                    quantity=abs(quantity),
+                    entry_price=Decimal(str(item.get("entryPrice") or "0")),
+                    mark_price=Decimal(str(item.get("markPrice") or "0")),
+                    liquidation_price=_optional_decimal(item.get("liquidationPrice")),
+                    leverage=Decimal(str(item.get("leverage") or "0")),
+                    isolated=str(item.get("marginType") or "").lower() == "isolated",
+                )
+            )
+        return _state(
+            self.exchange,
+            self.environment,
+            orders,
+            normalized_positions,
+        )
+
     async def close(self) -> None:
         if self._owned_spot:
             await self.spot.aclose()
@@ -270,6 +386,60 @@ class OkxAccountClient(PrivateAccountClient):
             trade_permission=None,
         )
 
+    async def trading_state(self) -> RemoteTradingState:
+        pending, positions = await _gather(
+            self._get("/api/v5/trade/orders-pending"),
+            self._get("/api/v5/account/positions", instType="SWAP"),
+        )
+        _okx_success(pending)
+        _okx_success(positions)
+        order_items = pending.get("data") or []
+        position_items = positions.get("data") or []
+        orders = [
+            RemoteOrder(
+                exchange_order_id=str(item.get("ordId") or ""),
+                client_order_id=str(item["clOrdId"]) if item.get("clOrdId") else None,
+                market="spot" if item.get("instType") == "SPOT" else "perp",
+                symbol=str(item.get("instId") or ""),
+                side=str(item.get("side") or "").lower(),
+                status=str(item.get("state") or ""),
+                price=Decimal(str(item.get("px") or "0")),
+                original_quantity=Decimal(str(item.get("sz") or "0")),
+                filled_quantity=Decimal(str(item.get("accFillSz") or "0")),
+                reduce_only=str(item.get("reduceOnly") or "false").lower() == "true",
+            )
+            for item in order_items
+        ]
+        normalized_positions = []
+        for item in position_items:
+            quantity = Decimal(str(item.get("pos") or "0"))
+            if quantity == 0:
+                continue
+            side = str(item.get("posSide") or "net").lower()
+            if side == "net":
+                side = "long" if quantity > 0 else "short"
+            normalized_positions.append(
+                RemotePosition(
+                    symbol=str(item.get("instId") or ""),
+                    side=side,
+                    quantity=abs(quantity),
+                    entry_price=Decimal(str(item.get("avgPx") or "0")),
+                    mark_price=Decimal(str(item.get("markPx") or "0")),
+                    liquidation_price=_optional_decimal(item.get("liqPx")),
+                    leverage=Decimal(str(item.get("lever") or "0")),
+                    isolated=item.get("mgnMode") == "isolated",
+                )
+            )
+        complete = len(order_items) < 100 and len(position_items) < 100
+        return _state(
+            self.exchange,
+            self.environment,
+            orders,
+            normalized_positions,
+            complete=complete,
+            incomplete_reason=None if complete else "OKX reconciliation result may be paginated",
+        )
+
     async def close(self) -> None:
         if self._owned:
             await self.http.aclose()
@@ -320,6 +490,22 @@ class BybitAccountClient(PrivateAccountClient):
             },
         )
 
+    async def _paged(self, path: str, **params: object) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            values = dict(params)
+            if cursor:
+                values["cursor"] = cursor
+            payload = await self._get(path, **values)
+            _bybit_success(payload)
+            result = payload.get("result") or {}
+            items.extend(result.get("list") or [])
+            next_cursor = str(result.get("nextPageCursor") or "")
+            if not next_cursor or next_cursor == cursor:
+                return items
+            cursor = next_cursor
+
     async def snapshot(self) -> AccountSnapshot:
         wallet, info = await _gather(
             self._get(
@@ -358,6 +544,58 @@ class BybitAccountClient(PrivateAccountClient):
             ),
             position_mode=PositionMode.UNKNOWN,
             trade_permission=None,
+        )
+
+    async def trading_state(self) -> RemoteTradingState:
+        spot_orders, perp_orders, positions = await _gather(
+            self._paged("/v5/order/realtime", category="spot", limit=50),
+            self._paged(
+                "/v5/order/realtime",
+                category="linear",
+                settleCoin="USDT",
+                limit=50,
+            ),
+            self._paged(
+                "/v5/position/list",
+                category="linear",
+                settleCoin="USDT",
+                limit=200,
+            ),
+        )
+        orders = [
+            _bybit_order(item, market="spot")
+            for item in spot_orders
+        ]
+        orders.extend(_bybit_order(item, market="perp") for item in perp_orders)
+        normalized_positions = [
+            RemotePosition(
+                symbol=str(item.get("symbol") or ""),
+                side=(
+                    "long"
+                    if item.get("side") == "Buy"
+                    else "short"
+                    if item.get("side") == "Sell"
+                    else str(item.get("side") or "").lower()
+                ),
+                quantity=Decimal(str(item.get("size") or "0")),
+                entry_price=Decimal(str(item.get("avgPrice") or "0")),
+                mark_price=Decimal(str(item.get("markPrice") or "0")),
+                liquidation_price=_optional_decimal(item.get("liqPrice")),
+                leverage=Decimal(str(item.get("leverage") or "0")),
+                isolated=(
+                    None
+                    if item.get("tradeMode") is None
+                    else int(item.get("tradeMode") or 0) == 1
+                ),
+            )
+            for item in positions
+            if Decimal(str(item.get("size") or "0")) != 0
+        ]
+        return _state(
+            self.exchange,
+            self.environment,
+            orders,
+            normalized_positions,
         )
 
     async def close(self) -> None:
@@ -443,6 +681,57 @@ class BitgetAccountClient(PrivateAccountClient):
             trade_permission=None,
         )
 
+    async def trading_state(self) -> RemoteTradingState:
+        spot_payload, perp_payload, position_payload = await _gather(
+            self._get("/api/v2/spot/trade/unfilled-orders", limit=100),
+            self._get(
+                "/api/v2/mix/order/orders-pending",
+                productType="USDT-FUTURES",
+                limit=100,
+            ),
+            self._get(
+                "/api/v2/mix/position/all-position",
+                productType="USDT-FUTURES",
+                marginCoin="USDT",
+            ),
+        )
+        for payload in (spot_payload, perp_payload, position_payload):
+            _bitget_success(payload)
+        spot_orders = spot_payload.get("data") or []
+        perp_data = perp_payload.get("data") or {}
+        perp_orders = perp_data.get("entrustedList") or []
+        position_items = position_payload.get("data") or []
+        orders = [
+            _bitget_order(item, market="spot")
+            for item in spot_orders
+        ]
+        orders.extend(_bitget_order(item, market="perp") for item in perp_orders)
+        positions = [
+            RemotePosition(
+                symbol=str(item.get("symbol") or ""),
+                side=str(item.get("holdSide") or "").lower(),
+                quantity=Decimal(str(item.get("total") or "0")),
+                entry_price=Decimal(str(item.get("openPriceAvg") or "0")),
+                mark_price=Decimal(str(item.get("markPrice") or "0")),
+                liquidation_price=_optional_decimal(item.get("liquidationPrice")),
+                leverage=Decimal(str(item.get("leverage") or "0")),
+                isolated=str(item.get("marginMode") or "").lower() == "isolated",
+            )
+            for item in position_items
+            if Decimal(str(item.get("total") or "0")) != 0
+        ]
+        complete = len(spot_orders) < 100 and len(perp_orders) < 100
+        return _state(
+            self.exchange,
+            self.environment,
+            orders,
+            positions,
+            complete=complete,
+            incomplete_reason=(
+                None if complete else "Bitget open-order result requires another page"
+            ),
+        )
+
     async def close(self) -> None:
         if self._owned:
             await self.http.aclose()
@@ -523,6 +812,64 @@ class GateAccountClient(PrivateAccountClient):
                 else PositionMode.ONE_WAY
             ),
             trade_permission=None,
+        )
+
+    async def trading_state(self) -> RemoteTradingState:
+        spot_groups, perp_orders, position_items = await _gather(
+            self._get("/api/v4/spot/open_orders", page=1, limit=100),
+            self._get(
+                "/api/v4/futures/usdt/orders",
+                status="open",
+                limit=100,
+                offset=0,
+            ),
+            self._get("/api/v4/futures/usdt/positions"),
+        )
+        spot_orders = [
+            item
+            for group in spot_groups
+            for item in (group.get("orders") or [])
+        ]
+        orders = [_gate_spot_order(item) for item in spot_orders]
+        orders.extend(_gate_perp_order(item) for item in perp_orders)
+        positions = []
+        for item in position_items:
+            quantity = Decimal(str(item.get("size") or "0"))
+            if quantity == 0:
+                continue
+            side = str(item.get("mode") or item.get("position_side") or "").lower()
+            if side not in {"long", "short"}:
+                side = "long" if quantity > 0 else "short"
+            positions.append(
+                RemotePosition(
+                    symbol=str(item.get("contract") or ""),
+                    side=side,
+                    quantity=abs(quantity),
+                    entry_price=Decimal(str(item.get("entry_price") or "0")),
+                    mark_price=Decimal(str(item.get("mark_price") or "0")),
+                    liquidation_price=_optional_decimal(item.get("liq_price")),
+                    leverage=Decimal(str(item.get("leverage") or "0")),
+                    isolated=(
+                        None
+                        if item.get("leverage") in (None, "")
+                        else Decimal(str(item.get("leverage") or "0")) != 0
+                    ),
+                )
+            )
+        complete = (
+            all(
+                int(group.get("total") or 0) <= len(group.get("orders") or [])
+                for group in spot_groups
+            )
+            and len(perp_orders) < 100
+        )
+        return _state(
+            self.exchange,
+            self.environment,
+            orders,
+            positions,
+            complete=complete,
+            incomplete_reason=None if complete else "Gate open-order result is paginated",
         )
 
     async def close(self) -> None:
@@ -628,6 +975,64 @@ class MexcAccountClient(PrivateAccountClient):
             trade_permission=None,
         )
 
+    async def trading_state(self) -> RemoteTradingState:
+        spot_orders, perp_payload, position_payload = await _gather(
+            self._spot_get("/api/v3/openOrders"),
+            self._perp_get(
+                "/api/v1/private/order/list/open_orders",
+                page_num=1,
+                page_size=100,
+            ),
+            self._perp_get("/api/v1/private/position/open_positions"),
+        )
+        if not perp_payload.get("success") or not position_payload.get("success"):
+            raise PrivateRequestError("MEXC trading-state reconciliation failed")
+        perp_data = perp_payload.get("data") or {}
+        perp_orders = (
+            perp_data.get("resultList")
+            if isinstance(perp_data, dict)
+            else perp_data
+        ) or []
+        position_items = position_payload.get("data") or []
+        orders = [
+            _order(
+                item,
+                market="spot",
+                order_id="orderId",
+                client_id="clientOrderId",
+                quantity="origQty",
+                filled="executedQty",
+            )
+            for item in spot_orders
+        ]
+        orders.extend(_mexc_perp_order(item) for item in perp_orders)
+        positions = [
+            RemotePosition(
+                symbol=str(item.get("symbol") or ""),
+                side="long" if item.get("positionType") == 1 else "short",
+                quantity=Decimal(str(item.get("holdVol") or "0")),
+                entry_price=Decimal(str(item.get("holdAvgPrice") or "0")),
+                mark_price=Decimal(str(item.get("fairPrice") or "0")),
+                liquidation_price=_optional_decimal(item.get("liquidatePrice")),
+                leverage=Decimal(str(item.get("leverage") or "0")),
+                isolated=item.get("openType") == 1,
+            )
+            for item in position_items
+            if Decimal(str(item.get("holdVol") or "0")) != 0
+        ]
+        total = int(perp_data.get("totalCount") or len(perp_orders)) if isinstance(
+            perp_data, dict
+        ) else len(perp_orders)
+        complete = total <= len(perp_orders)
+        return _state(
+            self.exchange,
+            self.environment,
+            orders,
+            positions,
+            complete=complete,
+            incomplete_reason=None if complete else "MEXC open-order result is paginated",
+        )
+
     async def close(self) -> None:
         if self._owned_spot:
             await self.spot.aclose()
@@ -670,3 +1075,132 @@ def _bybit_success(payload: Any) -> None:
 def _bitget_success(payload: Any) -> None:
     if not isinstance(payload, dict) or payload.get("code") != "00000":
         raise PrivateRequestError("Bitget private account request was rejected")
+
+
+def _optional_decimal(value: object) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    return Decimal(str(value))
+
+
+def _order(
+    item: dict[str, Any],
+    *,
+    market: str,
+    order_id: str,
+    client_id: str,
+    quantity: str,
+    filled: str,
+    reduce_only: bool = False,
+) -> RemoteOrder:
+    return RemoteOrder(
+        exchange_order_id=str(item.get(order_id) or ""),
+        client_order_id=str(item[client_id]) if item.get(client_id) else None,
+        market=market,
+        symbol=str(item.get("symbol") or ""),
+        side=str(item.get("side") or "").lower(),
+        status=str(item.get("status") or ""),
+        price=Decimal(str(item.get("price") or "0")),
+        original_quantity=Decimal(str(item.get(quantity) or "0")),
+        filled_quantity=Decimal(str(item.get(filled) or "0")),
+        reduce_only=reduce_only,
+    )
+
+
+def _bybit_order(item: dict[str, Any], *, market: str) -> RemoteOrder:
+    return RemoteOrder(
+        exchange_order_id=str(item.get("orderId") or ""),
+        client_order_id=str(item["orderLinkId"]) if item.get("orderLinkId") else None,
+        market=market,
+        symbol=str(item.get("symbol") or ""),
+        side=str(item.get("side") or "").lower(),
+        status=str(item.get("orderStatus") or ""),
+        price=Decimal(str(item.get("price") or "0")),
+        original_quantity=Decimal(str(item.get("qty") or "0")),
+        filled_quantity=Decimal(str(item.get("cumExecQty") or "0")),
+        reduce_only=bool(item.get("reduceOnly")),
+    )
+
+
+def _bitget_order(item: dict[str, Any], *, market: str) -> RemoteOrder:
+    return RemoteOrder(
+        exchange_order_id=str(item.get("orderId") or ""),
+        client_order_id=str(item["clientOid"]) if item.get("clientOid") else None,
+        market=market,
+        symbol=str(item.get("symbol") or ""),
+        side=str(item.get("side") or "").lower(),
+        status=str(item.get("status") or ""),
+        price=Decimal(str(item.get("priceAvg") or item.get("price") or "0")),
+        original_quantity=Decimal(str(item.get("size") or "0")),
+        filled_quantity=Decimal(
+            str(item.get("baseVolume") or item.get("filledQty") or "0")
+        ),
+        reduce_only=str(item.get("reduceOnly") or "").lower() == "yes",
+    )
+
+
+def _gate_spot_order(item: dict[str, Any]) -> RemoteOrder:
+    return RemoteOrder(
+        exchange_order_id=str(item.get("id") or ""),
+        client_order_id=str(item["text"]) if item.get("text") else None,
+        market="spot",
+        symbol=str(item.get("currency_pair") or ""),
+        side=str(item.get("side") or "").lower(),
+        status=str(item.get("status") or ""),
+        price=Decimal(str(item.get("price") or "0")),
+        original_quantity=Decimal(str(item.get("amount") or "0")),
+        filled_quantity=Decimal(str(item.get("filled_amount") or "0")),
+    )
+
+
+def _gate_perp_order(item: dict[str, Any]) -> RemoteOrder:
+    quantity = Decimal(str(item.get("size") or "0"))
+    remaining = Decimal(str(item.get("left") or "0"))
+    return RemoteOrder(
+        exchange_order_id=str(item.get("id") or ""),
+        client_order_id=str(item["text"]) if item.get("text") else None,
+        market="perp",
+        symbol=str(item.get("contract") or ""),
+        side="buy" if quantity > 0 else "sell",
+        status=str(item.get("status") or ""),
+        price=Decimal(str(item.get("price") or "0")),
+        original_quantity=abs(quantity),
+        filled_quantity=max(Decimal("0"), abs(quantity) - abs(remaining)),
+        reduce_only=bool(item.get("reduce_only")),
+    )
+
+
+def _mexc_perp_order(item: dict[str, Any]) -> RemoteOrder:
+    side = int(item.get("side") or 0)
+    return RemoteOrder(
+        exchange_order_id=str(item.get("orderId") or ""),
+        client_order_id=str(item["externalOid"]) if item.get("externalOid") else None,
+        market="perp",
+        symbol=str(item.get("symbol") or ""),
+        side="buy" if side in {1, 2} else "sell",
+        status=str(item.get("state") or ""),
+        price=Decimal(str(item.get("price") or "0")),
+        original_quantity=Decimal(str(item.get("vol") or "0")),
+        filled_quantity=Decimal(str(item.get("dealVol") or "0")),
+        reduce_only=side in {2, 4},
+    )
+
+
+def _state(
+    exchange: Exchange,
+    environment: ExchangeEnvironment,
+    orders: list[RemoteOrder],
+    positions: list[RemotePosition],
+    *,
+    complete: bool = True,
+    incomplete_reason: str | None = None,
+) -> RemoteTradingState:
+    return RemoteTradingState(
+        exchange=exchange,
+        environment=environment,
+        observed_at=datetime.now(UTC),
+        open_orders=orders,
+        positions=positions,
+        complete=complete,
+        incomplete_reason=incomplete_reason,
+    )
