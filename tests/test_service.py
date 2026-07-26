@@ -92,6 +92,21 @@ async def test_refreshes_and_recalculates() -> None:
     result = service.list_opportunities()[0]
     assert result.base_asset == "BTC"
     assert result.net_return is not None
+    persisted = await database.latest_opportunities(
+        exchanges={Exchange.BINANCE.value}
+    )
+    assert len(persisted) == 1
+    assert persisted[0] == result
+    pairs = await database.instrument_pairs(
+        exchanges={Exchange.BINANCE.value}
+    )
+    assert len(pairs) == 1
+    assert pairs[0].key == service.pairs[Exchange.BINANCE][0].key
+    assert pairs[0].spot_symbol == "BTCUSDT"
+    assert pairs[0].perp_contract_size == Decimal("1")
+    assert pairs[0].perp_price_increment.quantize(
+        Decimal("0.000000000001")
+    ) == Decimal("0.100000000000")
     async with database.sessions() as session:
         instrument = await session.scalar(select(InstrumentRow))
         assert instrument is not None

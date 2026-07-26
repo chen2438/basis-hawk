@@ -127,6 +127,10 @@ MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
 `disabled/enabled/paused`、原因和操作者。启用前 API 必须重新读取账户执行 `ready`、策略内容和目标
 凭据；MEXC/Gate 不允许出现在 sandbox 策略。暂停不会覆盖账户级 `execution_control`，因此后续仍可
 对账和人工平仓。每次创建版本、启用、暂停、恢复和禁用都写审计事件。
+`latest_opportunities` 以 `exchange:base_asset` 为主键保存最新完整机会 JSON、交易所、标的、行情时间和
+写入时间。API 行情进程每轮覆盖更新，不追加高频历史；`opportunity_snapshots` 继续承担分钟级历史。
+唯一 worker 通过该表和 `instruments` 目录获得跨进程一致的机会与精度，仍以行情 `observed_at` 而不是
+`updated_at` 判断 15 秒新鲜度。
 真实意图额外固化 1–10 倍请求杠杆，旧记录迁移为安全默认值 1；
 `order_legs` 同一意图固定一条现货腿和一条永续腿，并在提交交易所前生成唯一客户端订单 ID；每条腿还
 保存严格为正的 `base_multiplier`，使交易所原生数量及成交量可以无歧义换算成基础币。已有纸面订单腿

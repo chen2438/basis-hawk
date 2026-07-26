@@ -231,6 +231,13 @@ class ScannerService:
             self._rebuild(key)
         now = datetime.now(UTC)
         self.statuses[exchange] = self.statuses[exchange].model_copy(update={"last_quote_at": now})
+        await self.database.save_latest_opportunities(
+            [
+                item
+                for item in self.opportunities.values()
+                if item.exchange == exchange
+            ]
+        )
         await self._publish(
             [item for item in self.opportunities.values() if item.exchange == exchange]
         )

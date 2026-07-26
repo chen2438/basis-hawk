@@ -86,6 +86,19 @@ class SnapshotRow(Base):
     __table_args__ = (Index("ix_snapshot_history", "exchange", "base_asset", "observed_at"),)
 
 
+class LatestOpportunityRow(Base):
+    __tablename__ = "latest_opportunities"
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    exchange: Mapped[str] = mapped_column(String(20), index=True)
+    base_asset: Mapped[str] = mapped_column(String(40))
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+    payload: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class SettingRow(Base):
     __tablename__ = "settings"
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
@@ -2646,6 +2659,99 @@ class Database:
                 for pair in pairs
             )
             await session.commit()
+
+    async def instrument_pairs(
+        self,
+        *,
+        exchanges: set[str] | None = None,
+    ) -> list[InstrumentPair]:
+        async with self.sessions() as session:
+            statement = select(InstrumentRow)
+            if exchanges is not None:
+                statement = statement.where(
+                    InstrumentRow.exchange.in_(exchanges)
+                )
+            rows = list(
+                await session.scalars(
+                    statement.order_by(
+                        InstrumentRow.exchange,
+                        InstrumentRow.base_asset,
+                    )
+                )
+            )
+        return [
+            InstrumentPair(
+                exchange=row.exchange,
+                base_asset=row.base_asset,
+                spot_symbol=row.spot_symbol,
+                perp_symbol=row.perp_symbol,
+                funding_interval_hours=Decimal(row.interval_hours),
+                spot_price_increment=row.spot_price_increment,
+                spot_quantity_increment=row.spot_quantity_increment,
+                spot_min_quantity=row.spot_min_quantity,
+                spot_min_notional=row.spot_min_notional,
+                perp_price_increment=row.perp_price_increment,
+                perp_quantity_increment=row.perp_quantity_increment,
+                perp_min_quantity=row.perp_min_quantity,
+                perp_min_notional=row.perp_min_notional,
+                perp_contract_size=row.perp_contract_size,
+            )
+            for row in rows
+        ]
+
+    async def save_latest_opportunities(
+        self,
+        opportunities: list[Opportunity],
+    ) -> None:
+        if not opportunities:
+            return
+        async with self.sessions() as session:
+            now = datetime.now(UTC)
+            for item in opportunities:
+                row = await session.get(LatestOpportunityRow, item.key)
+                payload = item.model_dump_json()
+                if row is None:
+                    session.add(
+                        LatestOpportunityRow(
+                            key=item.key,
+                            exchange=item.exchange.value,
+                            base_asset=item.base_asset,
+                            observed_at=item.observed_at,
+                            payload=payload,
+                            updated_at=now,
+                        )
+                    )
+                else:
+                    row.exchange = item.exchange.value
+                    row.base_asset = item.base_asset
+                    row.observed_at = item.observed_at
+                    row.payload = payload
+                    row.updated_at = now
+            await session.commit()
+
+    async def latest_opportunities(
+        self,
+        *,
+        exchanges: set[str] | None = None,
+    ) -> list[Opportunity]:
+        async with self.sessions() as session:
+            statement = select(LatestOpportunityRow)
+            if exchanges is not None:
+                statement = statement.where(
+                    LatestOpportunityRow.exchange.in_(exchanges)
+                )
+            rows = list(
+                await session.scalars(
+                    statement.order_by(
+                        LatestOpportunityRow.exchange,
+                        LatestOpportunityRow.base_asset,
+                    )
+                )
+            )
+        return [
+            Opportunity.model_validate_json(row.payload)
+            for row in rows
+        ]
 
     async def save_funding(self, observations: list[FundingObservation]) -> None:
         if not observations:

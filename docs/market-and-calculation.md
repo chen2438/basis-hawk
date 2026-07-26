@@ -53,4 +53,9 @@ Bitget Classic 与 UTA 在下单前通过只读账户接口识别并在进程内
 后的十进制张数发送，卖出开空为负、买入平空为正，并显式发送 `X-Gate-Size-Decimal: 1`。MEXC 合约
 使用 `side=3` 开空、`side=2` 平空及 `type=3` IOC；单向平空额外发送 `reduceOnly=true`。
 返回统一的接受回执，只证明交易所接受请求；最终订单状态与成交仍以私有成交流或 REST 查单/成交明细
-为准。该能力尚未接入 HTTP 实盘入口。
+为准。该能力由已确认的实盘开平仓意图经唯一 worker 调用，HTTP 进程不直接发单。
+
+API 行情进程在每次约 5 秒的价格刷新完成后，把该所当前完整 `Opportunity` 按
+`exchange:base_asset` 覆盖写入 `latest_opportunities`；这与每分钟追加的分析历史快照不同。记录保留
+行情自身 `observed_at`，不会用数据库写入时间伪造新鲜度。worker 同时从 `instruments` 读取对应规则，
+因此自动决策必须再次要求机会不超过 15 秒、质量为 healthy 且规则完整，不能读取另一个进程的内存对象。
