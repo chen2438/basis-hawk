@@ -149,6 +149,17 @@ async def test_bybit_account_snapshot_and_signature() -> None:
             SECRETS.api_secret,
             f"1700000000000{SECRETS.api_key}5000{query}",
         )
+        if request.url.path == "/v5/position/list":
+            return httpx.Response(
+                200,
+                json={
+                    "retCode": 0,
+                    "result": {
+                        "list": [{"positionIdx": 0, "size": "0"}],
+                        "nextPageCursor": "",
+                    },
+                },
+            )
         if request.url.path == "/v5/account/info":
             return httpx.Response(
                 200,
@@ -197,7 +208,7 @@ async def test_bybit_account_snapshot_and_signature() -> None:
     assert snapshot.spot_usdt_available == 26
     assert snapshot.perp_usdt_equity == 31
     assert snapshot.account_mode == "unified:5:ISOLATED_MARGIN"
-    assert snapshot.position_mode == PositionMode.UNKNOWN
+    assert snapshot.position_mode == PositionMode.ONE_WAY
     await http.aclose()
 
 

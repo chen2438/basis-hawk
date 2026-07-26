@@ -9,11 +9,13 @@ from pydantic import ValidationError
 
 from basis_hawk.accounts import (
     BinanceAccountClient,
+    BybitAccountClient,
     LimitIocOrder,
     OkxAccountClient,
     PositionMode,
     PrivateRequestError,
     _hmac_base64,
+    _hmac_hex,
 )
 from basis_hawk.credentials import ExchangeEnvironment, ExchangeSecrets
 
@@ -605,4 +607,320 @@ async def test_okx_rejects_invalid_client_ids_and_failed_acknowledgements() -> N
     rejected = invalid.model_copy(update={"client_order_id": "bhopenspot"})
     with pytest.raises(PrivateRequestError, match="order submission"):
         await client.place_limit_ioc(rejected)
+    await http.aclose()
+
+
+async def test_bybit_places_spot_and_hedge_mode_perp_ioc_orders() -> None:
+    requests: list[tuple[dict[str, object], httpx.Headers]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        raw = json.loads(body)
+        requests.append((raw, request.headers))
+        timestamp = "1785088000000"
+        assert request.headers["X-BAPI-SIGN-TYPE"] == "2"
+        assert request.headers["X-BAPI-SIGN"] == _hmac_hex(
+            SECRETS.api_secret,
+            f"{timestamp}{SECRETS.api_key}5000{body}",
+        )
+        return httpx.Response(
+            200,
+            json={
+                "retCode": 0,
+                "result": {
+                    "orderId": "501" if raw["category"] == "spot" else "502",
+                    "orderLinkId": raw["orderLinkId"],
+                },
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://bybit.test",
+    )
+    client = BybitAccountClient(
+        SECRETS,
+        ExchangeEnvironment.SANDBOX,
+        clock_ms=lambda: 1_785_088_000_000,
+        client=http,
+    )
+
+    spot = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="spot",
+            symbol="ORDERUSDT",
+            side="buy",
+            quantity=Decimal("20"),
+            limit_price=Decimal("0.05"),
+            client_order_id="bh-open_spot",
+        )
+    )
+    open_short = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="perp",
+            symbol="ORDERUSDT",
+            side="sell",
+            quantity=Decimal("20"),
+            limit_price=Decimal("0.051"),
+            client_order_id="bh-open-perp",
+            position_mode=PositionMode.HEDGE,
+        )
+    )
+
+    assert spot.exchange_order_id == "501"
+    assert open_short.exchange_order_id == "502"
+    assert requests[0][0] == {
+        "category": "spot",
+        "isLeverage": 0,
+        "orderLinkId": "bh-open_spot",
+        "orderType": "Limit",
+        "price": "0.05",
+        "qty": "20",
+        "side": "Buy",
+        "symbol": "ORDERUSDT",
+        "timeInForce": "IOC",
+    }
+    assert requests[1][0]["category"] == "linear"
+    assert requests[1][0]["positionIdx"] == 2
+    assert requests[1][0]["reduceOnly"] is False
+    await http.aclose()
+
+
+async def test_bybit_one_way_close_and_targeted_cancel_return_ack_receipts() -> None:
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raw = json.loads(request.content.decode())
+        requests.append((request.url.path, raw))
+        return httpx.Response(
+            200,
+            json={
+                "retCode": 0,
+                "result": {
+                    "orderId": raw.get("orderId", "601"),
+                    "orderLinkId": raw.get("orderLinkId", "bh-close-perp"),
+                },
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://bybit.test",
+    )
+    client = BybitAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    order = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="perp",
+            symbol="ORDERUSDT",
+            side="buy",
+            quantity=Decimal("20"),
+            limit_price=Decimal("0.051"),
+            client_order_id="bh-close-perp",
+            reduce_only=True,
+            position_mode=PositionMode.ONE_WAY,
+        )
+    )
+    canceled = await client.cancel_order(
+        market="perp",
+        symbol="ORDERUSDT",
+        exchange_order_id=order.exchange_order_id,
+        client_order_id=order.client_order_id,
+    )
+
+    assert requests[0][1]["positionIdx"] == 0
+    assert requests[0][1]["reduceOnly"] is True
+    assert requests[1] == (
+        "/v5/order/cancel",
+        {"category": "linear", "orderId": "601", "symbol": "ORDERUSDT"},
+    )
+    assert canceled.accepted is True
+    assert canceled.exchange_order_id == "601"
+    await http.aclose()
+
+
+async def test_bybit_safely_switches_account_isolated_mode_and_sets_leverage() -> None:
+    margin_mode = "REGULAR_MARGIN"
+    current_leverage = "1"
+    requests: list[tuple[str, str, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal margin_mode, current_leverage
+        raw = (
+            json.loads(request.content.decode())
+            if request.method == "POST"
+            else dict(request.url.params)
+        )
+        requests.append((request.method, request.url.path, raw))
+        if request.url.path == "/v5/account/info":
+            return httpx.Response(
+                200,
+                json={"retCode": 0, "result": {"marginMode": margin_mode}},
+            )
+        if request.url.path == "/v5/order/realtime":
+            return httpx.Response(
+                200,
+                json={
+                    "retCode": 0,
+                    "result": {"list": [], "nextPageCursor": ""},
+                },
+            )
+        if request.url.path == "/v5/position/list":
+            return httpx.Response(
+                200,
+                json={
+                    "retCode": 0,
+                    "result": {
+                        "list": [
+                            {
+                                "symbol": "ORDERUSDT",
+                                "positionIdx": 1,
+                                "size": "0",
+                                "leverage": current_leverage,
+                            },
+                            {
+                                "symbol": "ORDERUSDT",
+                                "positionIdx": 2,
+                                "size": "0",
+                                "leverage": current_leverage,
+                            },
+                        ],
+                        "nextPageCursor": "",
+                    },
+                },
+            )
+        if request.url.path == "/v5/account/set-margin-mode":
+            margin_mode = "ISOLATED_MARGIN"
+            return httpx.Response(
+                200,
+                json={"retCode": 0, "result": {"reasons": []}},
+            )
+        current_leverage = str(raw["sellLeverage"])
+        return httpx.Response(200, json={"retCode": 0, "result": {}})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://bybit.test",
+    )
+    client = BybitAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    result = await client.configure_perp(
+        symbol="ORDERUSDT",
+        leverage=3,
+        position_mode=PositionMode.HEDGE,
+    )
+
+    assert result.isolated is True
+    assert result.leverage == 3
+    margin_request = next(
+        item for item in requests if item[1] == "/v5/account/set-margin-mode"
+    )
+    assert margin_request[2] == {"setMarginMode": "ISOLATED_MARGIN"}
+    leverage_request = next(
+        item for item in requests if item[1] == "/v5/position/set-leverage"
+    )
+    assert leverage_request[2] == {
+        "buyLeverage": "3",
+        "category": "linear",
+        "sellLeverage": "3",
+        "symbol": "ORDERUSDT",
+    }
+    with pytest.raises(ValueError, match="between 1 and 10"):
+        await client.configure_perp(
+            symbol="ORDERUSDT",
+            leverage=11,
+            position_mode=PositionMode.HEDGE,
+        )
+    await http.aclose()
+
+
+async def test_bybit_reuses_matching_configuration_and_refuses_exposure() -> None:
+    current_leverage = "3"
+    has_order = False
+    mutations: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            mutations.append(request.url.path)
+        if request.url.path == "/v5/account/info":
+            return httpx.Response(
+                200,
+                json={"retCode": 0, "result": {"marginMode": "ISOLATED_MARGIN"}},
+            )
+        if request.url.path == "/v5/order/realtime":
+            orders = [{"orderId": "1"}] if has_order else []
+            return httpx.Response(
+                200,
+                json={
+                    "retCode": 0,
+                    "result": {"list": orders, "nextPageCursor": ""},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "retCode": 0,
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "ORDERUSDT",
+                            "positionIdx": 0,
+                            "size": "0",
+                            "leverage": current_leverage,
+                        }
+                    ],
+                    "nextPageCursor": "",
+                },
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://bybit.test",
+    )
+    client = BybitAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    result = await client.configure_perp(
+        symbol="ORDERUSDT",
+        leverage=3,
+        position_mode=PositionMode.ONE_WAY,
+    )
+    assert result.leverage == 3
+    assert mutations == []
+
+    current_leverage = "2"
+    has_order = True
+    with pytest.raises(PrivateRequestError, match="open orders or positions"):
+        await client.configure_perp(
+            symbol="ORDERUSDT",
+            leverage=3,
+            position_mode=PositionMode.ONE_WAY,
+        )
+    assert mutations == []
+    await http.aclose()
+
+
+async def test_bybit_rejects_invalid_client_ids_and_missing_order_ack() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"retCode": 0, "result": {}})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://bybit.test",
+    )
+    client = BybitAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+    invalid = LimitIocOrder(
+        market="spot",
+        symbol="ORDERUSDT",
+        side="buy",
+        quantity=Decimal("20"),
+        limit_price=Decimal("0.05"),
+        client_order_id="invalid.client.id",
+    )
+    with pytest.raises(ValueError, match="ASCII"):
+        await client.place_limit_ioc(invalid)
+
+    valid = invalid.model_copy(update={"client_order_id": "bh-order"})
+    with pytest.raises(PrivateRequestError, match="no order ID"):
+        await client.place_limit_ioc(valid)
     await http.aclose()

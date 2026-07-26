@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -938,7 +939,7 @@ class OkxAccountClient(PrivateAccountClient):
         )
 
     async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
-        if len(order.client_order_id) > 32 or not order.client_order_id.isalnum():
+        if not re.fullmatch(r"[A-Za-z0-9]{1,32}", order.client_order_id):
             raise ValueError(
                 "OKX client order IDs must be at most 32 alphanumeric characters"
             )
@@ -1097,24 +1098,40 @@ class BybitAccountClient(PrivateAccountClient):
     async def _get(self, path: str, **params: object) -> Any:
         params = _ordered(params)
         query = _query(params)
-        timestamp = str(self.clock_ms())
-        recv_window = "5000"
-        signature = _hmac_hex(
-            self.secrets.api_secret,
-            f"{timestamp}{self.secrets.api_key}{recv_window}{query}",
-        )
         return await _json_request(
             self.http,
             "GET",
             path,
             params=params,
-            headers={
-                "X-BAPI-API-KEY": self.secrets.api_key,
-                "X-BAPI-TIMESTAMP": timestamp,
-                "X-BAPI-RECV-WINDOW": recv_window,
-                "X-BAPI-SIGN": signature,
-            },
+            headers=self._headers(query),
         )
+
+    async def _post(self, path: str, **values: object) -> Any:
+        body = _ordered(values)
+        content = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+        return await _json_request(
+            self.http,
+            "POST",
+            path,
+            content=content,
+            headers=self._headers(content),
+        )
+
+    def _headers(self, payload: str) -> dict[str, str]:
+        timestamp = str(self.clock_ms())
+        recv_window = "5000"
+        signature = _hmac_hex(
+            self.secrets.api_secret,
+            f"{timestamp}{self.secrets.api_key}{recv_window}{payload}",
+        )
+        return {
+            "X-BAPI-API-KEY": self.secrets.api_key,
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": recv_window,
+            "X-BAPI-SIGN": signature,
+            "X-BAPI-SIGN-TYPE": "2",
+            "Content-Type": "application/json",
+        }
 
     async def _paged(self, path: str, **params: object) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
@@ -1133,13 +1150,19 @@ class BybitAccountClient(PrivateAccountClient):
             cursor = next_cursor
 
     async def snapshot(self) -> AccountSnapshot:
-        wallet, info = await _gather(
+        wallet, info, positions = await _gather(
             self._get(
                 "/v5/account/wallet-balance",
                 accountType="UNIFIED",
                 coin="USDT",
             ),
             self._get("/v5/account/info"),
+            self._paged(
+                "/v5/position/list",
+                category="linear",
+                settleCoin="USDT",
+                limit=200,
+            ),
         )
         _bybit_success(wallet)
         _bybit_success(info)
@@ -1168,7 +1191,7 @@ class BybitAccountClient(PrivateAccountClient):
                 f"unified:{details.get('unifiedMarginStatus', 'unknown')}:"
                 f"{details.get('marginMode', 'unknown')}"
             ),
-            position_mode=PositionMode.UNKNOWN,
+            position_mode=_bybit_position_mode(positions),
             trade_permission=None,
         )
 
@@ -1293,6 +1316,198 @@ class BybitAccountClient(PrivateAccountClient):
         return RemoteOrderLookup(
             order=_bybit_order(items[0], market=market) if items else None,
             complete=True,
+        )
+
+    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,36}", order.client_order_id):
+            raise ValueError(
+                "Bybit client order IDs must be at most 36 ASCII letters, numbers, "
+                "dashes, or underscores"
+            )
+        values: dict[str, object] = {
+            "category": "spot" if order.market == "spot" else "linear",
+            "symbol": order.symbol,
+            "side": order.side.title(),
+            "orderType": "Limit",
+            "qty": format(order.quantity, "f"),
+            "price": format(order.limit_price, "f"),
+            "timeInForce": "IOC",
+            "orderLinkId": order.client_order_id,
+        }
+        if order.market == "spot":
+            values["isLeverage"] = 0
+        else:
+            values["positionIdx"] = (
+                2 if order.position_mode == PositionMode.HEDGE else 0
+            )
+            values["reduceOnly"] = order.reduce_only
+        payload = await self._post("/v5/order/create", **values)
+        result = _bybit_result(payload, "order submission")
+        exchange_order_id = str(result.get("orderId") or "")
+        if not exchange_order_id:
+            raise PrivateRequestError("Bybit order submission returned no order ID")
+        return OrderSubmission(
+            market=order.market,
+            symbol=order.symbol,
+            client_order_id=str(
+                result.get("orderLinkId") or order.client_order_id
+            ),
+            exchange_order_id=exchange_order_id,
+        )
+
+    async def cancel_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+    ) -> OrderCancellation:
+        if exchange_order_id is None and client_order_id is None:
+            raise ValueError("an exchange or client order ID is required")
+        values: dict[str, object] = {
+            "category": "spot" if market == "spot" else "linear",
+            "symbol": symbol,
+        }
+        if exchange_order_id is not None:
+            values["orderId"] = exchange_order_id
+        else:
+            values["orderLinkId"] = client_order_id or ""
+        payload = await self._post("/v5/order/cancel", **values)
+        result = _bybit_result(payload, "order cancellation")
+        result_order_id = str(result.get("orderId") or exchange_order_id or "")
+        if not result_order_id:
+            raise PrivateRequestError("Bybit order cancellation returned no order ID")
+        return OrderCancellation(
+            market=market,
+            symbol=symbol,
+            client_order_id=(
+                str(result["orderLinkId"])
+                if result.get("orderLinkId")
+                else client_order_id
+            ),
+            exchange_order_id=result_order_id,
+            accepted=True,
+        )
+
+    async def configure_perp(
+        self,
+        *,
+        symbol: str,
+        leverage: int,
+        position_mode: PositionMode,
+    ) -> PerpConfiguration:
+        if leverage < 1 or leverage > 10:
+            raise ValueError("leverage must be between 1 and 10")
+        if position_mode == PositionMode.UNKNOWN:
+            raise ValueError("position mode must be known before configuration")
+        info, symbol_positions = await _gather(
+            self._get("/v5/account/info"),
+            self._paged(
+                "/v5/position/list",
+                category="linear",
+                symbol=symbol,
+                limit=200,
+            ),
+        )
+        _bybit_success(info)
+        detected_mode = _bybit_position_mode(symbol_positions)
+        if detected_mode != position_mode:
+            raise PrivateRequestError(
+                "Bybit position mode does not match the requested configuration"
+            )
+        margin_mode = str((info.get("result") or {}).get("marginMode") or "")
+        target_index = 2 if position_mode == PositionMode.HEDGE else 0
+        current = next(
+            (
+                item
+                for item in symbol_positions
+                if int(item.get("positionIdx") or 0) == target_index
+            ),
+            None,
+        )
+        if (
+            margin_mode == "ISOLATED_MARGIN"
+            and current is not None
+            and Decimal(str(current.get("leverage") or "0")) == Decimal(leverage)
+        ):
+            return PerpConfiguration(
+                symbol=symbol,
+                leverage=leverage,
+                isolated=True,
+                position_mode=position_mode,
+            )
+        open_orders, all_positions = await _gather(
+            self._paged(
+                "/v5/order/realtime",
+                category="linear",
+                settleCoin="USDT",
+                limit=50,
+            ),
+            self._paged(
+                "/v5/position/list",
+                category="linear",
+                settleCoin="USDT",
+                limit=200,
+            ),
+        )
+        if open_orders or any(
+            Decimal(str(item.get("size") or "0")) != 0
+            for item in all_positions
+        ):
+            raise PrivateRequestError(
+                "cannot change Bybit margin or leverage with open orders or positions"
+            )
+        if margin_mode != "ISOLATED_MARGIN":
+            switched = await self._post(
+                "/v5/account/set-margin-mode",
+                setMarginMode="ISOLATED_MARGIN",
+            )
+            switch_result = _bybit_result(switched, "margin mode configuration")
+            if switch_result.get("reasons"):
+                raise PrivateRequestError(
+                    "Bybit isolated margin configuration was not accepted"
+                )
+            confirmed = await self._get("/v5/account/info")
+            _bybit_success(confirmed)
+            if (
+                str((confirmed.get("result") or {}).get("marginMode") or "")
+                != "ISOLATED_MARGIN"
+            ):
+                raise PrivateRequestError(
+                    "Bybit isolated margin configuration was not confirmed"
+                )
+        configured = await self._post(
+            "/v5/position/set-leverage",
+            category="linear",
+            symbol=symbol,
+            buyLeverage=str(leverage),
+            sellLeverage=str(leverage),
+        )
+        _bybit_result(configured, "leverage configuration")
+        confirmed_positions = await self._paged(
+            "/v5/position/list",
+            category="linear",
+            symbol=symbol,
+            limit=200,
+        )
+        confirmed = next(
+            (
+                item
+                for item in confirmed_positions
+                if int(item.get("positionIdx") or 0) == target_index
+            ),
+            None,
+        )
+        if confirmed is None or Decimal(
+            str(confirmed.get("leverage") or "0")
+        ) != Decimal(leverage):
+            raise PrivateRequestError("Bybit leverage configuration was not confirmed")
+        return PerpConfiguration(
+            symbol=symbol,
+            leverage=leverage,
+            isolated=True,
+            position_mode=position_mode,
         )
 
     async def close(self) -> None:
@@ -2093,6 +2308,27 @@ def _okx_reduce_only(item: dict[str, Any]) -> bool:
 def _bybit_success(payload: Any) -> None:
     if not isinstance(payload, dict) or payload.get("retCode") != 0:
         raise PrivateRequestError("Bybit private account request was rejected")
+
+
+def _bybit_result(payload: Any, action: str) -> dict[str, Any]:
+    _bybit_success(payload)
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise PrivateRequestError(f"Bybit {action} returned no result")
+    return result
+
+
+def _bybit_position_mode(positions: list[dict[str, Any]]) -> PositionMode:
+    indexes = {
+        int(item["positionIdx"])
+        for item in positions
+        if item.get("positionIdx") is not None
+    }
+    if indexes & {1, 2}:
+        return PositionMode.HEDGE
+    if 0 in indexes:
+        return PositionMode.ONE_WAY
+    return PositionMode.UNKNOWN
 
 
 def _bitget_success(payload: Any) -> None:
