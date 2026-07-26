@@ -257,6 +257,41 @@ class ExecutionControlRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class StrategyVersionRow(Base):
+    __tablename__ = "strategy_versions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, unique=True)
+    environment: Mapped[str] = mapped_column(String(20))
+    payload: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        CheckConstraint(
+            "environment IN ('sandbox', 'live')",
+            name="ck_strategy_version_environment",
+        ),
+    )
+
+
+class AutomationControlRow(Base):
+    __tablename__ = "automation_control"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    state: Mapped[str] = mapped_column(String(20))
+    active_strategy_id: Mapped[str | None] = mapped_column(
+        ForeignKey("strategy_versions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    reason: Mapped[str] = mapped_column(String(300))
+    updated_by: Mapped[str] = mapped_column(String(100))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('disabled', 'enabled', 'paused')",
+            name="ck_automation_control_state",
+        ),
+    )
+
+
 class TradePreviewRow(Base):
     __tablename__ = "trade_previews"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -646,6 +681,135 @@ class Database:
     async def execution_control(self) -> ExecutionControlRow | None:
         async with self.sessions() as session:
             return await session.get(ExecutionControlRow, 1)
+
+    async def create_strategy_version(
+        self,
+        *,
+        environment: str,
+        payload: dict[str, Any],
+        actor: str,
+    ) -> StrategyVersionRow:
+        async with self.sessions() as session:
+            control = await session.scalar(
+                select(AutomationControlRow)
+                .where(AutomationControlRow.id == 1)
+                .with_for_update()
+            )
+            if control is None:
+                control = AutomationControlRow(
+                    id=1,
+                    state="disabled",
+                    active_strategy_id=None,
+                    reason="automatic trading is disabled by default",
+                    updated_by="system",
+                    updated_at=datetime.now(UTC),
+                )
+                session.add(control)
+                await session.flush()
+            latest = await session.scalar(
+                select(func.max(StrategyVersionRow.version))
+            )
+            row = StrategyVersionRow(
+                id=str(uuid.uuid4()),
+                version=int(latest or 0) + 1,
+                environment=environment,
+                payload=json.dumps(
+                    payload,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                created_by=actor,
+                created_at=datetime.now(UTC),
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def strategy_version(
+        self,
+        strategy_id: str,
+    ) -> StrategyVersionRow | None:
+        async with self.sessions() as session:
+            return await session.get(StrategyVersionRow, strategy_id)
+
+    async def latest_strategy_version(self) -> StrategyVersionRow | None:
+        async with self.sessions() as session:
+            return await session.scalar(
+                select(StrategyVersionRow)
+                .order_by(StrategyVersionRow.version.desc())
+                .limit(1)
+            )
+
+    async def automation_control(self) -> AutomationControlRow:
+        async with self.sessions() as session:
+            row = await session.get(AutomationControlRow, 1)
+            if row is None:
+                row = AutomationControlRow(
+                    id=1,
+                    state="disabled",
+                    active_strategy_id=None,
+                    reason="automatic trading is disabled by default",
+                    updated_by="system",
+                    updated_at=datetime.now(UTC),
+                )
+                session.add(row)
+                try:
+                    await session.commit()
+                except IntegrityError:
+                    await session.rollback()
+                    existing = await session.get(AutomationControlRow, 1)
+                    if existing is None:
+                        raise
+                    return existing
+                await session.refresh(row)
+            return row
+
+    async def set_automation_control(
+        self,
+        *,
+        state: str,
+        active_strategy_id: str | None,
+        reason: str,
+        actor: str,
+    ) -> AutomationControlRow:
+        if state not in {"disabled", "enabled", "paused"}:
+            raise ValueError("invalid automation state")
+        async with self.sessions() as session:
+            if active_strategy_id is not None:
+                strategy = await session.get(
+                    StrategyVersionRow,
+                    active_strategy_id,
+                )
+                if strategy is None:
+                    raise ValueError("strategy version was not found")
+            elif state == "enabled":
+                raise ValueError("enabled automation requires a strategy version")
+            row = await session.scalar(
+                select(AutomationControlRow)
+                .where(AutomationControlRow.id == 1)
+                .with_for_update()
+            )
+            now = datetime.now(UTC)
+            if row is None:
+                row = AutomationControlRow(
+                    id=1,
+                    state=state,
+                    active_strategy_id=active_strategy_id,
+                    reason=reason,
+                    updated_by=actor,
+                    updated_at=now,
+                )
+                session.add(row)
+            else:
+                row.state = state
+                row.active_strategy_id = active_strategy_id
+                row.reason = reason
+                row.updated_by = actor
+                row.updated_at = now
+            await session.commit()
+            await session.refresh(row)
+            return row
 
     async def set_private_stream_state(
         self,

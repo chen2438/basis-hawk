@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -28,6 +29,7 @@ from basis_hawk.accounts import (
     create_account_client,
 )
 from basis_hawk.auth import AuthenticationError, AuthService, LoginAttemptLimiter
+from basis_hawk.automation import AutoStrategyConfig
 from basis_hawk.config import get_config
 from basis_hawk.credentials import (
     CredentialService,
@@ -94,6 +96,15 @@ class LiveCloseConfirmRequest(BaseModel):
     confirmed: Literal[True]
 
 
+class AutomationActivateRequest(BaseModel):
+    strategy_id: UUID
+    confirmed: Literal[True]
+
+
+class AutomationPauseRequest(BaseModel):
+    reason: str = Field(default="paused by administrator", min_length=1, max_length=300)
+
+
 def create_app(
     service: ScannerService | None = None,
     *,
@@ -158,6 +169,20 @@ def create_app(
     def request_actor(request: Request) -> str:
         admin = getattr(request.state, "admin", None)
         return admin.username if admin is not None else "local"
+
+    def strategy_payload(row: object | None) -> dict[str, object] | None:
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "version": row.version,
+            "environment": row.environment,
+            "config": AutoStrategyConfig.model_validate(
+                json.loads(row.payload)
+            ).model_dump(mode="json"),
+            "created_by": row.created_by,
+            "created_at": row.created_at.isoformat(),
+        }
 
     @app.middleware("http")
     async def authenticate_request(request: Request, call_next):
@@ -353,6 +378,192 @@ def create_app(
                 for item in reconciliations
             ],
         }
+
+    @app.get("/api/automation")
+    async def automation_status() -> dict[str, object]:
+        control = await scanner.database.automation_control()
+        latest = await scanner.database.latest_strategy_version()
+        active = (
+            await scanner.database.strategy_version(
+                control.active_strategy_id
+            )
+            if control.active_strategy_id is not None
+            else None
+        )
+        return {
+            "state": control.state,
+            "reason": control.reason,
+            "updated_by": control.updated_by,
+            "updated_at": control.updated_at.isoformat(),
+            "active_strategy": strategy_payload(active),
+            "latest_strategy": strategy_payload(latest),
+        }
+
+    @app.put("/api/automation/config")
+    async def save_automation_config(
+        value: AutoStrategyConfig,
+        request: Request,
+    ) -> dict[str, object]:
+        actor = request_actor(request)
+        row = await scanner.database.create_strategy_version(
+            environment=value.environment,
+            payload=value.model_dump(mode="json"),
+            actor=actor,
+        )
+        await scanner.database.append_audit(
+            "automation.strategy_version_created",
+            actor=actor,
+            details={
+                "strategy_id": row.id,
+                "version": row.version,
+                "environment": row.environment,
+                "enabled_exchanges": sorted(
+                    item.value for item in value.enabled_exchanges
+                ),
+            },
+        )
+        return {"strategy": strategy_payload(row)}
+
+    async def validate_strategy_activation(
+        strategy_id: str,
+    ) -> object:
+        row = await scanner.database.strategy_version(strategy_id)
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail="strategy version was not found",
+            )
+        config = AutoStrategyConfig.model_validate(json.loads(row.payload))
+        if (
+            config.environment == ExchangeEnvironment.SANDBOX.value
+            and config.enabled_exchanges & {Exchange.MEXC, Exchange.GATE}
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="MEXC and Gate do not provide a supported paired sandbox",
+            )
+        execution = await scanner.database.execution_control()
+        if execution is None or execution.state != "ready":
+            raise HTTPException(
+                status_code=409,
+                detail="execution is not ready for automatic trading",
+            )
+        if credential_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        configured = {
+            (item.exchange, item.environment)
+            for item in await credential_service.list()
+        }
+        missing = sorted(
+            exchange.value
+            for exchange in config.enabled_exchanges
+            if (exchange, ExchangeEnvironment(config.environment))
+            not in configured
+        )
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "credentials are missing for enabled exchanges: "
+                    + ", ".join(missing)
+                ),
+            )
+        return row
+
+    @app.post("/api/automation/enable")
+    async def enable_automation(
+        value: AutomationActivateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        row = await validate_strategy_activation(str(value.strategy_id))
+        actor = request_actor(request)
+        control = await scanner.database.set_automation_control(
+            state="enabled",
+            active_strategy_id=row.id,
+            reason=f"strategy version {row.version} enabled",
+            actor=actor,
+        )
+        await scanner.database.append_audit(
+            "automation.enabled",
+            actor=actor,
+            details={
+                "strategy_id": row.id,
+                "version": row.version,
+                "environment": row.environment,
+            },
+        )
+        return {
+            "state": control.state,
+            "active_strategy": strategy_payload(row),
+        }
+
+    @app.post("/api/automation/pause")
+    async def pause_automation(
+        value: AutomationPauseRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        current = await scanner.database.automation_control()
+        actor = request_actor(request)
+        control = await scanner.database.set_automation_control(
+            state="paused",
+            active_strategy_id=current.active_strategy_id,
+            reason=value.reason,
+            actor=actor,
+        )
+        await scanner.database.append_audit(
+            "automation.paused",
+            actor=actor,
+            details={"reason": value.reason},
+        )
+        return {"state": control.state, "reason": control.reason}
+
+    @app.post("/api/automation/resume")
+    async def resume_automation(
+        request: Request,
+    ) -> dict[str, object]:
+        current = await scanner.database.automation_control()
+        if current.active_strategy_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail="automation has no active strategy to resume",
+            )
+        row = await validate_strategy_activation(current.active_strategy_id)
+        actor = request_actor(request)
+        control = await scanner.database.set_automation_control(
+            state="enabled",
+            active_strategy_id=row.id,
+            reason=f"strategy version {row.version} resumed",
+            actor=actor,
+        )
+        await scanner.database.append_audit(
+            "automation.resumed",
+            actor=actor,
+            details={"strategy_id": row.id, "version": row.version},
+        )
+        return {
+            "state": control.state,
+            "active_strategy": strategy_payload(row),
+        }
+
+    @app.post("/api/automation/disable")
+    async def disable_automation(request: Request) -> dict[str, object]:
+        current = await scanner.database.automation_control()
+        actor = request_actor(request)
+        control = await scanner.database.set_automation_control(
+            state="disabled",
+            active_strategy_id=current.active_strategy_id,
+            reason="automatic trading disabled by administrator",
+            actor=actor,
+        )
+        await scanner.database.append_audit(
+            "automation.disabled",
+            actor=actor,
+            details={"strategy_id": current.active_strategy_id},
+        )
+        return {"state": control.state, "reason": control.reason}
 
     @app.post("/api/trades/paper/open")
     async def plan_paper_open(
