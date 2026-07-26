@@ -2,7 +2,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 
 import httpx
 import pytest
@@ -14,6 +14,7 @@ from basis_hawk.accounts import (
     BybitAccountClient,
     GateAccountClient,
     LimitIocOrder,
+    MexcAccountClient,
     OkxAccountClient,
     PositionMode,
     PrivateRequestError,
@@ -1514,3 +1515,347 @@ async def test_gate_rejects_invalid_client_id_and_missing_ack() -> None:
     with pytest.raises(PrivateRequestError, match="no order identifiers"):
         await client.place_limit_ioc(valid)
     await http.aclose()
+
+
+async def test_mexc_places_signed_spot_and_contract_ioc_orders() -> None:
+    spot_requests: list[dict[str, str]] = []
+    perp_requests: list[dict[str, object]] = []
+
+    def spot_handler(request: httpx.Request) -> httpx.Response:
+        raw = {
+            key: values[0]
+            for key, values in parse_qs(request.content.decode()).items()
+        }
+        spot_requests.append(raw)
+        signed = {key: value for key, value in raw.items() if key != "signature"}
+        assert raw["signature"] == _hmac_hex(
+            SECRETS.api_secret,
+            urlencode(signed),
+        )
+        return httpx.Response(
+            200,
+            json={
+                "symbol": raw["symbol"],
+                "orderId": "1201",
+                "clientOrderId": raw["newClientOrderId"],
+            },
+        )
+
+    def perp_handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        raw = json.loads(body)
+        perp_requests.append(raw)
+        assert request.headers["Signature"] == _hmac_hex(
+            SECRETS.api_secret,
+            f"{SECRETS.api_key}1785088000000{body}",
+        )
+        return httpx.Response(
+            200,
+            json={"success": True, "code": 0, "data": "1202"},
+        )
+
+    spot_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(spot_handler),
+        base_url="https://mexc-spot.test",
+    )
+    perp_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(perp_handler),
+        base_url="https://mexc-perp.test",
+    )
+    client = MexcAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        clock_ms=lambda: 1_785_088_000_000,
+        spot_client=spot_http,
+        perp_client=perp_http,
+    )
+    client._configured_leverage["ORDER_USDT"] = 3
+
+    spot = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="spot",
+            symbol="ORDERUSDT",
+            side="buy",
+            quantity=Decimal("20"),
+            limit_price=Decimal("0.05"),
+            client_order_id="bh-open-spot",
+        )
+    )
+    open_short = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="perp",
+            symbol="ORDER_USDT",
+            side="sell",
+            quantity=Decimal("20"),
+            limit_price=Decimal("0.051"),
+            client_order_id="bh-open-perp",
+            position_mode=PositionMode.HEDGE,
+        )
+    )
+
+    assert spot.exchange_order_id == "1201"
+    assert open_short.exchange_order_id == "1202"
+    assert spot_requests[0]["type"] == "IMMEDIATE_OR_CANCEL"
+    assert spot_requests[0]["quantity"] == "20"
+    assert perp_requests[0] == {
+        "symbol": "ORDER_USDT",
+        "price": "0.051",
+        "vol": "20",
+        "leverage": 3,
+        "side": 3,
+        "type": 3,
+        "openType": 1,
+        "externalOid": "bh-open-perp",
+        "positionMode": 1,
+    }
+    await spot_http.aclose()
+    await perp_http.aclose()
+
+
+async def test_mexc_maps_short_close_and_requires_write_probe() -> None:
+    requests: list[dict[str, object]] = []
+    reject = False
+
+    def perp_handler(request: httpx.Request) -> httpx.Response:
+        raw = json.loads(request.content.decode())
+        requests.append(raw)
+        return httpx.Response(
+            200,
+            json={
+                "success": not reject,
+                "code": 0 if not reject else 511,
+                "data": "1301" if not reject else None,
+            },
+        )
+
+    spot_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={})),
+        base_url="https://mexc-spot.test",
+    )
+    perp_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(perp_handler),
+        base_url="https://mexc-perp.test",
+    )
+    client = MexcAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        spot_client=spot_http,
+        perp_client=perp_http,
+    )
+    close = LimitIocOrder(
+        market="perp",
+        symbol="ORDER_USDT",
+        side="buy",
+        quantity=Decimal("20"),
+        limit_price=Decimal("0.051"),
+        client_order_id="bh-close-perp",
+        reduce_only=True,
+        position_mode=PositionMode.ONE_WAY,
+    )
+
+    with pytest.raises(PrivateRequestError, match="must be confirmed"):
+        await client.place_limit_ioc(close)
+    client._configured_leverage["ORDER_USDT"] = 3
+    result = await client.place_limit_ioc(close)
+    assert result.exchange_order_id == "1301"
+    assert requests[0]["side"] == 2
+    assert requests[0]["reduceOnly"] is True
+
+    reject = True
+    with pytest.raises(PrivateRequestError, match="read-only"):
+        await client.place_limit_ioc(close)
+    assert "ORDER_USDT" not in client._configured_leverage
+    await spot_http.aclose()
+    await perp_http.aclose()
+
+
+async def test_mexc_targeted_spot_and_contract_cancellation() -> None:
+    spot_requests: list[dict[str, str]] = []
+    perp_requests: list[object] = []
+
+    def spot_handler(request: httpx.Request) -> httpx.Response:
+        raw = dict(request.url.params)
+        spot_requests.append(raw)
+        return httpx.Response(
+            200,
+            json={
+                "symbol": "ORDERUSDT",
+                "orderId": "1401",
+                "origClientOrderId": "bh-order",
+            },
+        )
+
+    def perp_handler(request: httpx.Request) -> httpx.Response:
+        raw = json.loads(request.content.decode())
+        perp_requests.append(raw)
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "code": 0,
+                "data": [
+                    {"orderId": "1402", "errorCode": 0, "errorMsg": "success"}
+                ],
+            },
+        )
+
+    spot_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(spot_handler),
+        base_url="https://mexc-spot.test",
+    )
+    perp_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(perp_handler),
+        base_url="https://mexc-perp.test",
+    )
+    client = MexcAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        spot_client=spot_http,
+        perp_client=perp_http,
+    )
+
+    spot = await client.cancel_order(
+        market="spot",
+        symbol="ORDERUSDT",
+        exchange_order_id="1401",
+        client_order_id="bh-order",
+    )
+    perp = await client.cancel_order(
+        market="perp",
+        symbol="ORDER_USDT",
+        exchange_order_id="1402",
+        client_order_id="bh-order-perp",
+    )
+
+    assert spot.accepted is True
+    assert "orderId" in spot_requests[0]
+    assert perp.accepted is True
+    assert perp_requests == [["1402"]]
+    await spot_http.aclose()
+    await perp_http.aclose()
+
+
+async def test_mexc_probes_contract_write_and_confirms_isolated_leverage() -> None:
+    leverage = "1"
+    posts: list[dict[str, object]] = []
+
+    def perp_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal leverage
+        if request.method == "POST":
+            raw = json.loads(request.content.decode())
+            posts.append(raw)
+            leverage = str(raw["leverage"])
+            return httpx.Response(
+                200,
+                json={"success": True, "code": 0},
+            )
+        if request.url.path.endswith("/position_mode"):
+            data: object = 1
+        elif request.url.path.endswith("/leverage"):
+            data = [{"positionType": 2, "leverage": leverage}]
+        elif request.url.path.endswith("/open_orders"):
+            data = {"resultList": [], "totalCount": 0}
+        else:
+            data = []
+        return httpx.Response(
+            200,
+            json={"success": True, "code": 0, "data": data},
+        )
+
+    spot_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={})),
+        base_url="https://mexc-spot.test",
+    )
+    perp_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(perp_handler),
+        base_url="https://mexc-perp.test",
+    )
+    client = MexcAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        spot_client=spot_http,
+        perp_client=perp_http,
+    )
+
+    result = await client.configure_perp(
+        symbol="ORDER_USDT",
+        leverage=3,
+        position_mode=PositionMode.HEDGE,
+    )
+
+    assert result.isolated is True
+    assert posts == [
+        {
+            "openType": 1,
+            "leverage": 3,
+            "symbol": "ORDER_USDT",
+            "positionType": 2,
+        }
+    ]
+    assert client._configured_leverage["ORDER_USDT"] == 3
+    with pytest.raises(ValueError, match="between 1 and 10"):
+        await client.configure_perp(
+            symbol="ORDER_USDT",
+            leverage=11,
+            position_mode=PositionMode.HEDGE,
+        )
+    await spot_http.aclose()
+    await perp_http.aclose()
+
+
+async def test_mexc_refuses_configuration_with_exposure_and_invalid_id() -> None:
+    def perp_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/position_mode"):
+            data: object = 2
+        elif request.url.path.endswith("/leverage"):
+            data = [{"positionType": 2, "leverage": 1}]
+        elif request.url.path.endswith("/open_orders"):
+            data = {"resultList": [{"orderId": "1"}], "totalCount": 1}
+        else:
+            data = [
+                {
+                    "symbol": "ORDER_USDT",
+                    "positionType": 2,
+                    "holdVol": "20",
+                    "openType": 1,
+                    "leverage": 1,
+                }
+            ]
+        return httpx.Response(
+            200,
+            json={"success": True, "code": 0, "data": data},
+        )
+
+    spot_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={})),
+        base_url="https://mexc-spot.test",
+    )
+    perp_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(perp_handler),
+        base_url="https://mexc-perp.test",
+    )
+    client = MexcAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        spot_client=spot_http,
+        perp_client=perp_http,
+    )
+
+    with pytest.raises(PrivateRequestError, match="open orders or positions"):
+        await client.configure_perp(
+            symbol="ORDER_USDT",
+            leverage=3,
+            position_mode=PositionMode.ONE_WAY,
+        )
+    invalid = LimitIocOrder(
+        market="spot",
+        symbol="ORDERUSDT",
+        side="buy",
+        quantity=Decimal("20"),
+        limit_price=Decimal("0.05"),
+        client_order_id="invalid.client",
+    )
+    with pytest.raises(ValueError, match="supported ASCII"):
+        await client.place_limit_ioc(invalid)
+    await spot_http.aclose()
+    await perp_http.aclose()

@@ -29,9 +29,9 @@ USDT 名义量的较小值；不得使用开仓方向报价估算平仓成交。
 保护性限价同样按交易所价格步长处理：买单向下取整，保证不突破最大可接受价；卖单向上取整，保证不跌破
 最低可接受价。最大滑点必须位于 `[0, 1)`，无效价格或未知步长直接阻断。
 
-私有交易统一限定为限价 IOC。当前 Binance、OKX、Bybit、Bitget Classic V2 及 Gate LIVE 适配器已
-实现现货及 USDT 永续下单和按交易所/客户端订单 ID 撤单；永续仅允许“卖出开空”或“reduce-only
-买回空仓”。
+私有交易统一限定为限价 IOC。当前 Binance、OKX、Bybit、Bitget Classic V2、Gate LIVE 及有特批
+Standard V1 权限的 MEXC 适配器已实现现货及 USDT 永续下单和按交易所/客户端订单 ID 撤单；永续仅
+允许“卖出开空”或“reduce-only 买回空仓”。
 单向模式显式发送
 `reduceOnly`；Binance 双向模式发送 `positionSide=SHORT`，OKX 双向模式发送 `posSide=short`，
 两所都不发送其双向模式禁止或无效的 `reduceOnly` 参数，但本地仍保留 reduce-only 语义；Bybit 双向
@@ -42,6 +42,7 @@ OKX 客户端订单 ID 必须是不超过
 36 个 ASCII 字母、数字、短横线或下划线；Bitget 客户端订单 ID 最多 32 个受支持的 ASCII 字符。
 Bitget 单向 reduce-only 请求可能按官方规则不返回交易所订单 ID，此时必须依靠已持久化的客户端订单 ID
 找回，不能重发。Gate 客户端订单 ID 必须以 `t-` 开头，后缀最多 28 字节；永续订单按目录合约乘数换算
-后的十进制张数发送，卖出开空为负、买入平空为正，并显式发送 `X-Gate-Size-Decimal: 1`。下单与撤单
+后的十进制张数发送，卖出开空为负、买入平空为正，并显式发送 `X-Gate-Size-Decimal: 1`。MEXC 合约
+使用 `side=3` 开空、`side=2` 平空及 `type=3` IOC；单向平空额外发送 `reduceOnly=true`。
 返回统一的接受回执，只证明交易所接受请求；最终订单状态与成交仍以私有成交流或 REST 查单/成交明细
 为准。该能力尚未接入 HTTP 实盘入口。

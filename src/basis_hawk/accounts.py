@@ -2473,15 +2473,25 @@ class MexcAccountClient(PrivateAccountClient):
         )
         self._owned_spot = spot_client is None
         self._owned_perp = perp_client is None
+        self._configured_leverage: dict[str, int] = {}
 
     async def _spot_get(self, path: str, **params: object) -> Any:
+        return await self._spot_signed("GET", path, **params)
+
+    async def _spot_signed(
+        self,
+        method: str,
+        path: str,
+        **params: object,
+    ) -> Any:
         values = _ordered({"recvWindow": 5000, "timestamp": self.clock_ms(), **params})
         values["signature"] = _hmac_hex(self.secrets.api_secret, _query(values))
         return await _json_request(
             self.spot,
-            "GET",
+            method,
             path,
-            params=values,
+            params=values if method in {"GET", "DELETE"} else None,
+            data=values if method == "POST" else None,
             headers={"X-MEXC-APIKEY": self.secrets.api_key},
         )
 
@@ -2498,6 +2508,26 @@ class MexcAccountClient(PrivateAccountClient):
             "GET",
             path,
             params=params,
+            headers={
+                "ApiKey": self.secrets.api_key,
+                "Request-Time": timestamp,
+                "Signature": signature,
+                "Content-Type": "application/json",
+            },
+        )
+
+    async def _perp_post(self, path: str, body: object) -> Any:
+        content = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+        timestamp = str(self.clock_ms())
+        signature = _hmac_hex(
+            self.secrets.api_secret,
+            f"{self.secrets.api_key}{timestamp}{content}",
+        )
+        return await _json_request(
+            self.perp,
+            "POST",
+            path,
+            content=content,
             headers={
                 "ApiKey": self.secrets.api_key,
                 "Request-Time": timestamp,
@@ -2706,6 +2736,279 @@ class MexcAccountClient(PrivateAccountClient):
             order = _mexc_perp_order(item) if item else None
         return RemoteOrderLookup(order=order, complete=True)
 
+    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", order.client_order_id):
+            raise ValueError(
+                "MEXC client order IDs must be at most 32 supported ASCII characters"
+            )
+        if order.market == "spot":
+            item = await self._spot_signed(
+                "POST",
+                "/api/v3/order",
+                symbol=order.symbol,
+                side=order.side.upper(),
+                type="IMMEDIATE_OR_CANCEL",
+                quantity=format(order.quantity, "f"),
+                price=format(order.limit_price, "f"),
+                newClientOrderId=order.client_order_id,
+            )
+            if not isinstance(item, dict):
+                raise PrivateRequestError("MEXC spot order returned no result")
+            exchange_order_id = str(item.get("orderId") or "")
+            if not exchange_order_id:
+                raise PrivateRequestError("MEXC spot order returned no order ID")
+            return OrderSubmission(
+                market=order.market,
+                symbol=order.symbol,
+                client_order_id=str(
+                    item.get("clientOrderId") or order.client_order_id
+                ),
+                exchange_order_id=exchange_order_id,
+            )
+        leverage = self._configured_leverage.get(order.symbol)
+        if leverage is None:
+            raise PrivateRequestError(
+                "MEXC contract write capability and isolated leverage must be "
+                "confirmed before order submission"
+            )
+        payload = await self._perp_post(
+            "/api/v1/private/order/submit",
+            {
+                "symbol": order.symbol,
+                "price": format(order.limit_price, "f"),
+                "vol": format(order.quantity, "f"),
+                "leverage": leverage,
+                "side": 2 if order.reduce_only else 3,
+                "type": 3,
+                "openType": 1,
+                "externalOid": order.client_order_id,
+                "positionMode": (
+                    1 if order.position_mode == PositionMode.HEDGE else 2
+                ),
+                **(
+                    {"reduceOnly": True}
+                    if order.position_mode == PositionMode.ONE_WAY
+                    and order.reduce_only
+                    else {}
+                ),
+            },
+        )
+        if not _mexc_success(payload) or payload.get("data") in (None, ""):
+            self._configured_leverage.pop(order.symbol, None)
+            raise PrivateRequestError(
+                "MEXC contract order submission was rejected; trading is read-only"
+            )
+        return OrderSubmission(
+            market=order.market,
+            symbol=order.symbol,
+            client_order_id=order.client_order_id,
+            exchange_order_id=str(payload["data"]),
+        )
+
+    async def cancel_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+    ) -> OrderCancellation:
+        if exchange_order_id is None and client_order_id is None:
+            raise ValueError("an exchange or client order ID is required")
+        if market == "spot":
+            params: dict[str, object] = {"symbol": symbol}
+            if exchange_order_id is not None:
+                params["orderId"] = exchange_order_id
+            else:
+                params["origClientOrderId"] = client_order_id or ""
+            item = await self._spot_signed("DELETE", "/api/v3/order", **params)
+            if not isinstance(item, dict):
+                raise PrivateRequestError(
+                    "MEXC spot order cancellation returned no result"
+                )
+            return OrderCancellation(
+                market=market,
+                symbol=symbol,
+                client_order_id=str(
+                    item.get("origClientOrderId")
+                    or item.get("clientOrderId")
+                    or client_order_id
+                    or ""
+                )
+                or None,
+                exchange_order_id=str(item.get("orderId") or exchange_order_id or "")
+                or None,
+                accepted=True,
+            )
+        if exchange_order_id is not None:
+            payload = await self._perp_post(
+                "/api/v1/private/order/cancel",
+                [exchange_order_id],
+            )
+            items = payload.get("data") or [] if isinstance(payload, dict) else []
+            accepted = (
+                _mexc_success(payload)
+                and bool(items)
+                and int(items[0].get("errorCode") or 0) == 0
+            )
+        else:
+            payload = await self._perp_post(
+                "/api/v1/private/order/cancel_with_external",
+                {"symbol": symbol, "externalOid": client_order_id},
+            )
+            accepted = _mexc_success(payload)
+        if not accepted:
+            raise PrivateRequestError("MEXC contract order cancellation was rejected")
+        return OrderCancellation(
+            market=market,
+            symbol=symbol,
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            accepted=True,
+        )
+
+    async def configure_perp(
+        self,
+        *,
+        symbol: str,
+        leverage: int,
+        position_mode: PositionMode,
+    ) -> PerpConfiguration:
+        if leverage < 1 or leverage > 10:
+            raise ValueError("leverage must be between 1 and 10")
+        if position_mode == PositionMode.UNKNOWN:
+            raise ValueError("position mode must be known before configuration")
+        mode, leverage_payload, pending_payload, positions_payload = await _gather(
+            self._perp_get("/api/v1/private/position/position_mode"),
+            self._perp_get("/api/v1/private/position/leverage", symbol=symbol),
+            self._perp_get(
+                "/api/v1/private/order/list/open_orders",
+                symbol=symbol,
+                page_num=1,
+                page_size=100,
+            ),
+            self._perp_get("/api/v1/private/position/open_positions", symbol=symbol),
+        )
+        for payload in (
+            mode,
+            leverage_payload,
+            pending_payload,
+            positions_payload,
+        ):
+            if not _mexc_success(payload):
+                raise PrivateRequestError(
+                    "MEXC contract capability probe failed; trading is read-only"
+                )
+        detected_mode = (
+            PositionMode.HEDGE
+            if mode.get("data") == 1
+            else PositionMode.ONE_WAY
+            if mode.get("data") == 2
+            else PositionMode.UNKNOWN
+        )
+        if detected_mode != position_mode:
+            raise PrivateRequestError(
+                "MEXC position mode does not match the requested configuration"
+            )
+        position_items = positions_payload.get("data") or []
+        target_position = next(
+            (
+                item
+                for item in position_items
+                if str(item.get("symbol") or "") == symbol
+                and int(item.get("positionType") or 0) == 2
+            ),
+            None,
+        )
+        leverage_items = leverage_payload.get("data") or []
+        if isinstance(leverage_items, dict):
+            leverage_items = [leverage_items]
+        target_leverage = next(
+            (
+                item
+                for item in leverage_items
+                if int(item.get("positionType") or 0) == 2
+            ),
+            None,
+        )
+        if (
+            target_position is not None
+            and int(target_position.get("openType") or 0) == 1
+            and Decimal(str(target_position.get("leverage") or "0"))
+            == Decimal(leverage)
+            and target_leverage is not None
+            and Decimal(str(target_leverage.get("leverage") or "0"))
+            == Decimal(leverage)
+        ):
+            self._configured_leverage[symbol] = leverage
+            return PerpConfiguration(
+                symbol=symbol,
+                leverage=leverage,
+                isolated=True,
+                position_mode=position_mode,
+            )
+        pending_data = pending_payload.get("data") or {}
+        open_orders = (
+            pending_data.get("resultList")
+            if isinstance(pending_data, dict)
+            else pending_data
+        ) or []
+        if open_orders or any(
+            Decimal(str(item.get("holdVol") or "0")) != 0
+            for item in position_items
+        ):
+            raise PrivateRequestError(
+                "cannot change MEXC leverage with open orders or positions"
+            )
+        configured = await self._perp_post(
+            "/api/v1/private/position/change_leverage",
+            {
+                "openType": 1,
+                "leverage": leverage,
+                "symbol": symbol,
+                "positionType": 2,
+            },
+        )
+        if not _mexc_success(configured):
+            self._configured_leverage.pop(symbol, None)
+            raise PrivateRequestError(
+                "MEXC contract write capability probe failed; trading is read-only"
+            )
+        confirmed = await self._perp_get(
+            "/api/v1/private/position/leverage",
+            symbol=symbol,
+        )
+        if not _mexc_success(confirmed):
+            self._configured_leverage.pop(symbol, None)
+            raise PrivateRequestError(
+                "MEXC leverage configuration could not be confirmed"
+            )
+        confirmed_items = confirmed.get("data") or []
+        if isinstance(confirmed_items, dict):
+            confirmed_items = [confirmed_items]
+        short = next(
+            (
+                item
+                for item in confirmed_items
+                if int(item.get("positionType") or 0) == 2
+            ),
+            None,
+        )
+        if short is None or Decimal(
+            str(short.get("leverage") or "0")
+        ) != Decimal(leverage):
+            self._configured_leverage.pop(symbol, None)
+            raise PrivateRequestError(
+                "MEXC isolated leverage configuration was not confirmed"
+            )
+        self._configured_leverage[symbol] = leverage
+        return PerpConfiguration(
+            symbol=symbol,
+            leverage=leverage,
+            isolated=True,
+            position_mode=position_mode,
+        )
+
     async def close(self) -> None:
         if self._owned_spot:
             await self.spot.aclose()
@@ -2806,6 +3109,14 @@ def _bitget_side(item: dict[str, Any], *, market: str) -> str:
     if market == "perp" and str(item.get("tradeSide") or "").lower() == "close":
         return "buy" if side == "sell" else "sell"
     return side
+
+
+def _mexc_success(payload: Any) -> bool:
+    return (
+        isinstance(payload, dict)
+        and payload.get("success") is True
+        and int(payload.get("code") or 0) == 0
+    )
 
 
 def _optional_decimal(value: object) -> Decimal | None:
