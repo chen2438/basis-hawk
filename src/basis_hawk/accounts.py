@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -86,6 +87,25 @@ class PerpConfiguration(BaseModel):
     leverage: int
     isolated: bool
     position_mode: PositionMode
+
+
+class OrderSubmission(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    market: Literal["spot", "perp"]
+    symbol: str
+    client_order_id: str
+    exchange_order_id: str | None
+
+
+class OrderCancellation(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    market: Literal["spot", "perp"]
+    symbol: str
+    client_order_id: str | None
+    exchange_order_id: str | None
+    accepted: bool
 
 
 class AccountSnapshot(BaseModel):
@@ -244,6 +264,7 @@ async def _json_request(
     params: dict[str, object] | None = None,
     data: dict[str, object] | None = None,
     json_body: dict[str, object] | None = None,
+    content: str | None = None,
     headers: dict[str, str] | None = None,
 ) -> Any:
     try:
@@ -253,6 +274,7 @@ async def _json_request(
             params=params,
             data=data,
             json=json_body,
+            content=content,
             headers=headers,
         )
     except httpx.HTTPError as exc:
@@ -296,7 +318,7 @@ class PrivateAccountClient(ABC):
         client_order_id: str,
     ) -> RemoteOrderLookup: ...
 
-    async def place_limit_ioc(self, order: LimitIocOrder) -> RemoteOrder:
+    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
         raise UnsupportedTradingError(
             f"{self.exchange.value} order placement is not implemented"
         )
@@ -308,7 +330,7 @@ class PrivateAccountClient(ABC):
         symbol: str,
         exchange_order_id: str | None,
         client_order_id: str | None,
-    ) -> RemoteOrder:
+    ) -> OrderCancellation:
         raise UnsupportedTradingError(
             f"{self.exchange.value} order cancellation is not implemented"
         )
@@ -546,7 +568,7 @@ class BinanceAccountClient(PrivateAccountClient):
             complete=True,
         )
 
-    async def place_limit_ioc(self, order: LimitIocOrder) -> RemoteOrder:
+    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
         if len(order.client_order_id) > 36:
             raise ValueError("Binance client order IDs cannot exceed 36 characters")
         client = self.spot if order.market == "spot" else self.perp
@@ -568,14 +590,15 @@ class BinanceAccountClient(PrivateAccountClient):
                 params["positionSide"] = "BOTH"
                 params["reduceOnly"] = str(order.reduce_only).lower()
         item = await self._signed_request(client, "POST", path, **params)
-        return _order(
-            item,
+        return OrderSubmission(
             market=order.market,
-            order_id="orderId",
-            client_id="clientOrderId",
-            quantity="origQty",
-            filled="executedQty",
-            reduce_only=order.reduce_only,
+            symbol=str(item.get("symbol") or order.symbol),
+            client_order_id=str(
+                item.get("clientOrderId") or order.client_order_id
+            ),
+            exchange_order_id=(
+                str(item["orderId"]) if item.get("orderId") is not None else None
+            ),
         )
 
     async def cancel_order(
@@ -585,7 +608,7 @@ class BinanceAccountClient(PrivateAccountClient):
         symbol: str,
         exchange_order_id: str | None,
         client_order_id: str | None,
-    ) -> RemoteOrder:
+    ) -> OrderCancellation:
         if exchange_order_id is None and client_order_id is None:
             raise ValueError("an exchange or client order ID is required")
         client = self.spot if market == "spot" else self.perp
@@ -596,16 +619,18 @@ class BinanceAccountClient(PrivateAccountClient):
         else:
             params["origClientOrderId"] = client_order_id or ""
         item = await self._signed_request(client, "DELETE", path, **params)
-        return _order(
-            item,
+        return OrderCancellation(
             market=market,
-            order_id="orderId",
-            client_id="clientOrderId",
-            quantity="origQty",
-            filled="executedQty",
-            reduce_only=(
-                _binance_reduce_only(item) if market == "perp" else False
+            symbol=str(item.get("symbol") or symbol),
+            client_order_id=(
+                str(item["clientOrderId"])
+                if item.get("clientOrderId")
+                else client_order_id
             ),
+            exchange_order_id=(
+                str(item["orderId"]) if item.get("orderId") is not None else None
+            ),
+            accepted=True,
         )
 
     async def configure_perp(
@@ -692,6 +717,33 @@ class OkxAccountClient(PrivateAccountClient):
         params = _ordered(params)
         query = _query(params)
         request_path = f"{path}?{query}" if query else path
+        headers = self._headers("GET", request_path)
+        return await _json_request(
+            self.http,
+            "GET",
+            path,
+            params=params,
+            headers=headers,
+        )
+
+    async def _post(self, path: str, **values: object) -> Any:
+        body = _ordered(values)
+        content = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+        return await _json_request(
+            self.http,
+            "POST",
+            path,
+            content=content,
+            headers=self._headers("POST", path, body=content),
+        )
+
+    def _headers(
+        self,
+        method: str,
+        request_path: str,
+        *,
+        body: str = "",
+    ) -> dict[str, str]:
         timestamp = self.clock().astimezone(UTC).isoformat(timespec="milliseconds").replace(
             "+00:00", "Z"
         )
@@ -699,14 +751,15 @@ class OkxAccountClient(PrivateAccountClient):
             "OK-ACCESS-KEY": self.secrets.api_key,
             "OK-ACCESS-SIGN": _hmac_base64(
                 self.secrets.api_secret,
-                f"{timestamp}GET{request_path}",
+                f"{timestamp}{method}{request_path}{body}",
             ),
             "OK-ACCESS-TIMESTAMP": timestamp,
             "OK-ACCESS-PASSPHRASE": self.secrets.passphrase or "",
+            "Content-Type": "application/json",
         }
         if self.environment == ExchangeEnvironment.SANDBOX:
             headers["x-simulated-trading"] = "1"
-        return await _json_request(self.http, "GET", path, params=params, headers=headers)
+        return headers
 
     async def snapshot(self) -> AccountSnapshot:
         balance, config = await _gather(
@@ -759,7 +812,7 @@ class OkxAccountClient(PrivateAccountClient):
                 price=Decimal(str(item.get("px") or "0")),
                 original_quantity=Decimal(str(item.get("sz") or "0")),
                 filled_quantity=Decimal(str(item.get("accFillSz") or "0")),
-                reduce_only=str(item.get("reduceOnly") or "false").lower() == "true",
+                reduce_only=_okx_reduce_only(item),
             )
             for item in order_items
         ]
@@ -879,10 +932,138 @@ class OkxAccountClient(PrivateAccountClient):
                 price=Decimal(str(item.get("px") or item.get("avgPx") or "0")),
                 original_quantity=Decimal(str(item.get("sz") or "0")),
                 filled_quantity=Decimal(str(item.get("accFillSz") or "0")),
-                reduce_only=str(item.get("reduceOnly") or "false").lower()
-                == "true",
+                reduce_only=_okx_reduce_only(item),
             ),
             complete=True,
+        )
+
+    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
+        if len(order.client_order_id) > 32 or not order.client_order_id.isalnum():
+            raise ValueError(
+                "OKX client order IDs must be at most 32 alphanumeric characters"
+            )
+        values: dict[str, object] = {
+            "instId": order.symbol,
+            "tdMode": "cash" if order.market == "spot" else "isolated",
+            "clOrdId": order.client_order_id,
+            "side": order.side,
+            "ordType": "ioc",
+            "px": format(order.limit_price, "f"),
+            "sz": format(order.quantity, "f"),
+        }
+        if order.market == "perp":
+            if order.position_mode == PositionMode.HEDGE:
+                values["posSide"] = "short"
+            else:
+                values["reduceOnly"] = order.reduce_only
+        payload = await self._post("/api/v5/trade/order", **values)
+        item = _okx_command_item(payload, "order submission")
+        return OrderSubmission(
+            market=order.market,
+            symbol=order.symbol,
+            client_order_id=str(item.get("clOrdId") or order.client_order_id),
+            exchange_order_id=(
+                str(item["ordId"]) if item.get("ordId") else None
+            ),
+        )
+
+    async def cancel_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+    ) -> OrderCancellation:
+        if exchange_order_id is None and client_order_id is None:
+            raise ValueError("an exchange or client order ID is required")
+        values: dict[str, object] = {"instId": symbol}
+        if exchange_order_id is not None:
+            values["ordId"] = exchange_order_id
+        else:
+            values["clOrdId"] = client_order_id or ""
+        payload = await self._post("/api/v5/trade/cancel-order", **values)
+        item = _okx_command_item(payload, "order cancellation")
+        return OrderCancellation(
+            market=market,
+            symbol=symbol,
+            client_order_id=(
+                str(item["clOrdId"]) if item.get("clOrdId") else client_order_id
+            ),
+            exchange_order_id=(
+                str(item["ordId"]) if item.get("ordId") else exchange_order_id
+            ),
+            accepted=True,
+        )
+
+    async def configure_perp(
+        self,
+        *,
+        symbol: str,
+        leverage: int,
+        position_mode: PositionMode,
+    ) -> PerpConfiguration:
+        if leverage < 1 or leverage > 10:
+            raise ValueError("leverage must be between 1 and 10")
+        if position_mode == PositionMode.UNKNOWN:
+            raise ValueError("position mode must be known before configuration")
+        leverage_info = await self._get(
+            "/api/v5/account/leverage-info",
+            instId=symbol,
+            mgnMode="isolated",
+        )
+        _okx_success(leverage_info)
+        target_side = "short" if position_mode == PositionMode.HEDGE else "net"
+        current = next(
+            (
+                item
+                for item in leverage_info.get("data") or []
+                if str(item.get("posSide") or "net") == target_side
+            ),
+            None,
+        )
+        if current is not None and Decimal(
+            str(current.get("lever") or "0")
+        ) == Decimal(leverage):
+            return PerpConfiguration(
+                symbol=symbol,
+                leverage=leverage,
+                isolated=True,
+                position_mode=position_mode,
+            )
+        pending, positions = await _gather(
+            self._get("/api/v5/trade/orders-pending", instId=symbol),
+            self._get("/api/v5/account/positions", instId=symbol),
+        )
+        _okx_success(pending)
+        _okx_success(positions)
+        if (pending.get("data") or []) or any(
+            Decimal(str(item.get("pos") or "0")) != 0
+            for item in positions.get("data") or []
+        ):
+            raise PrivateRequestError(
+                "cannot change OKX leverage with open orders or positions"
+            )
+        values: dict[str, object] = {
+            "instId": symbol,
+            "lever": str(leverage),
+            "mgnMode": "isolated",
+        }
+        if position_mode == PositionMode.HEDGE:
+            values["posSide"] = "short"
+        payload = await self._post("/api/v5/account/set-leverage", **values)
+        item = _okx_command_item(
+            payload,
+            "leverage configuration",
+            require_subcode=False,
+        )
+        if Decimal(str(item.get("lever") or "0")) != Decimal(leverage):
+            raise PrivateRequestError("OKX leverage configuration was not confirmed")
+        return PerpConfiguration(
+            symbol=symbol,
+            leverage=leverage,
+            isolated=True,
+            position_mode=position_mode,
         )
 
     async def close(self) -> None:
@@ -1885,6 +2066,28 @@ async def _gather(*values: Any) -> list[Any]:
 def _okx_success(payload: Any) -> None:
     if not isinstance(payload, dict) or payload.get("code") != "0":
         raise PrivateRequestError("OKX private account request was rejected")
+
+
+def _okx_command_item(
+    payload: Any,
+    action: str,
+    *,
+    require_subcode: bool = True,
+) -> dict[str, Any]:
+    _okx_success(payload)
+    items = payload.get("data") or []
+    if not items or (
+        require_subcode and str(items[0].get("sCode") or "") != "0"
+    ):
+        raise PrivateRequestError(f"OKX {action} was rejected")
+    return items[0]
+
+
+def _okx_reduce_only(item: dict[str, Any]) -> bool:
+    return str(item.get("reduceOnly") or "false").lower() == "true" or (
+        str(item.get("posSide") or "").lower() == "short"
+        and str(item.get("side") or "").lower() == "buy"
+    )
 
 
 def _bybit_success(payload: Any) -> None:

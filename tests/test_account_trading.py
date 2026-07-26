@@ -1,3 +1,5 @@
+import json
+from datetime import UTC, datetime
 from decimal import Decimal
 from urllib.parse import parse_qs
 
@@ -8,13 +10,17 @@ from pydantic import ValidationError
 from basis_hawk.accounts import (
     BinanceAccountClient,
     LimitIocOrder,
+    OkxAccountClient,
     PositionMode,
+    PrivateRequestError,
+    _hmac_base64,
 )
 from basis_hawk.credentials import ExchangeEnvironment, ExchangeSecrets
 
 SECRETS = ExchangeSecrets(
     api_key="test-api-key",
     api_secret="test-api-secret",
+    passphrase="test-passphrase",
 )
 
 
@@ -88,9 +94,7 @@ async def test_binance_places_spot_and_hedge_mode_perp_ioc_orders() -> None:
     )
 
     assert spot.exchange_order_id == "101"
-    assert spot.reduce_only is False
     assert close_short.exchange_order_id == "102"
-    assert close_short.reduce_only is True
     spot_request = requests[0][2]
     assert requests[0][:2] == ("POST", "/api/v3/order")
     assert spot_request["timeInForce"] == "IOC"
@@ -168,8 +172,7 @@ async def test_binance_one_way_open_and_cancel_use_signed_parameters() -> None:
         client_order_id=order.client_order_id,
     )
 
-    assert order.reduce_only is False
-    assert canceled.status == "CANCELED"
+    assert canceled.accepted is True
     assert requests[0][1]["positionSide"] == "BOTH"
     assert requests[0][1]["reduceOnly"] == "false"
     assert requests[1][0] == "DELETE"
@@ -319,3 +322,287 @@ def test_limit_ioc_order_rejects_unsafe_perpetual_directions() -> None:
             client_order_id="bh-close-perp",
             position_mode=PositionMode.ONE_WAY,
         )
+
+
+async def test_okx_places_spot_and_hedge_mode_perp_ioc_orders() -> None:
+    requests: list[tuple[str, dict[str, object], httpx.Headers]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        raw = json.loads(body)
+        requests.append((request.url.path, raw, request.headers))
+        timestamp = "2026-07-26T12:00:00.000Z"
+        assert request.headers["Content-Type"] == "application/json"
+        assert request.headers["OK-ACCESS-KEY"] == SECRETS.api_key
+        assert request.headers["OK-ACCESS-TIMESTAMP"] == timestamp
+        assert request.headers["OK-ACCESS-SIGN"] == _hmac_base64(
+            SECRETS.api_secret,
+            f"{timestamp}POST{request.url.path}{body}",
+        )
+        return httpx.Response(
+            200,
+            json={
+                "code": "0",
+                "data": [
+                    {
+                        "sCode": "0",
+                        "ordId": "301" if raw["instId"] == "ORDER-USDT" else "302",
+                        "clOrdId": raw["clOrdId"],
+                    }
+                ],
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://okx.test",
+    )
+    client = OkxAccountClient(
+        SECRETS,
+        ExchangeEnvironment.SANDBOX,
+        clock=lambda: datetime(2026, 7, 26, 12, 0, tzinfo=UTC),
+        client=http,
+    )
+
+    spot = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="spot",
+            symbol="ORDER-USDT",
+            side="buy",
+            quantity=Decimal("20"),
+            limit_price=Decimal("0.05"),
+            client_order_id="bhopenspot",
+        )
+    )
+    close_short = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="perp",
+            symbol="ORDER-USDT-SWAP",
+            side="buy",
+            quantity=Decimal("20"),
+            limit_price=Decimal("0.051"),
+            client_order_id="bhcloseperp",
+            reduce_only=True,
+            position_mode=PositionMode.HEDGE,
+        )
+    )
+
+    assert spot.exchange_order_id == "301"
+    assert close_short.exchange_order_id == "302"
+    assert requests[0][0] == "/api/v5/trade/order"
+    assert requests[0][1] == {
+        "clOrdId": "bhopenspot",
+        "instId": "ORDER-USDT",
+        "ordType": "ioc",
+        "px": "0.05",
+        "side": "buy",
+        "sz": "20",
+        "tdMode": "cash",
+    }
+    assert requests[0][2]["x-simulated-trading"] == "1"
+    assert requests[1][1]["tdMode"] == "isolated"
+    assert requests[1][1]["posSide"] == "short"
+    assert "reduceOnly" not in requests[1][1]
+    await http.aclose()
+
+
+async def test_okx_one_way_close_and_cancel_use_ack_receipts() -> None:
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raw = json.loads(request.content.decode())
+        requests.append((request.url.path, raw))
+        return httpx.Response(
+            200,
+            json={
+                "code": "0",
+                "data": [
+                    {
+                        "sCode": "0",
+                        "ordId": raw.get("ordId", "401"),
+                        "clOrdId": raw.get("clOrdId", "bhcloseoneway"),
+                    }
+                ],
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://okx.test",
+    )
+    client = OkxAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    order = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="perp",
+            symbol="ORDER-USDT-SWAP",
+            side="buy",
+            quantity=Decimal("20"),
+            limit_price=Decimal("0.051"),
+            client_order_id="bhcloseoneway",
+            reduce_only=True,
+            position_mode=PositionMode.ONE_WAY,
+        )
+    )
+    canceled = await client.cancel_order(
+        market="perp",
+        symbol="ORDER-USDT-SWAP",
+        exchange_order_id=order.exchange_order_id,
+        client_order_id=order.client_order_id,
+    )
+
+    assert requests[0][1]["reduceOnly"] is True
+    assert "posSide" not in requests[0][1]
+    assert requests[1] == (
+        "/api/v5/trade/cancel-order",
+        {"instId": "ORDER-USDT-SWAP", "ordId": "401"},
+    )
+    assert canceled.accepted is True
+    assert canceled.exchange_order_id == "401"
+    await http.aclose()
+
+
+async def test_okx_configures_isolated_bounded_leverage_without_exposure() -> None:
+    requests: list[tuple[str, str, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raw = (
+            json.loads(request.content.decode())
+            if request.method == "POST"
+            else dict(request.url.params)
+        )
+        requests.append((request.method, request.url.path, raw))
+        if request.url.path.endswith("/leverage-info"):
+            return httpx.Response(
+                200,
+                json={"code": "0", "data": [{"posSide": "short", "lever": "1"}]},
+            )
+        if request.url.path.endswith("/orders-pending"):
+            return httpx.Response(200, json={"code": "0", "data": []})
+        if request.url.path.endswith("/positions"):
+            return httpx.Response(
+                200,
+                json={"code": "0", "data": [{"pos": "0"}]},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "code": "0",
+                "data": [
+                    {
+                        "instId": "ORDER-USDT-SWAP",
+                        "lever": "3",
+                        "mgnMode": "isolated",
+                        "posSide": "short",
+                    }
+                ],
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://okx.test",
+    )
+    client = OkxAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    result = await client.configure_perp(
+        symbol="ORDER-USDT-SWAP",
+        leverage=3,
+        position_mode=PositionMode.HEDGE,
+    )
+
+    assert result.leverage == 3
+    assert result.isolated is True
+    post = next(item for item in requests if item[0] == "POST")
+    assert post == (
+        "POST",
+        "/api/v5/account/set-leverage",
+        {
+            "instId": "ORDER-USDT-SWAP",
+            "lever": "3",
+            "mgnMode": "isolated",
+            "posSide": "short",
+        },
+    )
+    with pytest.raises(ValueError, match="between 1 and 10"):
+        await client.configure_perp(
+            symbol="ORDER-USDT-SWAP",
+            leverage=11,
+            position_mode=PositionMode.HEDGE,
+        )
+    await http.aclose()
+
+
+async def test_okx_reuses_matching_leverage_and_refuses_exposure() -> None:
+    pending_has_order = False
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path.endswith("/leverage-info"):
+            leverage = "2" if pending_has_order else "3"
+            return httpx.Response(
+                200,
+                json={"code": "0", "data": [{"posSide": "net", "lever": leverage}]},
+            )
+        if request.url.path.endswith("/orders-pending"):
+            return httpx.Response(
+                200,
+                json={"code": "0", "data": [{"ordId": "1"}]},
+            )
+        return httpx.Response(200, json={"code": "0", "data": []})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://okx.test",
+    )
+    client = OkxAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    result = await client.configure_perp(
+        symbol="ORDER-USDT-SWAP",
+        leverage=3,
+        position_mode=PositionMode.ONE_WAY,
+    )
+    assert result.leverage == 3
+    assert requests == ["/api/v5/account/leverage-info"]
+
+    pending_has_order = True
+    with pytest.raises(PrivateRequestError, match="open orders or positions"):
+        await client.configure_perp(
+            symbol="ORDER-USDT-SWAP",
+            leverage=3,
+            position_mode=PositionMode.ONE_WAY,
+        )
+    await http.aclose()
+
+
+async def test_okx_rejects_invalid_client_ids_and_failed_acknowledgements() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "code": "0",
+                "data": [{"sCode": "51000", "sMsg": "invalid order"}],
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://okx.test",
+    )
+    client = OkxAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+    invalid = LimitIocOrder(
+        market="spot",
+        symbol="ORDER-USDT",
+        side="buy",
+        quantity=Decimal("20"),
+        limit_price=Decimal("0.05"),
+        client_order_id="bh-open-spot",
+    )
+    with pytest.raises(ValueError, match="alphanumeric"):
+        await client.place_limit_ioc(invalid)
+
+    rejected = invalid.model_copy(update={"client_order_id": "bhopenspot"})
+    with pytest.raises(PrivateRequestError, match="order submission"):
+        await client.place_limit_ioc(rejected)
+    await http.aclose()
