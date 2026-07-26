@@ -1,3 +1,4 @@
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -5,7 +6,14 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from basis_hawk.models import Exchange, Opportunity, Quality, ScannerSettings
+from basis_hawk.credentials import ExchangeEnvironment
+from basis_hawk.models import (
+    Exchange,
+    InstrumentPair,
+    Opportunity,
+    Quality,
+    ScannerSettings,
+)
 from basis_hawk.storage import Database
 from basis_hawk.trading import (
     IdempotencyConflict,
@@ -14,6 +22,7 @@ from basis_hawk.trading import (
     TradeIntentStatus,
     TradeLedger,
     TradeValidationError,
+    _live_client_order_ids,
 )
 
 
@@ -43,6 +52,32 @@ def _opportunity(*, observed_at: datetime | None = None) -> Opportunity:
         spot_taker_fee=Decimal("0.001"),
         perp_taker_fee=Decimal("0.0005"),
         quality=Quality.HEALTHY,
+    )
+
+
+def _pair(exchange: Exchange = Exchange.OKX) -> InstrumentPair:
+    return InstrumentPair(
+        exchange=exchange,
+        base_asset="ORDER",
+        spot_symbol=(
+            "ORDER-USDT" if exchange in {Exchange.OKX, Exchange.GATE} else "ORDERUSDT"
+        ),
+        perp_symbol=(
+            "ORDER-USDT-SWAP"
+            if exchange == Exchange.OKX
+            else "ORDER_USDT"
+            if exchange == Exchange.GATE
+            else "ORDERUSDT"
+        ),
+        spot_price_increment=Decimal("0.00001"),
+        spot_quantity_increment=Decimal("0.1"),
+        spot_min_quantity=Decimal("1"),
+        spot_min_notional=Decimal("5"),
+        perp_price_increment=Decimal("0.000001"),
+        perp_quantity_increment=Decimal("1"),
+        perp_min_quantity=Decimal("1"),
+        perp_min_notional=Decimal("5"),
+        perp_contract_size=Decimal("10"),
     )
 
 
@@ -87,6 +122,74 @@ async def test_paper_intent_is_persisted_before_execution_and_idempotent() -> No
             settings=ScannerSettings(),
         )
     await database.close()
+
+
+async def test_live_open_plan_persists_native_sizes_limits_and_leverage() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = TradeLedger(database)
+    key = uuid.uuid4()
+    opportunity = _opportunity().model_copy(
+        update={
+            "exchange": Exchange.OKX,
+            "spot_symbol": "ORDER-USDT",
+            "perp_symbol": "ORDER-USDT-SWAP",
+        }
+    )
+
+    planned, created = await ledger.plan_live_open(
+        opportunity=opportunity,
+        pair=_pair(),
+        notional_usdt=Decimal("100"),
+        idempotency_key=key,
+        settings=ScannerSettings(),
+        environment=ExchangeEnvironment.LIVE,
+        leverage=3,
+        maximum_slippage=Decimal("0.001"),
+    )
+    repeated, repeated_created = await ledger.plan_live_open(
+        opportunity=opportunity,
+        pair=_pair(),
+        notional_usdt=Decimal("100"),
+        idempotency_key=key,
+        settings=ScannerSettings(),
+        environment=ExchangeEnvironment.LIVE,
+        leverage=3,
+    )
+
+    assert created is True
+    assert repeated_created is False
+    assert repeated.id == planned.id
+    assert planned.environment == "live"
+    assert planned.leverage == 3
+    assert planned.base_quantity == Decimal("2000")
+    legs = {item.leg: item for item in planned.legs}
+    assert legs["spot"].quantity == Decimal("2000")
+    assert legs["spot"].base_multiplier == Decimal("1")
+    assert legs["perp"].quantity == Decimal("200")
+    assert legs["perp"].base_multiplier == Decimal("10")
+    assert legs["spot"].quantity * legs["spot"].base_multiplier == (
+        legs["perp"].quantity * legs["perp"].base_multiplier
+    )
+    assert legs["spot"].limit_price <= Decimal("0.05") * Decimal("1.001")
+    assert legs["perp"].limit_price >= Decimal("0.051") * Decimal("0.999")
+    assert all(re.fullmatch(r"[A-Za-z0-9]{1,32}", item.client_order_id) for item in planned.legs)
+    await database.close()
+
+
+def test_live_client_order_ids_satisfy_gate_and_generic_constraints() -> None:
+    intent_id = "12345678-1234-1234-1234-123456789012"
+    gate_ids = _live_client_order_ids(Exchange.GATE, intent_id)
+    generic_ids = _live_client_order_ids(Exchange.BITGET, intent_id)
+
+    assert all(
+        value.startswith("t-") and len(value.encode()) <= 30
+        for value in gate_ids
+    )
+    assert all(
+        re.fullmatch(r"[.A-Za-z0-9_:/\\-]{1,32}", value)
+        for value in generic_ids
+    )
 
 
 async def test_trade_state_machine_uses_optimistic_versions() -> None:

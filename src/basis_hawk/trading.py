@@ -9,7 +9,19 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, field_serializer
 
-from basis_hawk.models import Exchange, Opportunity, Quality, ScannerSettings
+from basis_hawk.credentials import ExchangeEnvironment
+from basis_hawk.models import (
+    Exchange,
+    InstrumentPair,
+    Opportunity,
+    Quality,
+    ScannerSettings,
+)
+from basis_hawk.sizing import (
+    OrderSizingError,
+    protective_limit_price,
+    size_paired_order,
+)
 from basis_hawk.storage import (
     Database,
     FillRow,
@@ -94,6 +106,7 @@ class TradeIntentView(BaseModel):
     base_asset: str
     action: str
     status: TradeIntentStatus
+    leverage: int
     requested_notional: Decimal
     base_quantity: Decimal
     spot_fee_rate: Decimal
@@ -362,6 +375,192 @@ class TradeLedger:
         if updated is None:
             raise StateConflict("trade intent version changed")
         return _view(updated, legs)
+
+    async def plan_live_open(
+        self,
+        *,
+        opportunity: Opportunity,
+        pair: InstrumentPair,
+        notional_usdt: Decimal,
+        idempotency_key: uuid.UUID,
+        settings: ScannerSettings,
+        environment: ExchangeEnvironment,
+        leverage: int = 1,
+        maximum_slippage: Decimal = Decimal("0.001"),
+        now: datetime | None = None,
+    ) -> tuple[TradeIntentView, bool]:
+        existing = await self.database.trade_intent_by_idempotency(
+            str(idempotency_key)
+        )
+        if existing is not None:
+            row, legs = existing
+            if (
+                row.environment == environment.value
+                and row.action == "open"
+                and row.exchange == opportunity.exchange.value
+                and row.base_asset == opportunity.base_asset
+                and row.requested_notional == notional_usdt
+                and row.leverage == leverage
+            ):
+                return _view(row, legs), False
+            raise IdempotencyConflict(
+                "idempotency key was already used for a different trade request"
+            )
+        if leverage < 1 or leverage > 10:
+            raise TradeValidationError("leverage must be between 1 and 10")
+        if (
+            environment == ExchangeEnvironment.SANDBOX
+            and opportunity.exchange in {Exchange.MEXC, Exchange.GATE}
+        ):
+            raise TradeValidationError(
+                f"{opportunity.exchange.value} does not provide a supported sandbox"
+            )
+        if (
+            pair.exchange != opportunity.exchange
+            or pair.base_asset != opportunity.base_asset
+            or pair.spot_symbol != opportunity.spot_symbol
+            or pair.perp_symbol != opportunity.perp_symbol
+        ):
+            raise TradeValidationError(
+                "instrument rules do not match the selected opportunity"
+            )
+        observed_now = now or datetime.now(UTC)
+        if opportunity.quality != Quality.HEALTHY:
+            raise TradeValidationError("only healthy opportunities can be planned")
+        if opportunity.observed_at > observed_now + timedelta(seconds=5):
+            raise TradeValidationError("market quote timestamp is in the future")
+        if observed_now - opportunity.observed_at > timedelta(seconds=15):
+            raise TradeValidationError("market quote is stale")
+        if notional_usdt <= 0:
+            raise TradeValidationError("notional must be positive")
+        if notional_usdt > opportunity.top_book_notional:
+            raise TradeValidationError("notional exceeds current top-book capacity")
+        try:
+            sizing = size_paired_order(
+                pair,
+                requested_notional=notional_usdt,
+                spot_price=opportunity.spot_ask,
+                perp_price=opportunity.perp_bid,
+            )
+            spot_limit = protective_limit_price(
+                reference_price=opportunity.spot_ask,
+                maximum_slippage=maximum_slippage,
+                side="buy",
+                price_increment=pair.spot_price_increment,
+            )
+            perp_limit = protective_limit_price(
+                reference_price=opportunity.perp_bid,
+                maximum_slippage=maximum_slippage,
+                side="sell",
+                price_increment=pair.perp_price_increment,
+            )
+        except OrderSizingError as exc:
+            raise TradeValidationError(str(exc)) from exc
+
+        fees = settings.fees[opportunity.exchange]
+        config_version = hashlib.sha256(
+            json.dumps(
+                {
+                    "scanner": settings.model_dump(mode="json"),
+                    "environment": environment.value,
+                    "leverage": leverage,
+                    "maximum_slippage": format(maximum_slippage, "f"),
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "exchange": opportunity.exchange.value,
+                    "environment": environment.value,
+                    "base_asset": opportunity.base_asset,
+                    "notional_usdt": format(notional_usdt, "f"),
+                    "leverage": leverage,
+                    "spot_symbol": pair.spot_symbol,
+                    "perp_symbol": pair.perp_symbol,
+                    "spot_quantity": format(sizing.spot_quantity, "f"),
+                    "perp_quantity": format(sizing.perp_quantity, "f"),
+                    "perp_contract_size": format(pair.perp_contract_size, "f"),
+                    "spot_limit": format(spot_limit, "f"),
+                    "perp_limit": format(perp_limit, "f"),
+                    "market_observed_at": opportunity.observed_at.isoformat(),
+                    "config_version": config_version,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        intent_id = str(uuid.uuid4())
+        spot_client_id, perp_client_id = _live_client_order_ids(
+            opportunity.exchange,
+            intent_id,
+        )
+        now_value = datetime.now(UTC)
+        row, legs, created = await self.database.create_trade_intent(
+            intent={
+                "id": intent_id,
+                "idempotency_key": str(idempotency_key),
+                "request_fingerprint": fingerprint,
+                "exchange": opportunity.exchange.value,
+                "environment": environment.value,
+                "base_asset": opportunity.base_asset,
+                "action": "open",
+                "status": TradeIntentStatus.PLANNED.value,
+                "leverage": leverage,
+                "requested_notional": notional_usdt,
+                "base_quantity": sizing.base_quantity,
+                "spot_fee_rate": fees.spot_taker,
+                "perp_fee_rate": fees.perp_taker,
+                "market_observed_at": opportunity.observed_at,
+                "config_version": config_version,
+                "version": 1,
+                "created_at": now_value,
+                "updated_at": now_value,
+            },
+            legs=[
+                {
+                    "id": str(uuid.uuid4()),
+                    "trade_intent_id": intent_id,
+                    "leg": "spot",
+                    "market": "spot",
+                    "symbol": pair.spot_symbol,
+                    "side": "buy",
+                    "client_order_id": spot_client_id,
+                    "status": OrderLegStatus.CREATED.value,
+                    "quantity": sizing.spot_quantity,
+                    "base_multiplier": Decimal("1"),
+                    "limit_price": spot_limit,
+                    "filled_quantity": Decimal("0"),
+                    "reduce_only": False,
+                    "created_at": now_value,
+                    "updated_at": now_value,
+                },
+                {
+                    "id": str(uuid.uuid4()),
+                    "trade_intent_id": intent_id,
+                    "leg": "perp",
+                    "market": "perp",
+                    "symbol": pair.perp_symbol,
+                    "side": "sell",
+                    "client_order_id": perp_client_id,
+                    "status": OrderLegStatus.CREATED.value,
+                    "quantity": sizing.perp_quantity,
+                    "base_multiplier": pair.perp_contract_size,
+                    "limit_price": perp_limit,
+                    "filled_quantity": Decimal("0"),
+                    "reduce_only": False,
+                    "created_at": now_value,
+                    "updated_at": now_value,
+                },
+            ],
+        )
+        if row.request_fingerprint != fingerprint:
+            raise IdempotencyConflict(
+                "idempotency key was already used for a different trade request"
+            )
+        return _view(row, legs), created
 
     async def plan_paper_close(
         self,
@@ -661,6 +860,18 @@ class PaperExecutionService:
         )
 
 
+def _live_client_order_ids(
+    exchange: Exchange,
+    intent_id: str,
+) -> tuple[str, str]:
+    token = intent_id.replace("-", "")[:24]
+    if exchange == Exchange.OKX:
+        return f"bh{token}s", f"bh{token}p"
+    if exchange == Exchange.GATE:
+        return f"t-bh-{token[:20]}-s", f"t-bh-{token[:20]}-p"
+    return f"bh-{token}-s", f"bh-{token}-p"
+
+
 def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:
     return TradeIntentView(
         id=row.id,
@@ -671,6 +882,7 @@ def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:
         base_asset=row.base_asset,
         action=row.action,
         status=TradeIntentStatus(row.status),
+        leverage=row.leverage,
         requested_notional=row.requested_notional,
         base_quantity=row.base_quantity,
         spot_fee_rate=row.spot_fee_rate,

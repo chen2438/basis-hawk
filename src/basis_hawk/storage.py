@@ -246,6 +246,7 @@ class TradeIntentRow(Base):
     base_asset: Mapped[str] = mapped_column(String(40))
     action: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(30), index=True)
+    leverage: Mapped[int] = mapped_column(Integer, default=1)
     requested_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     base_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     spot_fee_rate: Mapped[Decimal] = mapped_column(
@@ -261,6 +262,12 @@ class TradeIntentRow(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        CheckConstraint(
+            "leverage >= 1 AND leverage <= 10",
+            name="ck_trade_intent_leverage_range",
+        ),
+    )
 
 
 class OrderLegRow(Base):
