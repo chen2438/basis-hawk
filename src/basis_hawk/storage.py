@@ -303,6 +303,27 @@ class Database:
                 )
             )
 
+    async def list_exchange_credentials(self) -> list[ExchangeCredentialRow]:
+        async with self.sessions() as session:
+            values = await session.scalars(
+                select(ExchangeCredentialRow).order_by(
+                    ExchangeCredentialRow.exchange,
+                    ExchangeCredentialRow.environment,
+                )
+            )
+            return list(values)
+
+    async def delete_exchange_credential(self, exchange: str, environment: str) -> bool:
+        async with self.sessions() as session:
+            result = await session.execute(
+                delete(ExchangeCredentialRow).where(
+                    ExchangeCredentialRow.exchange == exchange,
+                    ExchangeCredentialRow.environment == environment,
+                )
+            )
+            await session.commit()
+            return bool(result.rowcount)
+
     async def replace_instruments(self, exchange: str, pairs: list[InstrumentPair]) -> None:
         async with self.sessions() as session:
             await session.execute(delete(InstrumentRow).where(InstrumentRow.exchange == exchange))

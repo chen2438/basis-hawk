@@ -7,10 +7,15 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, SecretStr
 
 from basis_hawk.auth import AuthenticationError, AuthService, LoginAttemptLimiter
 from basis_hawk.config import get_config
+from basis_hawk.credentials import (
+    CredentialService,
+    ExchangeEnvironment,
+    ExchangeSecrets,
+)
 from basis_hawk.crypto import SecretCipher
 from basis_hawk.models import Exchange, Quality, ScannerSettings
 from basis_hawk.service import ScannerService, default_adapters
@@ -26,24 +31,36 @@ class LoginRequest(BaseModel):
     totp_code: str
 
 
+class CredentialRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=100)
+    api_key: SecretStr
+    api_secret: SecretStr
+    passphrase: SecretStr | None = None
+
+
 def create_app(
     service: ScannerService | None = None,
     *,
     manage_lifecycle: bool = True,
     auth_required: bool | None = None,
     auth_service: AuthService | None = None,
+    credential_service: CredentialService | None = None,
 ) -> FastAPI:
     config = get_config()
     scanner = service or ScannerService(
         Database(config.database_url), default_adapters(config.http_timeout_seconds)
     )
     require_auth = config.auth_required if auth_required is None else auth_required
-    if auth_service is None and config.credential_master_key:
-        auth_service = AuthService(
-            scanner.database,
-            SecretCipher(config.credential_master_key.get_secret_value()),
-            session_hours=config.session_hours,
-        )
+    if config.credential_master_key:
+        cipher = SecretCipher(config.credential_master_key.get_secret_value())
+        if auth_service is None:
+            auth_service = AuthService(
+                scanner.database,
+                cipher,
+                session_hours=config.session_hours,
+            )
+        if credential_service is None:
+            credential_service = CredentialService(scanner.database, cipher)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -216,6 +233,82 @@ def create_app(
     @app.get("/api/exchanges/status")
     async def statuses() -> dict[str, object]:
         return {"items": [item.model_dump(mode="json") for item in scanner.statuses.values()]}
+
+    @app.get("/api/accounts/credentials")
+    async def credential_summaries() -> dict[str, object]:
+        if credential_service is None:
+            raise HTTPException(status_code=503, detail="credential encryption is unavailable")
+        return {
+            "items": [
+                {
+                    "exchange": item.exchange,
+                    "environment": item.environment,
+                    "label": item.label,
+                    "masked_api_key": item.masked_api_key,
+                    "updated_at": item.updated_at.isoformat(),
+                }
+                for item in await credential_service.list()
+            ]
+        }
+
+    @app.put("/api/accounts/{exchange}/{environment}/credentials")
+    async def save_credentials(
+        exchange: Exchange,
+        environment: ExchangeEnvironment,
+        value: CredentialRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        if credential_service is None:
+            raise HTTPException(status_code=503, detail="credential encryption is unavailable")
+        try:
+            summary = await credential_service.save(
+                exchange=exchange,
+                environment=environment,
+                label=value.label,
+                secrets=ExchangeSecrets(
+                    api_key=value.api_key.get_secret_value(),
+                    api_secret=value.api_secret.get_secret_value(),
+                    passphrase=(
+                        value.passphrase.get_secret_value()
+                        if value.passphrase is not None
+                        else None
+                    ),
+                ),
+                actor=getattr(request.state, "admin", None).username
+                if getattr(request.state, "admin", None)
+                else "local",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "exchange": summary.exchange,
+            "environment": summary.environment,
+            "label": summary.label,
+            "masked_api_key": summary.masked_api_key,
+            "updated_at": summary.updated_at.isoformat(),
+        }
+
+    @app.delete(
+        "/api/accounts/{exchange}/{environment}/credentials",
+        status_code=204,
+    )
+    async def delete_credentials(
+        exchange: Exchange,
+        environment: ExchangeEnvironment,
+        request: Request,
+    ) -> Response:
+        if credential_service is None:
+            raise HTTPException(status_code=503, detail="credential encryption is unavailable")
+        deleted = await credential_service.delete(
+            exchange,
+            environment,
+            actor=getattr(request.state, "admin", None).username
+            if getattr(request.state, "admin", None)
+            else "local",
+        )
+        if not deleted:
+            raise HTTPException(status_code=404, detail="credential is not configured")
+        return Response(status_code=204)
 
     @app.get("/api/settings", response_model=ScannerSettings)
     async def settings() -> ScannerSettings:
