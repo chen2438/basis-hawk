@@ -64,6 +64,12 @@ worker 定期写入 `account_snapshots`、`remote_open_order_snapshots`、
 非终态意图可由 worker 按创建时间恢复。纸面 worker 在单一数据库事务中更新双腿、写入 `fills` 并创建
 `paired_positions`；唯一交易 ID 和开仓意图约束保证重复运行不会重复成交。真实成交仍必须以交易所
 私有流或 REST 查询为准。
+真实开仓执行器只读取 `planned` 的 `sandbox`/`live` 意图，并要求全局执行状态已经是 `ready`。发单前
+重新读取余额、权限、持仓模式以及完整远端挂单/仓位，当前安全阶段要求账户没有任何挂单或仓位；随后
+确认目标永续逐仓杠杆。两条主订单腿必须在同一数据库事务中由 `created` 变为 `submitted`，意图进入
+`executing` 后才允许并行调用交易所。两条 ACK 分别核对市场、标的和客户端 ID 后持久化；网络异常、
+响应不匹配或 ACK 落库失败均把对应腿置为 `unknown` 并原子暂停全局执行。进程在事务提交后的任意位置
+崩溃，都只能通过客户端订单 ID 查单恢复，执行器不会再次提交 `executing` 意图。
 平仓意图通过 `paired_position_id` 关联原仓位，计划事务用行锁把仓位置为 `closing`；该状态及
 `closing_intent_id` 阻止同一仓位并发创建两个平仓意图。完整平仓写入累计平仓费用、已实现净盈亏和
 `closed_at`。

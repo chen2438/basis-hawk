@@ -37,7 +37,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from basis_hawk.models import FundingObservation, InstrumentPair, Opportunity, ScannerSettings
 
 if TYPE_CHECKING:
-    from basis_hawk.accounts import RemoteFill, RemoteOrder
+    from basis_hawk.accounts import OrderSubmission, RemoteFill, RemoteOrder
 
 
 class Base(DeclarativeBase):
@@ -948,6 +948,119 @@ class Database:
                 return None
             await session.commit()
             return await session.get(TradeIntentRow, intent_id)
+
+    async def prepare_live_submission(
+        self,
+        *,
+        intent_id: str,
+    ) -> tuple[TradeIntentRow, list[OrderLegRow], bool] | None:
+        async with self.sessions() as session:
+            intent = await session.scalar(
+                select(TradeIntentRow)
+                .where(TradeIntentRow.id == intent_id)
+                .with_for_update()
+            )
+            if intent is None:
+                return None
+            legs = list(
+                await session.scalars(
+                    select(OrderLegRow)
+                    .where(OrderLegRow.trade_intent_id == intent.id)
+                    .order_by(OrderLegRow.leg)
+                    .with_for_update()
+                )
+            )
+            if intent.environment not in {"sandbox", "live"}:
+                raise ValueError("only exchange-backed intents can be submitted")
+            if intent.action != "open":
+                raise ValueError("only live opening intents are currently supported")
+            primary = {item.leg: item for item in legs if item.leg in {"spot", "perp"}}
+            if set(primary) != {"spot", "perp"} or len(legs) != 2:
+                raise ValueError("live intent must contain exactly two primary legs")
+            if intent.status != "planned":
+                return intent, legs, False
+            if any(item.status != "created" for item in primary.values()):
+                raise ValueError("live order legs are not ready for first submission")
+            now = datetime.now(UTC)
+            intent.status = "executing"
+            intent.version += 1
+            intent.updated_at = now
+            for item in primary.values():
+                item.status = "submitted"
+                item.updated_at = now
+            await session.commit()
+            return intent, legs, True
+
+    async def record_order_submission(
+        self,
+        *,
+        order_leg_id: str,
+        submission: OrderSubmission,
+    ) -> None:
+        async with self.sessions() as session:
+            leg = await session.scalar(
+                select(OrderLegRow)
+                .where(OrderLegRow.id == order_leg_id)
+                .with_for_update()
+            )
+            if leg is None:
+                raise ValueError("order leg was not found")
+            if leg.status not in {"submitted", "acknowledged"}:
+                raise ValueError("order leg is not awaiting an acknowledgement")
+            if (
+                submission.market != leg.market
+                or submission.symbol != leg.symbol
+                or submission.client_order_id != leg.client_order_id
+            ):
+                raise ValueError("order acknowledgement does not match the local leg")
+            if (
+                leg.exchange_order_id is not None
+                and submission.exchange_order_id is not None
+                and leg.exchange_order_id != submission.exchange_order_id
+            ):
+                raise ValueError("order acknowledgement changed exchange order ID")
+            if submission.exchange_order_id is not None:
+                leg.exchange_order_id = submission.exchange_order_id
+            leg.status = "acknowledged"
+            leg.updated_at = datetime.now(UTC)
+            await session.commit()
+
+    async def mark_order_submission_unknown(
+        self,
+        *,
+        order_leg_id: str,
+    ) -> None:
+        async with self.sessions() as session:
+            leg = await session.scalar(
+                select(OrderLegRow)
+                .where(OrderLegRow.id == order_leg_id)
+                .with_for_update()
+            )
+            if leg is None:
+                raise ValueError("order leg was not found")
+            if leg.status == "submitted":
+                leg.status = "unknown"
+                leg.updated_at = datetime.now(UTC)
+            control = await session.get(ExecutionControlRow, 1)
+            reason = (
+                "live order acknowledgement is uncertain; "
+                "client-order-ID reconciliation is required"
+            )
+            now = datetime.now(UTC)
+            if control is None:
+                session.add(
+                    ExecutionControlRow(
+                        id=1,
+                        state="paused",
+                        reason=reason,
+                        updated_at=now,
+                    )
+                )
+            else:
+                control.state = "paused"
+                control.reason = reason
+                control.updated_at = now
+            await session.commit()
 
     async def execute_paper_open(
         self,
