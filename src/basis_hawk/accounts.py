@@ -774,6 +774,11 @@ class OkxAccountClient(PrivateAccountClient):
         usdt = next((item for item in details if item.get("ccy") == "USDT"), {})
         configuration = (config.get("data") or [{}])[0]
         available = Decimal(str(usdt.get("availBal") or "0"))
+        permissions = {
+            item.strip().lower()
+            for item in str(configuration.get("perm") or "").split(",")
+            if item.strip()
+        }
         return AccountSnapshot(
             exchange=self.exchange,
             environment=self.environment,
@@ -790,7 +795,9 @@ class OkxAccountClient(PrivateAccountClient):
                 if configuration.get("posMode") == "net_mode"
                 else PositionMode.UNKNOWN
             ),
-            trade_permission=None,
+            trade_permission=(
+                "trade" in permissions if permissions else None
+            ),
         )
 
     async def trading_state(self) -> RemoteTradingState:
@@ -1150,7 +1157,7 @@ class BybitAccountClient(PrivateAccountClient):
             cursor = next_cursor
 
     async def snapshot(self) -> AccountSnapshot:
-        wallet, info, positions = await _gather(
+        wallet, info, positions, api_key = await _gather(
             self._get(
                 "/v5/account/wallet-balance",
                 accountType="UNIFIED",
@@ -1163,15 +1170,30 @@ class BybitAccountClient(PrivateAccountClient):
                 settleCoin="USDT",
                 limit=200,
             ),
+            self._get("/v5/user/query-api"),
         )
         _bybit_success(wallet)
         _bybit_success(info)
+        _bybit_success(api_key)
         account = ((wallet.get("result") or {}).get("list") or [{}])[0]
         coin = next(
             (item for item in account.get("coin", []) if item.get("coin") == "USDT"),
             {},
         )
         details = info.get("result") or {}
+        key_details = api_key.get("result") or {}
+        raw_permissions = key_details.get("permissions")
+        permissions = raw_permissions if isinstance(raw_permissions, dict) else {}
+        contract_permissions = {
+            str(item) for item in permissions.get("ContractTrade") or []
+        }
+        spot_permissions = {
+            str(item) for item in permissions.get("Spot") or []
+        }
+        permission_known = (
+            key_details.get("readOnly") is not None
+            and isinstance(raw_permissions, dict)
+        )
         available = Decimal(str(account.get("totalAvailableBalance") or "0"))
         spot_available = max(
             Decimal("0"),
@@ -1192,7 +1214,13 @@ class BybitAccountClient(PrivateAccountClient):
                 f"{details.get('marginMode', 'unknown')}"
             ),
             position_mode=_bybit_position_mode(positions),
-            trade_permission=None,
+            trade_permission=(
+                str(key_details.get("readOnly")) == "0"
+                and "Order" in contract_permissions
+                and "SpotTrade" in spot_permissions
+                if permission_known
+                else None
+            ),
         )
 
     async def trading_state(self) -> RemoteTradingState:

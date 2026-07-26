@@ -41,6 +41,8 @@ AES-GCM 关联数据加密；响应、审计事件和日志均不得包含 API S
 签名参数或响应原文的脱敏错误。MEXC 和 Gate 没有满足同所现货+USDT 永续完整验收要求的沙盒，
 其 `sandbox` 快照明确返回不支持，不会回退到实盘地址。Bybit V5 不直接返回无持仓标的的全局持仓模式，
 因此当前快照如实返回 `unknown`；模式未知时后续状态机必须禁止下单，不能按默认值猜测。
+OKX 快照从账户配置的 `perm` 确认 `trade`；Bybit 从当前 API Key 信息同时确认非只读、SpotTrade
+和 ContractTrade Order 权限。缺少权限返回 `false`，接口未提供字段则保持 `unknown`。
 当前 worker 只完成余额、权益及账户模式快照；在挂单、成交和仓位的 REST/私有流对账完成前，
 全局执行状态固定为 `blocked`，该状态不能由 API 绕过。
 

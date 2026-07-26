@@ -109,7 +109,16 @@ async def test_okx_account_snapshot_and_signature() -> None:
         if request.url.path == "/api/v5/account/config":
             return httpx.Response(
                 200,
-                json={"code": "0", "data": [{"acctLv": "2", "posMode": "net_mode"}]},
+                json={
+                    "code": "0",
+                    "data": [
+                        {
+                            "acctLv": "2",
+                            "posMode": "net_mode",
+                            "perm": "read_only,trade",
+                        }
+                    ],
+                },
             )
         return httpx.Response(
             200,
@@ -139,6 +148,7 @@ async def test_okx_account_snapshot_and_signature() -> None:
     assert snapshot.shared_balance is True
     assert snapshot.spot_usdt_available == 25
     assert snapshot.position_mode == PositionMode.ONE_WAY
+    assert snapshot.trade_permission is True
     await http.aclose()
 
 
@@ -168,6 +178,20 @@ async def test_bybit_account_snapshot_and_signature() -> None:
                     "result": {
                         "unifiedMarginStatus": 5,
                         "marginMode": "ISOLATED_MARGIN",
+                    },
+                },
+            )
+        if request.url.path == "/v5/user/query-api":
+            return httpx.Response(
+                200,
+                json={
+                    "retCode": 0,
+                    "result": {
+                        "readOnly": 0,
+                        "permissions": {
+                            "ContractTrade": ["Order", "Position"],
+                            "Spot": ["SpotTrade"],
+                        },
                     },
                 },
             )
@@ -209,6 +233,7 @@ async def test_bybit_account_snapshot_and_signature() -> None:
     assert snapshot.perp_usdt_equity == 31
     assert snapshot.account_mode == "unified:5:ISOLATED_MARGIN"
     assert snapshot.position_mode == PositionMode.ONE_WAY
+    assert snapshot.trade_permission is True
     await http.aclose()
 
 

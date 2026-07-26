@@ -37,6 +37,9 @@ docker compose run --rm api basis-hawk admin-create --username admin
 同一交易所、同一环境只保存一个账户配置；替换和删除都会写入不含秘密值的审计事件。API 读取只能返回
 Key 掩码，私有适配器在进程内按需解密，不能把解密结果缓存到数据库或发送给前端。
 私有请求的签名查询串必须和实际发送顺序完全一致；异常消息禁止包含完整 URL，因为查询参数可能带签名。
+OKX 账户快照读取当前 Key 的 `perm`，只有包含 `trade` 才确认可交易；Bybit 额外调用当前 Key 信息，
+要求 `readOnly=0`、现货含 `SpotTrade` 且合约含 `Order`。明确只读或缺任一权限写为 `false`，响应
+缺字段则写为 `unknown`，不能把成功读取余额等同于具有双腿写权限。
 worker 定期写入 `account_snapshots`、`remote_open_order_snapshots`、
 `remote_position_snapshots` 和各账户最新 `account_reconciliation` 状态；全局
 `execution_control` 在对账开始时进入 `reconciling`。余额、权益、模式、挂单与仓位已接入持久化，
