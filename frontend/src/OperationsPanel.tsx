@@ -8,6 +8,9 @@ import type {
   Exchange,
   ExecutionStatus,
   InternalTransfer,
+  LiveClosePreview,
+  LiveOpenPreview,
+  Opportunity,
   PairedPosition,
 } from "./types";
 
@@ -20,14 +23,20 @@ const exchangeNames: Record<Exchange, string> = {
   gate: "Gate",
 };
 const exchanges = Object.keys(exchangeNames) as Exchange[];
-type Tab = "system" | "accounts" | "positions" | "transfers" | "automation";
+type Tab = "system" | "accounts" | "trades" | "positions" | "transfers" | "automation";
 
 const time = (value: string | null) =>
   value ? new Date(value).toLocaleString("zh-CN") : "—";
 const amount = (value: string | null) =>
   value == null ? "—" : Number(value).toLocaleString("zh-CN", { maximumFractionDigits: 8 });
 
-export function OperationsPanel({ onClose }: { onClose: () => void }) {
+export function OperationsPanel({
+  onClose,
+  opportunities,
+}: {
+  onClose: () => void;
+  opportunities: Opportunity[];
+}) {
   const [tab, setTab] = useState<Tab>("system");
   const [execution, setExecution] = useState<ExecutionStatus | null>(null);
   const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
@@ -85,6 +94,7 @@ export function OperationsPanel({ onClose }: { onClose: () => void }) {
         {([
           ["system", "执行状态"],
           ["accounts", "交易所账户"],
+          ["trades", "手动交易"],
           ["positions", "配对持仓"],
           ["transfers", "内部划转"],
           ["automation", "自动策略"],
@@ -99,6 +109,13 @@ export function OperationsPanel({ onClose }: { onClose: () => void }) {
           credentials={credentials}
           snapshots={snapshots}
           setSnapshots={setSnapshots}
+          busy={busy}
+          action={action}
+        />}
+        {tab === "trades" && <TradesView
+          opportunities={opportunities}
+          positions={positions}
+          execution={execution}
           busy={busy}
           action={action}
         />}
@@ -237,6 +254,163 @@ function AccountsView({
       <button className="button primary" disabled={busy}>加密保存凭据</button>
     </form>
   </>;
+}
+
+function TradesView({
+  opportunities,
+  positions,
+  execution,
+  busy,
+  action,
+}: {
+  opportunities: Opportunity[];
+  positions: PairedPosition[];
+  execution: ExecutionStatus | null;
+  busy: boolean;
+  action: (operation: () => Promise<unknown>) => Promise<void>;
+}) {
+  const healthy = opportunities.filter((item) => item.quality === "healthy");
+  const initial = healthy[0];
+  const [openForm, setOpenForm] = useState({
+    exchange: initial?.exchange ?? "binance" as Exchange,
+    environment: "live" as Environment,
+    baseAsset: initial?.base_asset ?? "",
+    notional: "100",
+    leverage: 1,
+    slippage: "0.001",
+  });
+  const [openTicket, setOpenTicket] = useState<{ id: string; preview: LiveOpenPreview } | null>(null);
+  const [closeTicket, setCloseTicket] = useState<{ id: string; preview: LiveClosePreview } | null>(null);
+  const [result, setResult] = useState<string | null>(null);
+  const exchangeOpportunities = healthy.filter((item) => item.exchange === openForm.exchange);
+  const openPositions = positions.filter((item) => item.status === "open" && item.environment !== "paper");
+
+  const previewOpen = (event: FormEvent) => {
+    event.preventDefault();
+    setResult(null);
+    void action(async () => {
+      const value = await api.previewOpen({
+        exchange: openForm.exchange,
+        environment: openForm.environment,
+        base_asset: openForm.baseAsset,
+        notional_usdt: openForm.notional,
+        leverage: openForm.leverage,
+        maximum_slippage: openForm.slippage,
+      });
+      setOpenTicket({ id: value.preview_id, preview: value.preview });
+      setCloseTicket(null);
+    });
+  };
+  const confirmOpen = () => {
+    if (!openTicket || !window.confirm(
+      `确认提交 ${exchangeNames[openTicket.preview.exchange]} ${openTicket.preview.base_asset} 配对开仓？`,
+    )) return;
+    void action(async () => {
+      const value = await api.confirmOpen(openTicket.id, crypto.randomUUID());
+      setResult(`开仓意图 ${value.intent.id} 已持久化，状态 ${value.intent.status}`);
+      setOpenTicket(null);
+    });
+  };
+  const previewClose = (
+    position: PairedPosition,
+    emergency: boolean,
+  ) => {
+    setResult(null);
+    void action(async () => {
+      const value = await api.previewClose(
+        position.id,
+        emergency,
+        emergency ? "0.05" : "0.001",
+      );
+      setCloseTicket({ id: value.preview_id, preview: value.preview });
+      setOpenTicket(null);
+    });
+  };
+  const confirmClose = () => {
+    if (!closeTicket || !window.confirm(
+      `确认提交 ${closeTicket.preview.base_asset} ${closeTicket.preview.emergency ? "紧急" : "普通"}配对平仓？`,
+    )) return;
+    void action(async () => {
+      const value = await api.confirmClose(
+        closeTicket.preview.position_id,
+        closeTicket.id,
+        crypto.randomUUID(),
+      );
+      setResult(`平仓意图 ${value.intent.id} 已持久化，状态 ${value.intent.status}`);
+      setCloseTicket(null);
+    });
+  };
+
+  return <>
+    {execution?.state !== "ready" && <div className="safety-callout warning"><strong>当前不可普通开仓</strong><p>全局执行状态为 {execution?.state ?? "unknown"}。紧急平仓仍由后端按独立安全规则判断。</p></div>}
+    {result && <div className="success-banner">{result}</div>}
+    <form className="ops-form trade-form" onSubmit={previewOpen}>
+      <div><h3>手动配对开仓</h3><p>先生成 15 秒预览票据；确认只持久化意图，由唯一 worker 提交双腿 IOC。</p></div>
+      <label>交易所<select value={openForm.exchange} onChange={(event) => {
+        const next = event.target.value as Exchange;
+        setOpenForm({ ...openForm, exchange: next, baseAsset: healthy.find((item) => item.exchange === next)?.base_asset ?? "" });
+        setOpenTicket(null);
+      }}>{exchanges.map((item) => <option key={item} value={item}>{exchangeNames[item]}</option>)}</select></label>
+      <label>环境<select value={openForm.environment} onChange={(event) => setOpenForm({ ...openForm, environment: event.target.value as Environment })}><option value="live">LIVE 实盘</option><option value="sandbox">SANDBOX</option></select></label>
+      <label>标的<select required value={openForm.baseAsset} onChange={(event) => setOpenForm({ ...openForm, baseAsset: event.target.value })}><option value="">请选择</option>{exchangeOpportunities.map((item) => <option key={item.base_asset} value={item.base_asset}>{item.base_asset}</option>)}</select></label>
+      <label>名义金额<input required min="0" step="any" value={openForm.notional} onChange={(event) => setOpenForm({ ...openForm, notional: event.target.value })} /></label>
+      <label>杠杆<input required type="number" min="1" max="10" value={openForm.leverage} onChange={(event) => setOpenForm({ ...openForm, leverage: Number(event.target.value) })} /></label>
+      <label>最大滑点<input required min="0" max="0.1" step="0.0001" value={openForm.slippage} onChange={(event) => setOpenForm({ ...openForm, slippage: event.target.value })} /></label>
+      <button className="button primary" disabled={busy || execution?.state !== "ready" || !openForm.baseAsset}>生成开仓预览</button>
+    </form>
+    {openTicket && <TradePreview title="开仓预览" expiresAt={openTicket.preview.expires_at} rows={[
+      ["现货腿", `${openTicket.preview.spot_quantity} ${openTicket.preview.spot_symbol} @ ${openTicket.preview.spot_limit_price}`],
+      ["永续腿", `${openTicket.preview.perp_quantity} ${openTicket.preview.perp_symbol} @ ${openTicket.preview.perp_limit_price}`],
+      ["共同数量", openTicket.preview.base_quantity],
+      ["现货余额需求", `${openTicket.preview.spot_usdt_required} USDT`],
+      ["永续保证金需求", `${openTicket.preview.perp_usdt_margin_required} USDT`],
+      ["预计总费用", `${openTicket.preview.estimated_total_fees_usdt} USDT`],
+      ["最坏基差", `${(Number(openTicket.preview.worst_case_basis) * 100).toFixed(4)}%`],
+    ]} danger={openTicket.preview.environment === "live"} onConfirm={confirmOpen} busy={busy} />}
+    <section className="close-position-list">
+      <header><div><h3>真实配对持仓平仓</h3><p>普通平仓要求 ready；紧急平仓独立标记并保持全局暂停。</p></div></header>
+      {openPositions.map((position) => <article key={position.id}>
+        <div><strong>{position.base_asset}</strong><span>{exchangeNames[position.exchange]} · {position.environment} · {position.quantity}</span></div>
+        <div className="inline-actions">
+          <button className="button secondary" disabled={busy || execution?.state !== "ready"} onClick={() => previewClose(position, false)}>普通平仓预览</button>
+          <button className="button danger ghost" disabled={busy} onClick={() => previewClose(position, true)}>紧急平仓预览</button>
+        </div>
+      </article>)}
+      {!openPositions.length && <div className="empty">当前没有可平的真实配对仓位</div>}
+    </section>
+    {closeTicket && <TradePreview title={closeTicket.preview.emergency ? "紧急平仓预览" : "平仓预览"} expiresAt={closeTicket.preview.expires_at} rows={[
+      ["现货腿", `${closeTicket.preview.spot_quantity} ${closeTicket.preview.spot_symbol} @ ${closeTicket.preview.spot_limit_price}`],
+      ["永续腿", `${closeTicket.preview.perp_quantity} ${closeTicket.preview.perp_symbol} @ ${closeTicket.preview.perp_limit_price} · reduce-only`],
+      ["共同数量", closeTicket.preview.base_quantity],
+      ["预计毛盈亏", `${closeTicket.preview.estimated_gross_pnl_usdt} USDT`],
+      ["预计净盈亏", `${closeTicket.preview.estimated_net_pnl_usdt} USDT`],
+      ["预计总费用", `${closeTicket.preview.estimated_total_fees_usdt} USDT`],
+      ["最坏基差", `${(Number(closeTicket.preview.worst_case_basis) * 100).toFixed(4)}%`],
+    ]} danger={closeTicket.preview.environment === "live"} onConfirm={confirmClose} busy={busy} />}
+  </>;
+}
+
+function TradePreview({
+  title,
+  expiresAt,
+  rows,
+  danger,
+  onConfirm,
+  busy,
+}: {
+  title: string;
+  expiresAt: string;
+  rows: [string, string][];
+  danger: boolean;
+  onConfirm: () => void;
+  busy: boolean;
+}) {
+  return <section className={`trade-preview ${danger ? "live" : ""}`}>
+    <header><div><h3>{title}</h3><p>票据到期：{time(expiresAt)}</p></div>{danger && <span className="live-badge danger">LIVE 实盘</span>}</header>
+    <dl>{rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
+    <div className="preview-warning">确认后不会在浏览器直接发单；唯一 worker 会再次预检账户、余额、仓位模式和远端状态。</div>
+    <button className="button danger" disabled={busy} onClick={onConfirm}>普通确认并持久化意图</button>
+  </section>;
 }
 
 function PositionsView({ positions }: { positions: PairedPosition[] }) {

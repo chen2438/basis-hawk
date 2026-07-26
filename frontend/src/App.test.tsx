@@ -51,4 +51,15 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByText("worker pending")).toBeTruthy();
     expect(screen.getByRole("button", { name: "交易所账户" })).toBeTruthy();
   });
+
+  it("shows bounded manual paired-trade controls", async () => {
+    render(<App />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "运营控制台" }));
+    await user.click(await screen.findByRole("button", { name: "手动交易" }));
+    expect(screen.getByText("手动配对开仓")).toBeTruthy();
+    expect(screen.getByText("真实配对持仓平仓")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "生成开仓预览" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/先生成 15 秒预览票据/)).toBeTruthy();
+  });
 });

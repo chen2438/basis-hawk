@@ -7,6 +7,8 @@ import type {
   ExchangeStatus,
   ExecutionStatus,
   InternalTransfer,
+  LiveClosePreview,
+  LiveOpenPreview,
   Opportunity,
   PairedPosition,
   Settings,
@@ -107,4 +109,32 @@ export const api = {
   }),
   resumeAutomation: () => request<AutomationStatus>("/api/automation/resume", { method: "POST", body: "{}" }),
   disableAutomation: () => request<AutomationStatus>("/api/automation/disable", { method: "POST", body: "{}" }),
+  previewOpen: (value: {
+    exchange: Exchange;
+    environment: Environment;
+    base_asset: string;
+    notional_usdt: string;
+    leverage: number;
+    maximum_slippage: string;
+  }) => request<{ preview_id: string; preview: LiveOpenPreview }>("/api/trades/open/preview", {
+    method: "POST",
+    body: JSON.stringify(value),
+  }),
+  confirmOpen: (previewId: string, idempotencyKey: string) =>
+    request<{ created: boolean; intent: { id: string; status: string } }>("/api/trades/open/confirm", {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ preview_id: previewId, confirmed: true }),
+    }),
+  previewClose: (positionId: string, emergency: boolean, maximumSlippage: string) =>
+    request<{ preview_id: string; preview: LiveClosePreview }>(`/api/trades/positions/${positionId}/close/preview`, {
+      method: "POST",
+      body: JSON.stringify({ emergency, maximum_slippage: maximumSlippage }),
+    }),
+  confirmClose: (positionId: string, previewId: string, idempotencyKey: string) =>
+    request<{ created: boolean; intent: { id: string; status: string } }>(`/api/trades/positions/${positionId}/close/confirm`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ preview_id: previewId, confirmed: true }),
+    }),
 };

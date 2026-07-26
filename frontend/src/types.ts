@@ -146,3 +146,55 @@ export interface AutomationStatus {
   active_strategy: StrategySummary | null;
   latest_strategy: StrategySummary | null;
 }
+
+export interface LiveOpenPreview {
+  exchange: Exchange;
+  environment: Environment;
+  base_asset: string;
+  requested_notional: string;
+  leverage: number;
+  market_observed_at: string;
+  expires_at: string;
+  maximum_slippage: string;
+  base_quantity: string;
+  spot_symbol: string;
+  spot_reference_price: string;
+  spot_limit_price: string;
+  spot_quantity: string;
+  spot_usdt_required: string;
+  perp_symbol: string;
+  perp_reference_price: string;
+  perp_limit_price: string;
+  perp_quantity: string;
+  perp_base_multiplier: string;
+  perp_usdt_margin_required: string;
+  estimated_total_fees_usdt: string;
+  worst_case_basis: string;
+}
+
+export interface LiveClosePreview {
+  position_id: string;
+  exchange: Exchange;
+  environment: Environment;
+  base_asset: string;
+  emergency: boolean;
+  leverage: number;
+  market_observed_at: string;
+  expires_at: string;
+  maximum_slippage: string;
+  base_quantity: string;
+  spot_symbol: string;
+  spot_reference_price: string;
+  spot_limit_price: string;
+  spot_quantity: string;
+  spot_usdt_proceeds_before_fee: string;
+  perp_symbol: string;
+  perp_reference_price: string;
+  perp_limit_price: string;
+  perp_quantity: string;
+  perp_base_multiplier: string;
+  estimated_total_fees_usdt: string;
+  estimated_gross_pnl_usdt: string;
+  estimated_net_pnl_usdt: string;
+  worst_case_basis: string;
+}

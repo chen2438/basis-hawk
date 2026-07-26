@@ -373,6 +373,8 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
   align-items: center;
 }
 .safety-callout p { flex: 1; margin: 0; color: var(--muted); font-size: 11px; }
+.safety-callout.warning { border-left-color: #d88c20; background: #fffaf0; }
+.success-banner { margin-bottom: 14px; padding: 11px 14px; color: #087766; background: #e6f7f2; border: 1px solid #a8d9cc; border-radius: 7px; }
 .inline-actions { display: flex; gap: 8px; align-items: center; }
 .inline-actions .button { padding: 7px 10px; font-size: 10px; }
 .ops-grid { display: grid; grid-template-columns: repeat(3, minmax(260px, 1fr)); gap: 12px; }
@@ -404,6 +406,27 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
 .form-grid.compact select { display: block; width: 100%; margin-top: 7px; }
 .transfer-form { display: grid; grid-template-columns: 2fr repeat(3, 1fr) 1fr auto; gap: 10px; align-items: center; }
 .transfer-form h3, .transfer-form p { margin: 0 0 5px; }
+.trade-form { display: grid; grid-template-columns: 2fr repeat(6, 1fr) auto; gap: 10px; align-items: end; }
+.trade-form h3, .trade-form p { margin: 0 0 5px; }
+.trade-form label { color: var(--muted); font-size: 9px; }
+.trade-form label input, .trade-form label select { display: block; width: 100%; margin-top: 6px; }
+.trade-preview { margin: 16px 0; padding: 17px; background: #fff; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 9px; }
+.trade-preview.live { border-left-color: var(--red); }
+.trade-preview > header { display: flex; align-items: center; justify-content: space-between; }
+.trade-preview h3, .trade-preview p { margin: 0 0 5px; }
+.trade-preview p { color: var(--muted); font-size: 9px; }
+.trade-preview dl { display: grid; grid-template-columns: repeat(4, 1fr); margin: 13px 0; border: 1px solid var(--line); border-radius: 7px; }
+.trade-preview dl div { padding: 10px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.trade-preview dt { color: var(--muted); font-size: 9px; }
+.trade-preview dd { margin: 5px 0 0; color: #263d50; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; overflow-wrap: anywhere; }
+.preview-warning { margin-bottom: 12px; color: var(--muted); font-size: 10px; }
+.close-position-list { margin: 18px 0; overflow: hidden; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
+.close-position-list > header { padding: 14px 16px; background: #f8fbfa; border-bottom: 1px solid var(--line); }
+.close-position-list h3, .close-position-list p { margin: 0 0 5px; }
+.close-position-list p, .close-position-list article span { color: var(--muted); font-size: 9px; }
+.close-position-list article { display: flex; padding: 11px 16px; border-top: 1px solid var(--line); align-items: center; justify-content: space-between; }
+.close-position-list article:first-of-type { border-top: 0; }
+.close-position-list article strong, .close-position-list article span { display: block; }
 .ops-table-wrap { max-height: 520px; overflow: auto; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
 .ops-table-wrap th { top: 0; }
 .strategy-json { overflow: hidden; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
@@ -417,4 +440,6 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
   .ops-grid { grid-template-columns: 1fr 1fr; }
   .transfer-form { grid-template-columns: 1fr 1fr 1fr; }
   .transfer-form > div { grid-column: 1 / -1; }
+  .trade-form { grid-template-columns: repeat(3, 1fr); }
+  .trade-form > div { grid-column: 1 / -1; }
 }

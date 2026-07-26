@@ -168,6 +168,6 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
     </main>
     <footer className="page-footer"><span>Basis Hawk · Paired execution & audit-first</span><span>收益估算不构成投资建议</span></footer>
     {showSettings && settings && <SettingsPanel value={settings} onClose={() => setShowSettings(false)} onSave={async (value) => setSettings(await api.saveSettings(value))} />}
-    {showOperations && <OperationsPanel onClose={() => setShowOperations(false)} />}
+    {showOperations && <OperationsPanel opportunities={items} onClose={() => setShowOperations(false)} />}
   </div>;
 }
