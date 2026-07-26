@@ -155,6 +155,7 @@ MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
 ```text
 BASIS_HAWK_TELEGRAM_BOT_TOKEN
 BASIS_HAWK_TELEGRAM_CHAT_ID
+BASIS_HAWK_TELEGRAM_WEBHOOK_SECRET
 BASIS_HAWK_SMTP_HOST
 BASIS_HAWK_SMTP_PORT
 BASIS_HAWK_SMTP_SECURITY=starttls|smtps
@@ -170,6 +171,12 @@ BASIS_HAWK_NOTIFICATION_BATCH_SIZE
 错误时 generation 递增，因此会产生新的唯一去重键。worker 每次启动先以“不发送”模式建立当前状态
 基线，避免部署通知功能或重启时回放全部历史事件。通知正文只使用交易所、环境、标的和归一化状态，
 不复制管理员自由文本、交易所响应或账户错误详情。
+Telegram 入站固定为 `POST /api/integrations/telegram/webhook`，这是唯一不使用管理员 Cookie/CSRF 的
+集成入口。必须同时满足 `X-Telegram-Bot-Api-Secret-Token` 与环境中的 webhook secret 恒定时间比较，
+以及消息 `chat.id` 与唯一管理员 chat ID 完全一致；请求体最大 32 KiB。官方 setWebhook 应只订阅
+`message` 更新并配置上述 secret。重复 update ID 通过 outbox 去重，不会重复回复。机器人只识别
+`/status`、`/positions`、`/alerts`、`/health`，所有回复为只读数据库摘要；任何 `/pause`、`/resume`、
+`/trade` 或配置命令都不会执行，并只返回只读命令清单。
 真实意图额外固化 1–10 倍请求杠杆，旧记录迁移为安全默认值 1；
 `order_legs` 同一意图固定一条现货腿和一条永续腿，并在提交交易所前生成唯一客户端订单 ID；每条腿还
 保存严格为正的 `base_multiplier`，使交易所原生数量及成交量可以无歧义换算成基础币。已有纸面订单腿

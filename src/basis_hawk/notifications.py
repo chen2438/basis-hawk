@@ -382,6 +382,97 @@ class NotificationProjectionService:
             await asyncio.sleep(1)
 
 
+class TelegramCommandService:
+    def __init__(self, database: Database, *, allowed_chat_id: str) -> None:
+        if not allowed_chat_id or any(
+            character in "\r\n" for character in allowed_chat_id
+        ):
+            raise ValueError("Telegram command chat ID is invalid")
+        self.database = database
+        self.allowed_chat_id = allowed_chat_id
+
+    async def handle_update(self, payload: dict[str, object]) -> bool:
+        update_id = payload.get("update_id")
+        message = payload.get("message")
+        if not isinstance(update_id, int) or not isinstance(message, dict):
+            return False
+        chat = message.get("chat")
+        text = message.get("text")
+        if not isinstance(chat, dict) or not isinstance(text, str):
+            return False
+        chat_id = chat.get("id")
+        if not isinstance(chat_id, (int, str)):
+            return False
+        if str(chat_id) != self.allowed_chat_id:
+            return False
+        command = (
+            text.strip().split(maxsplit=1)[0].split("@", maxsplit=1)[0].lower()[:64]
+        )
+        body = await self._response(command)
+        await self.database.enqueue_notification(
+            dedupe_key=f"telegram:update:{update_id}",
+            event_type="telegram.command_response",
+            severity="info",
+            channels={"telegram"},
+            subject=f"Basis Hawk {command or 'command'}",
+            body=body,
+        )
+        return True
+
+    async def _response(self, command: str) -> str:
+        if command == "/status":
+            execution = await self.database.execution_control()
+            automation = await self.database.automation_control()
+            return (
+                f"Execution: {execution.state if execution else 'blocked'}\n"
+                f"Automation: {automation.state}"
+            )
+        if command == "/positions":
+            positions = [
+                item
+                for item in await self.database.list_paired_positions()
+                if item.status in {"open", "closing"}
+            ]
+            if not positions:
+                return "No active paired positions."
+            lines = [f"Active paired positions: {len(positions)}"]
+            for item in positions[:20]:
+                lines.append(
+                    f"{item.exchange} {item.environment} {item.base_asset} "
+                    f"{item.status} qty={format(item.quantity, 'f')}"
+                )
+            if len(positions) > 20:
+                lines.append(f"…and {len(positions) - 20} more.")
+            return "\n".join(lines)
+        if command == "/alerts":
+            alerts = [
+                item
+                for item in await self.database.notification_outbox(limit=100)
+                if item.severity == "critical"
+            ][:20]
+            if not alerts:
+                return "No critical notification records."
+            lines = [f"Latest critical notifications: {len(alerts)}"]
+            lines.extend(
+                f"{item.created_at.isoformat()} {item.status} {item.subject}"
+                for item in alerts
+            )
+            return "\n".join(lines)
+        if command == "/health":
+            accounts = await self.database.reconciliation_states()
+            execution = await self.database.execution_control()
+            lines = [
+                f"Execution: {execution.state if execution else 'blocked'}",
+                f"Accounts: {len(accounts)}",
+            ]
+            lines.extend(
+                f"{item.exchange} {item.environment}: {item.status}"
+                for item in accounts
+            )
+            return "\n".join(lines)
+        return "Read-only commands: /status /positions /alerts /health"
+
+
 def _fingerprint(*values: str) -> str:
     payload = json.dumps(values, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(payload.encode()).hexdigest()

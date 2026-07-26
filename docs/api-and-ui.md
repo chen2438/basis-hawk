@@ -51,6 +51,10 @@
   所有账户的远端活动订单，已对冲仓位保持不动。
 - `POST /api/system/execution/resume`：要求 `confirmed=true`，只把状态改为 `reconciling`；不能由
   HTTP 请求直接宣称 `ready`，必须等待 worker 完成全量安全对账。
+- `POST /api/integrations/telegram/webhook`：唯一免管理员 Cookie/CSRF 的集成入口；必须携带与环境
+  配置恒定时间匹配的 `X-Telegram-Bot-Api-Secret-Token`，消息 chat ID 也必须匹配管理员白名单。
+  只接受最多 32 KiB 的 Telegram Update，并仅提供 `/status`、`/positions`、`/alerts`、`/health`
+  四个只读命令；update ID 通过 outbox 去重，任何交易或配置命令均不存在。
 
 写入接口只接受已认证且 CSRF 校验通过的请求。明文只在单次请求内进入内存，随后使用绑定交易所与环境的
 AES-GCM 关联数据加密；响应、审计事件和日志均不得包含 API Secret、passphrase 或完整 API Key。

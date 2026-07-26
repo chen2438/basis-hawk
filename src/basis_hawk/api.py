@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -38,6 +39,7 @@ from basis_hawk.credentials import (
 )
 from basis_hawk.crypto import SecretCipher
 from basis_hawk.models import Exchange, Quality, ScannerSettings
+from basis_hawk.notifications import TelegramCommandService
 from basis_hawk.service import ScannerService, default_adapters
 from basis_hawk.storage import Database
 from basis_hawk.trading import IdempotencyConflict, TradeLedger, TradeValidationError
@@ -207,6 +209,7 @@ def create_app(
             "/api/auth/login",
             "/api/health/live",
             "/api/health/ready",
+            "/api/integrations/telegram/webhook",
         }:
             return await call_next(request)
         if auth_service is None:
@@ -311,6 +314,67 @@ def create_app(
         if not initialized:
             raise HTTPException(status_code=503, detail="market catalog is still initializing")
         return {"status": "ok", "exchanges": len(scanner.statuses)}
+
+    @app.post("/api/integrations/telegram/webhook")
+    async def telegram_webhook(
+        request: Request,
+        x_telegram_bot_api_secret_token: Annotated[
+            str | None,
+            Header(),
+        ] = None,
+    ) -> dict[str, bool]:
+        configured_secret = (
+            config.telegram_webhook_secret.get_secret_value()
+            if config.telegram_webhook_secret is not None
+            else ""
+        )
+        if (
+            not configured_secret
+            or not config.telegram_chat_id
+            or not x_telegram_bot_api_secret_token
+            or not hmac.compare_digest(
+                configured_secret,
+                x_telegram_bot_api_secret_token,
+            )
+        ):
+            raise HTTPException(status_code=403, detail="invalid Telegram webhook")
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > 32768:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Telegram update is too large",
+                    )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="invalid content length",
+                ) from exc
+        body = await request.body()
+        if len(body) > 32768:
+            raise HTTPException(
+                status_code=413,
+                detail="Telegram update is too large",
+            )
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="invalid Telegram update",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="invalid Telegram update",
+            )
+        commands = TelegramCommandService(
+            scanner.database,
+            allowed_chat_id=config.telegram_chat_id,
+        )
+        await commands.handle_update(payload)
+        return {"ok": True}
 
     @app.get("/api/opportunities")
     async def opportunities(

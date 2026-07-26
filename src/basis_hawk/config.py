@@ -21,6 +21,7 @@ class AppConfig(BaseSettings):
     credential_master_key: SecretStr | None = None
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None
+    telegram_webhook_secret: SecretStr | None = None
     smtp_host: str | None = None
     smtp_port: int = Field(default=587, ge=1, le=65535)
     smtp_security: Literal["starttls", "smtps"] = "starttls"
