@@ -831,7 +831,7 @@ def _compensation_pnl(
 
 class Database:
     def __init__(self, url: str) -> None:
-        self.engine: AsyncEngine = create_async_engine(url)
+        self.engine: AsyncEngine = create_async_engine(url, pool_pre_ping=True)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def initialize(self) -> None:

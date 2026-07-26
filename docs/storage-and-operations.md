@@ -305,3 +305,16 @@ VPS 出口 IP。
 CI 对提交信息、后端 Ruff/Pytest 和前端 Vitest/TypeScript/Vite 分别验收。容器层另执行
 `docker compose --env-file .env.example config --quiet`；PostgreSQL 可用时还必须实际运行 Alembic
 upgrade/current。
+
+仓库提供完全隔离且不读取本地 `.env` 的容器验收命令：
+
+```bash
+.venv/bin/python scripts/container_acceptance.py
+```
+
+该命令只生成一次性数据库密码、凭据主密钥和备份密钥，使用随机后缀创建临时网络、PostgreSQL 17
+容器和备份卷；构建正式 API/前端镜像与专用备份镜像后，实际执行全部 Alembic 迁移、API ready 检查、
+API 进程重启、PostgreSQL 重启及连接池恢复、advisory lock 排他 worker、单轮 worker、AES-GCM 归档
+验证、空库恢复和非空库拒绝覆盖。应用及备份运行均使用只读根文件系统和 `/tmp` tmpfs。无论成功或
+失败都只按本次随机名称清理资源，不会连接 Compose 项目、读取真实凭据或接触交易所。CI 的
+`container-acceptance` job 会执行同一命令。
