@@ -23,6 +23,7 @@ from basis_hawk.credentials import (
 )
 from basis_hawk.crypto import SecretCipher
 from basis_hawk.models import Exchange
+from basis_hawk.private_stream import PrivateStreamRegistry
 from basis_hawk.reconciliation import (
     ReconciliationService,
     _open_order_reasons,
@@ -128,6 +129,18 @@ class FakeAccountClient:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class EmptyFakeAccountClient(FakeAccountClient):
+    async def trading_state(self) -> RemoteTradingState:
+        return RemoteTradingState(
+            exchange=Exchange.BINANCE,
+            environment=ExchangeEnvironment.LIVE,
+            observed_at=datetime(2026, 7, 26, 18, 0, tzinfo=UTC),
+            open_orders=[],
+            positions=[],
+            complete=True,
+        )
 
 
 def test_remote_open_orders_and_positions_are_matched_exactly() -> None:
@@ -238,6 +251,40 @@ async def test_startup_reconciliation_persists_snapshot_but_keeps_execution_bloc
     async with database.sessions() as session:
         assert (await session.scalar(select(func.count(RemoteOpenOrderSnapshotRow.id)))) == 1
         assert (await session.scalar(select(func.count(RemotePositionSnapshotRow.id)))) == 1
+    await database.close()
+
+
+async def test_reconciliation_enters_ready_only_with_fresh_private_stream() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials = await _credentials(database)
+    await PrivateStreamRegistry(database).connected(
+        exchange=Exchange.BINANCE,
+        environment=ExchangeEnvironment.LIVE,
+        orders_subscribed=True,
+        fills_subscribed=True,
+        positions_subscribed=True,
+    )
+    client = EmptyFakeAccountClient()
+    reconciler = ReconciliationService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    )
+
+    result = await reconciler.run_once()
+
+    assert result.accounts_checked == 1
+    assert result.accounts_blocked == 0
+    assert result.accounts_failed == 0
+    assert result.execution_state == "ready"
+    control = await database.execution_control()
+    assert control is not None
+    assert control.state == "ready"
+    states = await database.reconciliation_states()
+    assert states[0].status == "ready"
+    assert states[0].reason == "account reconciliation passed"
+    assert states[0].private_stream_ready is True
     await database.close()
 
 

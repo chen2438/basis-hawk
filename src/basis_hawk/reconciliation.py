@@ -225,11 +225,16 @@ class ReconciliationService:
                     reasons.append("position mode is unknown")
                 if snapshot.trade_permission is not True:
                     reasons.append("two-leg trade permission is not confirmed")
+                account_ready = not reasons
                 await self.database.record_account_reconciliation(
                     exchange=summary.exchange.value,
                     environment=summary.environment.value,
-                    status="blocked",
-                    reason="; ".join(reasons),
+                    status="ready" if account_ready else "blocked",
+                    reason=(
+                        "account reconciliation passed"
+                        if account_ready
+                        else "; ".join(reasons)
+                    ),
                     snapshot=snapshot,
                     trading_state=trading_state,
                     order_reconciliation_complete=order_reconciliation_complete,
@@ -238,7 +243,7 @@ class ReconciliationService:
                     fill_count=fill_count,
                     private_stream_ready=private_stream_ready,
                 )
-                blocked += 1
+                blocked += int(not account_ready)
             except Exception:
                 # Credential material, signed URLs, and exchange response bodies
                 # must never be persisted as reconciliation reasons.
@@ -262,7 +267,21 @@ class ReconciliationService:
             if final_control is not None and final_control.state == "paused"
             else safety_pause_reason
         )
-        if final_pause_reason is None:
+        all_accounts_ready = blocked == 0 and failed == 0
+        if all_accounts_ready:
+            for summary in summaries:
+                if not await self.database.private_stream_ready(
+                    exchange=summary.exchange.value,
+                    environment=summary.environment.value,
+                ):
+                    all_accounts_ready = False
+                    break
+        if final_pause_reason is None and all_accounts_ready:
+            await self.database.set_execution_control(
+                state="ready",
+                reason="all configured accounts passed startup reconciliation",
+            )
+        elif final_pause_reason is None:
             await self.database.set_execution_control(
                 state="blocked",
                 reason=(
@@ -274,7 +293,13 @@ class ReconciliationService:
             accounts_checked=len(summaries),
             accounts_blocked=blocked,
             accounts_failed=failed,
-            execution_state="paused" if final_pause_reason else "blocked",
+            execution_state=(
+                "paused"
+                if final_pause_reason
+                else "ready"
+                if all_accounts_ready
+                else "blocked"
+            ),
         )
 
     async def run_forever(self, *, interval_seconds: float = 60) -> None:
