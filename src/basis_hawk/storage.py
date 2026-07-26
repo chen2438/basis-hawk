@@ -257,6 +257,48 @@ class ExecutionControlRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class TradePreviewRow(Base):
+    __tablename__ = "trade_previews"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    actor: Mapped[str] = mapped_column(String(100))
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    exchange: Mapped[str] = mapped_column(String(20), index=True)
+    environment: Mapped[str] = mapped_column(String(20))
+    base_asset: Mapped[str] = mapped_column(String(40))
+    requested_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    leverage: Mapped[int] = mapped_column(Integer)
+    maximum_slippage: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    market_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    confirmation_idempotency_key: Mapped[str | None] = mapped_column(
+        String(36),
+        unique=True,
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "requested_notional > 0",
+            name="ck_trade_preview_notional_positive",
+        ),
+        CheckConstraint(
+            "leverage >= 1 AND leverage <= 10",
+            name="ck_trade_preview_leverage_range",
+        ),
+        CheckConstraint(
+            "maximum_slippage > 0 AND maximum_slippage <= 0.1",
+            name="ck_trade_preview_slippage_range",
+        ),
+    )
+
+
 class TradeIntentRow(Base):
     __tablename__ = "trade_intents"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -709,6 +751,61 @@ class Database:
                 )
             )
             return list(values)
+
+    async def create_trade_preview(
+        self,
+        *,
+        preview: dict[str, Any],
+    ) -> TradePreviewRow:
+        async with self.sessions() as session:
+            row = TradePreviewRow(**preview)
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def trade_preview(self, preview_id: str) -> TradePreviewRow | None:
+        async with self.sessions() as session:
+            return await session.get(TradePreviewRow, preview_id)
+
+    async def reserve_trade_preview(
+        self,
+        *,
+        preview_id: str,
+        actor: str,
+        request_fingerprint: str,
+        idempotency_key: str,
+        now: datetime | None = None,
+    ) -> TradePreviewRow:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(TradePreviewRow)
+                .where(TradePreviewRow.id == preview_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise ValueError("trade preview was not found")
+            if row.actor != actor:
+                raise ValueError("trade preview belongs to another administrator")
+            if row.confirmation_idempotency_key is not None:
+                if row.confirmation_idempotency_key != idempotency_key:
+                    raise ValueError(
+                        "trade preview was already confirmed with another "
+                        "idempotency key"
+                    )
+                return row
+            observed_now = now or datetime.now(UTC)
+            if _utc(row.expires_at) <= observed_now:
+                raise ValueError("trade preview has expired")
+            if row.request_fingerprint != request_fingerprint:
+                raise ValueError(
+                    "market or configuration changed after trade preview"
+                )
+            row.confirmation_idempotency_key = idempotency_key
+            row.confirmed_at = observed_now
+            await session.commit()
+            await session.refresh(row)
+            return row
 
     async def create_trade_intent(
         self,
