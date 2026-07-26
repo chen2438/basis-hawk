@@ -5,8 +5,9 @@ from decimal import Decimal
 import httpx
 from fastapi.testclient import TestClient
 
-from basis_hawk.accounts import RemoteFill
+from basis_hawk.accounts import AccountSnapshot, PositionMode, RemoteFill
 from basis_hawk.api import create_app
+from basis_hawk.config import get_config
 from basis_hawk.credentials import (
     CredentialService,
     ExchangeEnvironment,
@@ -520,3 +521,93 @@ def test_websocket_starts_with_snapshot() -> None:
         message = socket.receive_json()
     assert message["type"] == "snapshot"
     assert message["items"][0]["base_asset"] == "BTC"
+
+
+class _TransferPreflightClient:
+    async def snapshot(self) -> AccountSnapshot:
+        return AccountSnapshot(
+            exchange=Exchange.BINANCE,
+            environment=ExchangeEnvironment.LIVE,
+            observed_at=datetime.now(UTC),
+            spot_usdt_available=Decimal("100"),
+            perp_usdt_available=Decimal("20"),
+            perp_usdt_equity=Decimal("20"),
+            shared_balance=False,
+            account_mode="classic",
+            position_mode=PositionMode.ONE_WAY,
+            trade_permission=True,
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_internal_transfer_api_requires_confirmation_and_is_idempotent(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "BASIS_HAWK_TRANSFER_PER_REQUEST_LIMIT_USDT",
+        "100",
+    )
+    monkeypatch.setenv("BASIS_HAWK_TRANSFER_DAILY_LIMIT_USDT", "200")
+    get_config.cache_clear()
+    database = Database("sqlite+aiosqlite:///:memory:")
+    service = ScannerService(database, {})
+    await service.initialize()
+    await database.set_execution_control(state="ready", reason="test")
+    credentials = CredentialService(
+        database,
+        SecretCipher(SecretCipher.generate_key()),
+    )
+    await credentials.save(
+        exchange=Exchange.BINANCE,
+        environment=ExchangeEnvironment.LIVE,
+        label="primary",
+        secrets=ExchangeSecrets(
+            api_key="test-api-key",
+            api_secret="test-api-secret",
+        ),
+        actor="test",
+    )
+    app = create_app(
+        service,
+        manage_lifecycle=False,
+        auth_required=False,
+        credential_service=credentials,
+        account_client_factory=lambda *_: _TransferPreflightClient(),  # type: ignore[arg-type]
+    )
+    key = str(uuid.uuid4())
+    payload = {
+        "exchange": "binance",
+        "environment": "live",
+        "direction": "spot_to_perp",
+        "amount_usdt": "25",
+        "confirmed": True,
+    }
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            created = await client.post(
+                "/api/transfers",
+                headers={"Idempotency-Key": key},
+                json=payload,
+            )
+            assert created.status_code == 200
+            assert created.json()["created"] is True
+            assert created.json()["transfer"]["status"] == "planned"
+            repeated = await client.post(
+                "/api/transfers",
+                headers={"Idempotency-Key": key},
+                json=payload,
+            )
+            assert repeated.status_code == 200
+            assert repeated.json()["created"] is False
+            listed = await client.get("/api/transfers")
+            assert listed.json()["items"][0]["amount_usdt"] == "25"
+        control = await database.execution_control()
+        assert control is not None and control.state == "paused"
+    finally:
+        await database.close()
+        get_config.cache_clear()

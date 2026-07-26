@@ -27,6 +27,7 @@ from basis_hawk.live_execution import (
 from basis_hawk.models import Exchange
 from basis_hawk.storage import Database, OrderLegRow
 from basis_hawk.trading import PaperExecutionService
+from basis_hawk.transfers import InternalTransferExecutionService
 
 
 class ReconciliationResult(BaseModel):
@@ -56,6 +57,7 @@ class ReconciliationService:
         live_executor: LiveExecutionService | None = None,
         live_compensator: LiveCompensationService | None = None,
         automatic_trader: AutomaticTradingService | None = None,
+        transfer_executor: InternalTransferExecutionService | None = None,
         event_debounce_seconds: float = 0.25,
     ) -> None:
         if event_debounce_seconds < 0:
@@ -80,6 +82,14 @@ class ReconciliationService:
         self.automatic_trader = automatic_trader or AutomaticTradingService(
             database
         )
+        self.transfer_executor = (
+            transfer_executor
+            or InternalTransferExecutionService(
+                database,
+                credentials,
+                account_client_factory=account_client_factory,
+            )
+        )
         self.event_debounce_seconds = event_debounce_seconds
         self._reconciliation_requested = asyncio.Event()
 
@@ -87,6 +97,7 @@ class ReconciliationService:
         self._reconciliation_requested.set()
 
     async def run_once(self) -> ReconciliationResult:
+        await self.transfer_executor.run_once()
         await self.paper_executor.run_once()
         await self.live_executor.run_once()
         await self.live_compensator.run_once()

@@ -188,8 +188,14 @@ Telegram 入站固定为 `POST /api/integrations/telegram/webhook`，这是唯�
 日限额。计划事务锁定全局执行控制，按 UTC 日累计所有非明确 failed 金额，超限则不落库；成功计划会
 立即暂停新交易并写入不含凭据的审计事件。私有适配层现已支持 Binance、Bitget Classic、Gate 和
 MEXC LIVE 的提交与远端状态查询；Bitget 和 Gate 还把本地 UUID 作为交易所防重 ID。OKX、Bybit 与
-Bitget UTA 的当前交易账户共享现货和永续余额，因此明确返回无需划转。worker 的单次提交、ACK 不确定
-恢复及新余额到账确认尚未闭环前，该账本仍不作为公开 HTTP 写入口，避免产生永远停留的伪任务。
+Bitget UTA 的当前交易账户共享现货和永续余额，因此明确返回无需划转。
+唯一 worker 每轮先处理最早的一笔 `submitted`/`pending`，没有待确认记录时才认领一笔 `planned`。
+认领事务要求全局已经暂停，并在调用交易所前写入提交前双侧余额、预期目标余额、`submitted_at` 和
+`submitted` 状态。网络调用后持久化远端 ID；若 ACK 不确定，仅 Bitget/Gate 可依靠客户端防重 ID
+查回远端 ID，Binance/MEXC 转 `manual_review`，不会重发。交易所状态成功后还必须重新读取账户快照，
+确认目标可用余额不低于预期值才置为 `completed`。远端状态或到账在 15 分钟内仍无法确认会转
+`manual_review`；所有完成、失败和人工复核都写脱敏审计，执行状态继续保持暂停，必须由管理员发起
+全量对账恢复。
 真实意图额外固化 1–10 倍请求杠杆，旧记录迁移为安全默认值 1；
 `order_legs` 同一意图固定一条现货腿和一条永续腿，并在提交交易所前生成唯一客户端订单 ID；每条腿还
 保存严格为正的 `base_multiplier`，使交易所原生数量及成交量可以无歧义换算成基础币。已有纸面订单腿

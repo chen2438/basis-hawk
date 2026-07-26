@@ -41,8 +41,13 @@ from basis_hawk.crypto import SecretCipher
 from basis_hawk.models import Exchange, Quality, ScannerSettings
 from basis_hawk.notifications import TelegramCommandService
 from basis_hawk.service import ScannerService, default_adapters
-from basis_hawk.storage import Database
+from basis_hawk.storage import Database, InternalTransferRow
 from basis_hawk.trading import IdempotencyConflict, TradeLedger, TradeValidationError
+from basis_hawk.transfers import (
+    InternalTransferDirection,
+    InternalTransferLedger,
+    InternalTransferRequest,
+)
 
 SESSION_COOKIE = "basis_hawk_session"
 CSRF_COOKIE = "basis_hawk_csrf"
@@ -122,6 +127,14 @@ class ExecutionResumeRequest(BaseModel):
     confirmed: Literal[True]
 
 
+class InternalTransferConfirmRequest(BaseModel):
+    exchange: Exchange
+    environment: ExchangeEnvironment
+    direction: InternalTransferDirection
+    amount_usdt: Decimal = Field(gt=0, decimal_places=18)
+    confirmed: Literal[True]
+
+
 def create_app(
     service: ScannerService | None = None,
     *,
@@ -181,6 +194,11 @@ def create_app(
     app.state.scanner = scanner
     app.state.auth_service = auth_service
     trade_ledger = TradeLedger(scanner.database)
+    transfer_ledger = InternalTransferLedger(
+        scanner.database,
+        per_request_limit_usdt=config.transfer_per_request_limit_usdt,
+        daily_limit_usdt=config.transfer_daily_limit_usdt,
+    )
     login_limiter = LoginAttemptLimiter()
 
     def request_actor(request: Request) -> str:
@@ -199,6 +217,49 @@ def create_app(
             ).model_dump(mode="json"),
             "created_by": row.created_by,
             "created_at": row.created_at.isoformat(),
+        }
+
+    def transfer_payload(row: InternalTransferRow) -> dict[str, object]:
+        def decimal_text(value: Decimal) -> str:
+            return format(value.normalize(), "f")
+
+        return {
+            "id": row.id,
+            "exchange": row.exchange,
+            "environment": row.environment,
+            "asset": row.asset,
+            "direction": row.direction,
+            "amount_usdt": decimal_text(row.amount),
+            "status": row.status,
+            "exchange_transfer_id": row.exchange_transfer_id,
+            "source_balance_before": (
+                decimal_text(row.source_balance_before)
+                if row.source_balance_before is not None
+                else None
+            ),
+            "target_balance_before": (
+                decimal_text(row.target_balance_before)
+                if row.target_balance_before is not None
+                else None
+            ),
+            "expected_target_balance": (
+                decimal_text(row.expected_target_balance)
+                if row.expected_target_balance is not None
+                else None
+            ),
+            "error_code": row.error_code,
+            "created_at": row.created_at.isoformat(),
+            "updated_at": row.updated_at.isoformat(),
+            "submitted_at": (
+                row.submitted_at.isoformat()
+                if row.submitted_at is not None
+                else None
+            ),
+            "completed_at": (
+                row.completed_at.isoformat()
+                if row.completed_at is not None
+                else None
+            ),
         }
 
     @app.middleware("http")
@@ -497,6 +558,90 @@ def create_app(
         return {
             "state": "reconciling",
             "reason": "worker must pass a fresh reconciliation before ready",
+        }
+
+    @app.get("/api/transfers")
+    async def internal_transfers(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, object]:
+        rows = await scanner.database.list_internal_transfers(limit=limit)
+        return {"items": [transfer_payload(row) for row in rows]}
+
+    @app.post("/api/transfers")
+    async def plan_internal_transfer(
+        value: InternalTransferConfirmRequest,
+        request: Request,
+        idempotency_key: Annotated[UUID, Header(alias="Idempotency-Key")],
+    ) -> dict[str, object]:
+        existing = await scanner.database.internal_transfer_by_idempotency_key(
+            str(idempotency_key)
+        )
+        if existing is None:
+            control = await scanner.database.execution_control()
+            if control is None or control.state != "ready":
+                raise HTTPException(
+                    status_code=409,
+                    detail="execution must be ready before planning a transfer",
+                )
+            if credential_service is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="credential encryption is unavailable",
+                )
+            secrets = await credential_service.load(
+                value.exchange,
+                value.environment,
+            )
+            if secrets is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="exchange credential is not configured",
+                )
+            client: PrivateAccountClient | None = None
+            try:
+                client = resolved_account_client_factory(
+                    value.exchange,
+                    secrets,
+                    value.environment,
+                )
+                snapshot = await client.snapshot()
+            except UnsupportedEnvironmentError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except PrivateRequestError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="private account transfer preflight failed",
+                ) from exc
+            finally:
+                if client is not None:
+                    try:
+                        await client.close()
+                    except Exception:
+                        pass
+            if snapshot.shared_balance:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "this account shares spot and perpetual collateral; "
+                        "an internal transfer is not required"
+                    ),
+                )
+        try:
+            row, created = await transfer_ledger.plan(
+                InternalTransferRequest(
+                    exchange=value.exchange,
+                    environment=value.environment,
+                    direction=value.direction,
+                    amount_usdt=value.amount_usdt,
+                ),
+                idempotency_key=idempotency_key,
+                actor=request_actor(request),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "created": created,
+            "transfer": transfer_payload(row),
         }
 
     @app.get("/api/automation")

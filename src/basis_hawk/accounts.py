@@ -2627,7 +2627,8 @@ class BitgetAccountClient(PrivateAccountClient):
                 amount=amount,
             )
         if (
-            str(match.get("transferId") or "") != transfer_id
+            (transfer_id and str(match.get("transferId") or "") != transfer_id)
+            or not str(match.get("transferId") or "")
             or str(match.get("coin") or "").upper() != "USDT"
             or str(match.get("fromType") or "") != from_type
             or str(match.get("toType") or "") != to_type
@@ -2647,7 +2648,7 @@ class BitgetAccountClient(PrivateAccountClient):
         else:
             status = "unknown"
         return RemoteInternalTransfer(
-            transfer_id=transfer_id,
+            transfer_id=str(match.get("transferId")),
             status=status,
             direction=direction,
             amount=amount,
@@ -2820,17 +2821,16 @@ class GateAccountClient(PrivateAccountClient):
     ) -> RemoteInternalTransfer:
         del created_at
         _gate_transfer_accounts(direction)
-        payload = await self._get(
-            "/api/v4/wallet/order_status",
-            client_order_id=client_transfer_id,
-            tx_id=transfer_id,
-        )
+        query: dict[str, object] = {"client_order_id": client_transfer_id}
+        if transfer_id:
+            query["tx_id"] = transfer_id
+        payload = await self._get("/api/v4/wallet/order_status", **query)
         if not isinstance(payload, dict):
             raise PrivateRequestError(
                 "Gate internal transfer lookup is incomplete"
             )
         returned_id = str(payload.get("tx_id") or "")
-        if returned_id and returned_id != transfer_id:
+        if not returned_id or (transfer_id and returned_id != transfer_id):
             raise PrivateRequestError(
                 "Gate internal transfer lookup does not match the request"
             )
@@ -2845,7 +2845,7 @@ class GateAccountClient(PrivateAccountClient):
         else:
             status = "unknown"
         return RemoteInternalTransfer(
-            transfer_id=transfer_id,
+            transfer_id=returned_id,
             status=status,
             direction=direction,
             amount=amount,

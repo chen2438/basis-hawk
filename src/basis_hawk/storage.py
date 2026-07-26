@@ -3921,6 +3921,177 @@ class Database:
                 )
             )
 
+    async def next_internal_transfer(
+        self,
+        *,
+        statuses: set[str],
+    ) -> InternalTransferRow | None:
+        allowed = {"planned", "submitted", "pending"}
+        if not statuses or not statuses.issubset(allowed):
+            raise ValueError("unsupported active internal transfer status")
+        async with self.sessions() as session:
+            return await session.scalar(
+                select(InternalTransferRow)
+                .where(InternalTransferRow.status.in_(statuses))
+                .order_by(InternalTransferRow.created_at.asc())
+                .limit(1)
+            )
+
+    async def internal_transfer_by_idempotency_key(
+        self,
+        idempotency_key: str,
+    ) -> InternalTransferRow | None:
+        async with self.sessions() as session:
+            return await session.scalar(
+                select(InternalTransferRow).where(
+                    InternalTransferRow.idempotency_key == idempotency_key
+                )
+            )
+
+    async def prepare_internal_transfer_submission(
+        self,
+        *,
+        transfer_id: str,
+        source_balance: Decimal,
+        target_balance: Decimal,
+        now: datetime | None = None,
+    ) -> InternalTransferRow | None:
+        if source_balance < 0 or target_balance < 0:
+            raise ValueError("internal transfer balances cannot be negative")
+        observed_at = now or datetime.now(UTC)
+        async with self.sessions() as session:
+            control = await session.scalar(
+                select(ExecutionControlRow)
+                .where(ExecutionControlRow.id == 1)
+                .with_for_update()
+            )
+            row = await session.scalar(
+                select(InternalTransferRow)
+                .where(InternalTransferRow.id == transfer_id)
+                .with_for_update()
+            )
+            if row is None or row.status != "planned":
+                return None
+            if control is None or control.state != "paused":
+                raise ValueError(
+                    "internal transfer submission requires paused execution"
+                )
+            if source_balance < row.amount:
+                raise ValueError("internal transfer source balance is insufficient")
+            row.source_balance_before = source_balance
+            row.target_balance_before = target_balance
+            row.expected_target_balance = target_balance + row.amount
+            row.status = "submitted"
+            row.submitted_at = observed_at
+            row.updated_at = observed_at
+            session.add(
+                AuditEventRow(
+                    id=str(uuid.uuid4()),
+                    occurred_at=observed_at,
+                    event_type="transfer.submission_started",
+                    actor="worker",
+                    details=json.dumps(
+                        {
+                            "transfer_id": row.id,
+                            "exchange": row.exchange,
+                            "environment": row.environment,
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            )
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def record_internal_transfer_remote_id(
+        self,
+        *,
+        transfer_id: str,
+        exchange_transfer_id: str,
+        now: datetime | None = None,
+    ) -> InternalTransferRow:
+        if not exchange_transfer_id:
+            raise ValueError("exchange transfer ID is required")
+        observed_at = now or datetime.now(UTC)
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(InternalTransferRow)
+                .where(InternalTransferRow.id == transfer_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise ValueError("internal transfer does not exist")
+            if row.status not in {"submitted", "pending"}:
+                raise ValueError("internal transfer is not awaiting remote confirmation")
+            if (
+                row.exchange_transfer_id is not None
+                and row.exchange_transfer_id != exchange_transfer_id
+            ):
+                raise ValueError("exchange transfer ID conflicts with persisted value")
+            row.exchange_transfer_id = exchange_transfer_id
+            row.status = "pending"
+            row.error_code = None
+            row.updated_at = observed_at
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def finalize_internal_transfer(
+        self,
+        *,
+        transfer_id: str,
+        status: str,
+        error_code: str | None = None,
+        now: datetime | None = None,
+    ) -> InternalTransferRow:
+        if status not in {"completed", "failed", "manual_review"}:
+            raise ValueError("unsupported internal transfer terminal status")
+        if error_code is not None and (
+            not error_code or len(error_code) > 80
+        ):
+            raise ValueError("invalid internal transfer error code")
+        observed_at = now or datetime.now(UTC)
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(InternalTransferRow)
+                .where(InternalTransferRow.id == transfer_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise ValueError("internal transfer does not exist")
+            if row.status in {"completed", "failed", "manual_review"}:
+                if row.status != status:
+                    raise ValueError("internal transfer already has another terminal status")
+                return row
+            row.status = status
+            row.error_code = error_code
+            row.updated_at = observed_at
+            if status == "completed":
+                row.completed_at = observed_at
+            session.add(
+                AuditEventRow(
+                    id=str(uuid.uuid4()),
+                    occurred_at=observed_at,
+                    event_type=f"transfer.{status}",
+                    actor="worker",
+                    details=json.dumps(
+                        {
+                            "transfer_id": row.id,
+                            "exchange": row.exchange,
+                            "environment": row.environment,
+                            "error_code": error_code,
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            )
+            await session.commit()
+            await session.refresh(row)
+            return row
+
     async def save_exchange_credential(
         self,
         *,

@@ -51,6 +51,12 @@
   所有账户的远端活动订单，已对冲仓位保持不动。
 - `POST /api/system/execution/resume`：要求 `confirmed=true`，只把状态改为 `reconciling`；不能由
   HTTP 请求直接宣称 `ready`，必须等待 worker 完成全量安全对账。
+- `GET /api/transfers`：返回最近内部划转及提交前/预期余额、远端 ID、状态和脱敏错误码；金额均为
+  十进制字符串。
+- `POST /api/transfers`：仅允许 USDT 现货↔USDT 永续，要求 `confirmed=true` 和 UUID
+  `Idempotency-Key`。新请求要求全局 `ready`、凭据存在、账户不是共享余额模式且环境额度非零；
+  成功后只创建 `planned` 账本并立即暂停交易，由唯一 worker 提交。相同键与相同请求在暂停后仍可
+  安全重试，换参数复用同一键会冲突。请求模型不存在地址、链、UID 或跨所目标。
 - `POST /api/integrations/telegram/webhook`：唯一免管理员 Cookie/CSRF 的集成入口；必须携带与环境
   配置恒定时间匹配的 `X-Telegram-Bot-Api-Secret-Token`，消息 chat ID 也必须匹配管理员白名单。
   只接受最多 32 KiB 的 Telegram Update，并仅提供 `/status`、`/positions`、`/alerts`、`/health`
