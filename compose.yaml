@@ -69,6 +69,29 @@ services:
     tmpfs: [/tmp]
     networks: [backend]
 
+  backup:
+    build:
+      context: .
+      dockerfile: Dockerfile.backup
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB}
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BASIS_HAWK_BACKUP_KEY: ${BASIS_HAWK_BACKUP_KEY}
+      BASIS_HAWK_BACKUP_DIRECTORY: /backups
+      BASIS_HAWK_BACKUP_INTERVAL_SECONDS: ${BASIS_HAWK_BACKUP_INTERVAL_SECONDS:-86400}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    volumes:
+      - postgres_backups:/backups
+    networks: [backend]
+
   caddy:
     image: caddy:2.10-alpine
     restart: unless-stopped
@@ -93,5 +116,6 @@ networks:
 
 volumes:
   postgres_data:
+  postgres_backups:
   caddy_data:
   caddy_config:

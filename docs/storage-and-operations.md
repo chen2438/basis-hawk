@@ -25,6 +25,35 @@ Docker Compose 当前提供 PostgreSQL、FastAPI、唯一交易 worker 和 Caddy
 worker 启动对账、Caddy 接入。worker 使用 PostgreSQL advisory lock；同一数据库已有执行器时第二个
 worker 会拒绝运行。
 
+Compose 还提供独立非 root `backup` 服务。它使用与 PostgreSQL 17 服务端同版本的 `pg_dump`，启动后
+立即生成一次 custom archive，之后默认每 86400 秒生成一次。归档在写入命名卷时直接使用独立
+`BASIS_HAWK_BACKUP_KEY` 做 AES-256-GCM 认证加密，明文数据库不会落盘；每份归档另有 SHA-256 文件，
+恢复验证还会校验 GCM tag 并让 `pg_restore --list` 解析完整归档。每日归档只保留最新 7 份，每周日
+另保留一份周归档并只保留最新 4 份。备份密钥必须独立于凭据主密钥生成：
+
+```bash
+python3 -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())'
+docker compose up -d --build
+docker compose exec backup python3 -m basis_hawk.backup verify \
+  /backups/basis-hawk-YYYYMMDDTHHMMSSZ-daily.bhbk
+```
+
+生产恢复必须先进入维护暂停并停止 `api`、`worker` 和 `backup`，先验证目标归档，再恢复到一个新的空
+数据库。工具默认拒绝非空目标；只有灾难恢复明确要清理当前数据库时，才可同时提供 `--confirmed`
+和 `--clean`。恢复后运行迁移、启动服务并等待完整账户对账，不能直接宣称可交易：
+
+```bash
+docker compose stop api worker backup
+docker compose run --rm backup verify /backups/basis-hawk-YYYYMMDDTHHMMSSZ-daily.bhbk
+docker compose run --rm backup restore \
+  /backups/basis-hawk-YYYYMMDDTHHMMSSZ-daily.bhbk --confirmed
+docker compose up -d
+docker compose run --rm worker basis-hawk worker --once
+```
+
+命名卷仍只在单台 VPS 上；必须另行把加密归档和校验文件复制到受控异地存储，且把备份密钥与归档分开
+保管。丢失 `BASIS_HAWK_BACKUP_KEY` 无法恢复，泄露该密钥则应视为全部历史备份泄露。
+
 首次部署必须配置 32 字节 URL-safe Base64 主密钥
 `BASIS_HAWK_CREDENTIAL_MASTER_KEY`，再运行：
 
