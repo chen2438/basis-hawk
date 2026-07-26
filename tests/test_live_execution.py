@@ -185,6 +185,8 @@ async def _planned_live_intent(
 
 async def _planned_live_close(
     database: Database,
+    *,
+    emergency: bool = False,
 ) -> tuple[CredentialService, str, str]:
     credentials, opening_intent_id = await _planned_live_intent(database)
     opening = await database.trade_intent(opening_intent_id)
@@ -218,6 +220,10 @@ async def _planned_live_close(
         idempotency_key=uuid.uuid4(),
         settings=ScannerSettings(),
         environment=ExchangeEnvironment.LIVE,
+        maximum_slippage=(
+            Decimal("0.2") if emergency else Decimal("0.001")
+        ),
+        emergency=emergency,
     )
     return credentials, closing.id, position.id
 
@@ -373,6 +379,50 @@ async def test_live_executor_submits_exact_reduce_only_close() -> None:
     assert client.configured == []
     position = await database.paired_position(position_id)
     assert position is not None and position.status == "closing"
+    await database.close()
+
+
+async def test_live_executor_submits_emergency_close_while_paused() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials, intent_id, _ = await _planned_live_close(
+        database,
+        emergency=True,
+    )
+    await database.set_execution_control(
+        state="paused",
+        reason="emergency close confirmed",
+    )
+    client = FakeLiveAccountClient(
+        database,
+        positions=[
+            RemotePosition(
+                symbol="ORDER-USDT-SWAP",
+                side="short",
+                quantity=Decimal("200"),
+                entry_price=Decimal("0.051"),
+                mark_price=Decimal("0.05"),
+                liquidation_price=Decimal("0.09"),
+                leverage=Decimal("2"),
+                isolated=True,
+            )
+        ],
+    )
+
+    result = await LiveExecutionService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    ).run_once()
+
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    assert result.submitted == 1
+    assert stored[0].emergency is True
+    assert stored[0].status == "executing"
+    assert {item.reduce_only for item in client.placed} == {False, True}
+    control = await database.execution_control()
+    assert control is not None and control.state == "paused"
     await database.close()
 
 

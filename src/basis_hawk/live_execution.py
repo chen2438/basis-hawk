@@ -50,7 +50,7 @@ class LiveExecutionService:
 
     async def run_once(self) -> LiveExecutionResult:
         control = await self.database.execution_control()
-        if control is None or control.state != "ready":
+        if control is None or control.state not in {"ready", "paused"}:
             return LiveExecutionResult(
                 examined=0,
                 submitted=0,
@@ -64,6 +64,10 @@ class LiveExecutionService:
             if item.environment in {"sandbox", "live"}
             and item.action in {"open", "close"}
             and item.status == "planned"
+            and (
+                control.state == "ready"
+                or (item.action == "close" and item.emergency)
+            )
         ]
         submitted = 0
         uncertain = 0

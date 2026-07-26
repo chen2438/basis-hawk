@@ -84,10 +84,12 @@ class LiveOpenConfirmRequest(BaseModel):
 
 
 class LiveClosePreviewRequest(BaseModel):
+    emergency: bool = False
     maximum_slippage: Decimal = Field(
         default=Decimal("0.001"),
         gt=0,
-        le=Decimal("0.1"),
+        le=Decimal("0.25"),
+        decimal_places=12,
     )
 
 
@@ -891,6 +893,7 @@ def create_app(
                 settings=scanner.settings,
                 environment=environment,
                 maximum_slippage=value.maximum_slippage,
+                emergency=value.emergency,
             )
         except TradeValidationError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -903,6 +906,7 @@ def create_app(
                 "actor": actor,
                 "request_fingerprint": preview.request_fingerprint,
                 "action": "close",
+                "emergency": value.emergency,
                 "paired_position_id": position.id,
                 "exchange": preview.exchange.value,
                 "environment": preview.environment.value,
@@ -920,7 +924,11 @@ def create_app(
             }
         )
         await scanner.database.append_audit(
-            "trade.close_preview_created",
+            (
+                "trade.emergency_close_preview_created"
+                if value.emergency
+                else "trade.close_preview_created"
+            ),
             actor=actor,
             details={
                 "preview_id": preview_id,
@@ -929,6 +937,7 @@ def create_app(
                 "environment": preview.environment.value,
                 "base_asset": preview.base_asset,
                 "expires_at": preview.expires_at.isoformat(),
+                "emergency": value.emergency,
             },
         )
         return {
@@ -943,12 +952,6 @@ def create_app(
         request: Request,
         idempotency_key: Annotated[UUID, Header(alias="Idempotency-Key")],
     ) -> dict[str, object]:
-        control = await scanner.database.execution_control()
-        if control is None or control.state != "ready":
-            raise HTTPException(
-                status_code=409,
-                detail="execution is not ready for live confirmation",
-            )
         stored = await scanner.database.trade_preview(str(value.preview_id))
         if stored is None:
             raise HTTPException(
@@ -962,6 +965,15 @@ def create_app(
             raise HTTPException(
                 status_code=409,
                 detail="trade preview does not match the closing position",
+            )
+        control = await scanner.database.execution_control()
+        if (
+            not stored.emergency
+            and (control is None or control.state != "ready")
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="execution is not ready for live confirmation",
             )
         exchange = Exchange(stored.exchange)
         environment = ExchangeEnvironment(stored.environment)
@@ -985,6 +997,9 @@ def create_app(
                 detail="current market or trading rules are not available",
             )
         try:
+            stored_slippage = stored.maximum_slippage.quantize(
+                Decimal("0.000000000001")
+            ).normalize()
             if stored.confirmation_idempotency_key is None:
                 current_preview = await trade_ledger.preview_live_close(
                     position_id=str(position_id),
@@ -992,7 +1007,8 @@ def create_app(
                     pair=pair,
                     settings=scanner.settings,
                     environment=environment,
-                    maximum_slippage=stored.maximum_slippage,
+                    maximum_slippage=stored_slippage,
+                    emergency=stored.emergency,
                 )
                 fingerprint = current_preview.request_fingerprint
             else:
@@ -1003,6 +1019,14 @@ def create_app(
                 request_fingerprint=fingerprint,
                 idempotency_key=str(idempotency_key),
             )
+            if stored.emergency:
+                await scanner.database.set_execution_control(
+                    state="paused",
+                    reason=(
+                        "emergency paired close was confirmed; "
+                        "new opens remain blocked"
+                    ),
+                )
             intent, created = await trade_ledger.plan_live_close(
                 position_id=str(position_id),
                 opportunity=opportunity,
@@ -1010,7 +1034,8 @@ def create_app(
                 idempotency_key=idempotency_key,
                 settings=scanner.settings,
                 environment=environment,
-                maximum_slippage=stored.maximum_slippage,
+                maximum_slippage=stored_slippage,
+                emergency=stored.emergency,
             )
         except (
             IdempotencyConflict,
@@ -1020,7 +1045,11 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if created:
             await scanner.database.append_audit(
-                "trade.close_intent_confirmed",
+                (
+                    "trade.emergency_close_intent_confirmed"
+                    if stored.emergency
+                    else "trade.close_intent_confirmed"
+                ),
                 actor=request_actor(request),
                 details={
                     "preview_id": stored.id,
@@ -1029,6 +1058,7 @@ def create_app(
                     "exchange": intent.exchange.value,
                     "environment": intent.environment,
                     "base_asset": intent.base_asset,
+                    "emergency": stored.emergency,
                 },
             )
         return {

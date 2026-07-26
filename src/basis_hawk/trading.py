@@ -109,6 +109,7 @@ class TradeIntentView(BaseModel):
     environment: str
     base_asset: str
     action: str
+    emergency: bool
     status: TradeIntentStatus
     leverage: int
     requested_notional: Decimal
@@ -244,6 +245,7 @@ class LiveClosePreview(BaseModel):
     exchange: Exchange
     environment: ExchangeEnvironment
     base_asset: str
+    emergency: bool
     leverage: int
     market_observed_at: datetime
     expires_at: datetime
@@ -489,11 +491,13 @@ class TradeLedger:
         settings: ScannerSettings,
         environment: ExchangeEnvironment,
         maximum_slippage: Decimal = Decimal("0.001"),
+        emergency: bool = False,
         now: datetime | None = None,
     ) -> LiveClosePreview:
-        if maximum_slippage <= 0 or maximum_slippage > Decimal("0.1"):
+        maximum_allowed = Decimal("0.25") if emergency else Decimal("0.1")
+        if maximum_slippage <= 0 or maximum_slippage > maximum_allowed:
             raise TradeValidationError(
-                "maximum slippage must be above 0 and at most 0.1"
+                "maximum slippage exceeds the allowed close limit"
             )
         if (
             environment == ExchangeEnvironment.SANDBOX
@@ -545,7 +549,7 @@ class TradeLedger:
                 "current instrument rules do not match the opening position"
             )
         observed_now = now or datetime.now(UTC)
-        if opportunity.quality != Quality.HEALTHY:
+        if not emergency and opportunity.quality != Quality.HEALTHY:
             raise TradeValidationError("only healthy opportunities can be closed normally")
         if opportunity.observed_at > observed_now + timedelta(seconds=5):
             raise TradeValidationError("market quote timestamp is in the future")
@@ -601,6 +605,7 @@ class TradeLedger:
                     "scanner": settings.model_dump(mode="json"),
                     "environment": environment.value,
                     "maximum_slippage": _canonical_decimal(maximum_slippage),
+                    "emergency": emergency,
                 },
                 separators=(",", ":"),
                 sort_keys=True,
@@ -610,6 +615,7 @@ class TradeLedger:
             json.dumps(
                 {
                     "action": "close",
+                    "emergency": emergency,
                     "position_id": position.id,
                     "exchange": opportunity.exchange.value,
                     "environment": environment.value,
@@ -638,6 +644,7 @@ class TradeLedger:
             exchange=opportunity.exchange,
             environment=environment,
             base_asset=opportunity.base_asset,
+            emergency=emergency,
             leverage=opening_intent.leverage,
             market_observed_at=opportunity.observed_at,
             expires_at=opportunity.observed_at + timedelta(seconds=15),
@@ -928,6 +935,7 @@ class TradeLedger:
         settings: ScannerSettings,
         environment: ExchangeEnvironment,
         maximum_slippage: Decimal = Decimal("0.001"),
+        emergency: bool = False,
         now: datetime | None = None,
     ) -> tuple[TradeIntentView, bool]:
         existing = await self.database.trade_intent_by_idempotency(
@@ -939,6 +947,7 @@ class TradeLedger:
                 row.environment == environment.value
                 and row.action == "close"
                 and row.paired_position_id == position_id
+                and row.emergency == emergency
             ):
                 return _view(row, legs), False
             raise IdempotencyConflict(
@@ -951,6 +960,7 @@ class TradeLedger:
             settings=settings,
             environment=environment,
             maximum_slippage=maximum_slippage,
+            emergency=emergency,
             now=now,
         )
         fees = settings.fees[opportunity.exchange]
@@ -972,6 +982,7 @@ class TradeLedger:
                     "environment": environment.value,
                     "base_asset": opportunity.base_asset,
                     "action": "close",
+                    "emergency": emergency,
                     "status": TradeIntentStatus.PLANNED.value,
                     "leverage": preview.leverage,
                     "requested_notional": (
@@ -1350,6 +1361,7 @@ def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:
         environment=row.environment,
         base_asset=row.base_asset,
         action=row.action,
+        emergency=row.emergency,
         status=TradeIntentStatus(row.status),
         leverage=row.leverage,
         requested_notional=row.requested_notional,

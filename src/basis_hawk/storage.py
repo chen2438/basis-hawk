@@ -311,6 +311,7 @@ class TradePreviewRow(Base):
     actor: Mapped[str] = mapped_column(String(100))
     request_fingerprint: Mapped[str] = mapped_column(String(64))
     action: Mapped[str] = mapped_column(String(20), default="open")
+    emergency: Mapped[bool] = mapped_column(Boolean, default=False)
     paired_position_id: Mapped[str | None] = mapped_column(
         ForeignKey("paired_positions.id", ondelete="RESTRICT"),
         index=True,
@@ -356,8 +357,12 @@ class TradePreviewRow(Base):
             name="ck_trade_preview_leverage_range",
         ),
         CheckConstraint(
-            "maximum_slippage > 0 AND maximum_slippage <= 0.1",
+            "maximum_slippage > 0 AND maximum_slippage <= 0.25",
             name="ck_trade_preview_slippage_range",
+        ),
+        CheckConstraint(
+            "emergency = false OR action = 'close'",
+            name="ck_trade_preview_emergency_close",
         ),
     )
 
@@ -376,6 +381,7 @@ class TradeIntentRow(Base):
     environment: Mapped[str] = mapped_column(String(20))
     base_asset: Mapped[str] = mapped_column(String(40))
     action: Mapped[str] = mapped_column(String(20))
+    emergency: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(30), index=True)
     leverage: Mapped[int] = mapped_column(Integer, default=1)
     requested_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
@@ -397,6 +403,10 @@ class TradeIntentRow(Base):
         CheckConstraint(
             "leverage >= 1 AND leverage <= 10",
             name="ck_trade_intent_leverage_range",
+        ),
+        CheckConstraint(
+            "emergency = false OR action = 'close'",
+            name="ck_trade_intent_emergency_close",
         ),
     )
 
@@ -1465,7 +1475,15 @@ class Database:
                 .where(ExecutionControlRow.id == 1)
                 .with_for_update()
             )
-            if control is None or control.state != "ready":
+            allowed_control_states = (
+                {"ready", "paused"}
+                if intent.emergency and intent.action == "close"
+                else {"ready"}
+            )
+            if (
+                control is None
+                or control.state not in allowed_control_states
+            ):
                 return intent, legs, False
             if any(item.status != "created" for item in primary.values()):
                 raise ValueError("live order legs are not ready for first submission")

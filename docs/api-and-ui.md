@@ -37,6 +37,10 @@
   毛盈亏及扣除剩余开仓费后的预计净盈亏。
 - `POST /api/trades/positions/{uuid}/close/confirm`：要求显式 `confirmed=true`、UUID
   `Idempotency-Key`、全局 `ready` 及未变化的仓位/行情指纹；只持久化 `planned` 平仓意图。
+- 同一平仓预览请求可显式设置 `emergency=true` 和最高 `0.25` 的紧急保护滑点。紧急预览仍要求价格
+  不超过 15 秒、双腿盘口可完整覆盖仓位和规则完整，但可在资金费历史 `warming/stale` 时使用；确认
+  会把全局执行保持为 `paused`，随后仅该带持久化紧急标记的配对平仓可在暂停状态执行。普通平仓仍限
+  `0.1` 滑点、healthy 机会及全局 `ready`。
 - `GET /api/automation`：读取独立于账户执行状态的自动交易状态、当前生效策略和最新草稿版本。
 - `PUT /api/automation/config`：保存新的不可变完整策略版本；不会自动启用或修改旧版本。
 - `POST /api/automation/enable`：要求策略 UUID、`confirmed=true`、全局执行 `ready`，并确认所有目标

@@ -363,6 +363,83 @@ async def test_live_close_requires_position_bound_preview_and_confirmation() -> 
     await database.close()
 
 
+async def test_emergency_close_allows_degraded_quote_and_pauses_execution() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    service = ScannerService(database, {})
+    await service.initialize()
+    service.opportunities["binance:BTC"] = opportunity().model_copy(
+        update={"quality": Quality.WARMING}
+    )
+    service.pairs[Exchange.BINANCE] = [instrument_pair()]
+    credentials = CredentialService(
+        database,
+        SecretCipher(SecretCipher.generate_key()),
+    )
+    await credentials.save(
+        exchange=Exchange.BINANCE,
+        environment=ExchangeEnvironment.LIVE,
+        label="primary",
+        secrets=ExchangeSecrets(
+            api_key="test-api-key",
+            api_secret="test-api-secret",
+        ),
+        actor="test",
+    )
+    position_id = await create_live_position(database)
+    app = create_app(
+        service,
+        manage_lifecycle=False,
+        auth_required=False,
+        credential_service=credentials,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        normal = await client.post(
+            f"/api/trades/positions/{position_id}/close/preview",
+            json={"maximum_slippage": "0.2"},
+        )
+        assert normal.status_code == 409
+
+        preview_response = await client.post(
+            f"/api/trades/positions/{position_id}/close/preview",
+            json={
+                "emergency": True,
+                "maximum_slippage": "0.2",
+            },
+        )
+        assert preview_response.status_code == 200, preview_response.text
+        preview = preview_response.json()["preview"]
+        assert preview["emergency"] is True
+        assert Decimal(preview["maximum_slippage"]) == Decimal("0.2")
+        stored_preview = await database.trade_preview(
+            preview_response.json()["preview_id"]
+        )
+        assert stored_preview is not None
+        assert stored_preview.emergency is True
+        assert stored_preview.maximum_slippage.quantize(
+            Decimal("0.000000000001")
+        ) == Decimal("0.2")
+
+        confirmed = await client.post(
+            f"/api/trades/positions/{position_id}/close/confirm",
+            headers={"Idempotency-Key": str(uuid.uuid4())},
+            json={
+                "preview_id": preview_response.json()["preview_id"],
+                "confirmed": True,
+            },
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        assert confirmed.json()["intent"]["emergency"] is True
+        assert confirmed.json()["intent"]["action"] == "close"
+    control = await database.execution_control()
+    assert control is not None
+    assert control.state == "paused"
+    assert "emergency paired close" in control.reason
+    await database.close()
+
+
 async def test_live_confirmation_rejects_changed_market() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     service = ScannerService(database, {})
