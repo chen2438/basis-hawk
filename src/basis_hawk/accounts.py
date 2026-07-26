@@ -1542,12 +1542,38 @@ class BitgetAccountClient(PrivateAccountClient):
         params = _ordered(params)
         query = _query(params)
         request_path = f"{path}?{query}" if query else path
+        return await _json_request(
+            self.http,
+            "GET",
+            path,
+            params=params,
+            headers=self._headers("GET", request_path),
+        )
+
+    async def _post(self, path: str, **values: object) -> Any:
+        body = _ordered(values)
+        content = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+        return await _json_request(
+            self.http,
+            "POST",
+            path,
+            content=content,
+            headers=self._headers("POST", path, body=content),
+        )
+
+    def _headers(
+        self,
+        method: str,
+        request_path: str,
+        *,
+        body: str = "",
+    ) -> dict[str, str]:
         timestamp = str(self.clock_ms())
         headers = {
             "ACCESS-KEY": self.secrets.api_key,
             "ACCESS-SIGN": _hmac_base64(
                 self.secrets.api_secret,
-                f"{timestamp}GET{request_path}",
+                f"{timestamp}{method}{request_path}{body}",
             ),
             "ACCESS-PASSPHRASE": self.secrets.passphrase or "",
             "ACCESS-TIMESTAMP": timestamp,
@@ -1555,7 +1581,7 @@ class BitgetAccountClient(PrivateAccountClient):
         }
         if self.environment == ExchangeEnvironment.SANDBOX:
             headers["paptrading"] = "1"
-        return await _json_request(self.http, "GET", path, params=params, headers=headers)
+        return headers
 
     async def snapshot(self) -> AccountSnapshot:
         spot, perp = await _gather(
@@ -1687,7 +1713,7 @@ class BitgetAccountClient(PrivateAccountClient):
                 ),
                 market=market,
                 symbol=str(item.get("symbol") or symbol),
-                side=str(item.get("side") or "").lower(),
+                side=_bitget_side(item, market=market),
                 quantity=Decimal(
                     str(
                         item.get("size")
@@ -1747,6 +1773,213 @@ class BitgetAccountClient(PrivateAccountClient):
         return RemoteOrderLookup(
             order=_bitget_order(items[0], market=market) if items else None,
             complete=True,
+        )
+
+    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
+        if not re.fullmatch(r"[A-Za-z0-9_:#\-+]{1,32}", order.client_order_id):
+            raise ValueError(
+                "Bitget client order IDs must be at most 32 supported ASCII characters"
+            )
+        values: dict[str, object] = {
+            "symbol": order.symbol,
+            "side": order.side,
+            "orderType": "limit",
+            "force": "ioc",
+            "price": format(order.limit_price, "f"),
+            "size": format(order.quantity, "f"),
+            "clientOid": order.client_order_id,
+        }
+        path = "/api/v2/spot/trade/place-order"
+        if order.market == "perp":
+            path = "/api/v2/mix/order/place-order"
+            values.update(
+                {
+                    "productType": "USDT-FUTURES",
+                    "marginMode": "isolated",
+                    "marginCoin": "USDT",
+                }
+            )
+            if order.position_mode == PositionMode.HEDGE:
+                values["side"] = "sell"
+                values["tradeSide"] = "close" if order.reduce_only else "open"
+            else:
+                values["reduceOnly"] = "YES" if order.reduce_only else "NO"
+        payload = await self._post(path, **values)
+        result = _bitget_result(payload, "order submission")
+        result_client_id = str(result.get("clientOid") or order.client_order_id)
+        if not result_client_id:
+            raise PrivateRequestError(
+                "Bitget order submission returned no client order ID"
+            )
+        return OrderSubmission(
+            market=order.market,
+            symbol=order.symbol,
+            client_order_id=result_client_id,
+            exchange_order_id=(
+                str(result["orderId"]) if result.get("orderId") else None
+            ),
+        )
+
+    async def cancel_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+    ) -> OrderCancellation:
+        if exchange_order_id is None and client_order_id is None:
+            raise ValueError("an exchange or client order ID is required")
+        values: dict[str, object] = {"symbol": symbol}
+        path = "/api/v2/spot/trade/cancel-order"
+        if market == "perp":
+            path = "/api/v2/mix/order/cancel-order"
+            values.update(
+                {"productType": "USDT-FUTURES", "marginCoin": "USDT"}
+            )
+        if exchange_order_id is not None:
+            values["orderId"] = exchange_order_id
+        else:
+            values["clientOid"] = client_order_id or ""
+        payload = await self._post(path, **values)
+        result = _bitget_result(payload, "order cancellation")
+        result_order_id = (
+            str(result["orderId"]) if result.get("orderId") else exchange_order_id
+        )
+        result_client_id = (
+            str(result["clientOid"]) if result.get("clientOid") else client_order_id
+        )
+        if result_order_id is None and result_client_id is None:
+            raise PrivateRequestError(
+                "Bitget order cancellation returned no order identifier"
+            )
+        return OrderCancellation(
+            market=market,
+            symbol=symbol,
+            client_order_id=result_client_id,
+            exchange_order_id=result_order_id,
+            accepted=True,
+        )
+
+    async def configure_perp(
+        self,
+        *,
+        symbol: str,
+        leverage: int,
+        position_mode: PositionMode,
+    ) -> PerpConfiguration:
+        if leverage < 1 or leverage > 10:
+            raise ValueError("leverage must be between 1 and 10")
+        if position_mode == PositionMode.UNKNOWN:
+            raise ValueError("position mode must be known before configuration")
+        account = await self._get(
+            "/api/v2/mix/account/account",
+            symbol=symbol,
+            productType="USDT-FUTURES",
+            marginCoin="USDT",
+        )
+        _bitget_success(account)
+        details = account.get("data") or {}
+        detected_mode = (
+            PositionMode.HEDGE
+            if details.get("posMode") == "hedge_mode"
+            else PositionMode.ONE_WAY
+            if details.get("posMode") == "one_way_mode"
+            else PositionMode.UNKNOWN
+        )
+        if detected_mode != position_mode:
+            raise PrivateRequestError(
+                "Bitget position mode does not match the requested configuration"
+            )
+        if (
+            str(details.get("marginMode") or "").lower() == "isolated"
+            and Decimal(str(details.get("isolatedShortLever") or "0"))
+            == Decimal(leverage)
+        ):
+            return PerpConfiguration(
+                symbol=symbol,
+                leverage=leverage,
+                isolated=True,
+                position_mode=position_mode,
+            )
+        pending, positions = await _gather(
+            self._get(
+                "/api/v2/mix/order/orders-pending",
+                symbol=symbol,
+                productType="USDT-FUTURES",
+                limit=100,
+            ),
+            self._get(
+                "/api/v2/mix/position/all-position",
+                productType="USDT-FUTURES",
+                marginCoin="USDT",
+            ),
+        )
+        _bitget_success(pending)
+        _bitget_success(positions)
+        pending_data = pending.get("data") or {}
+        open_orders = pending_data.get("entrustedList") or []
+        has_position = any(
+            str(item.get("symbol") or "") == symbol
+            and Decimal(str(item.get("total") or "0")) != 0
+            for item in positions.get("data") or []
+        )
+        if open_orders or has_position:
+            raise PrivateRequestError(
+                "cannot change Bitget margin or leverage with open orders or positions"
+            )
+        if str(details.get("marginMode") or "").lower() != "isolated":
+            switched = await self._post(
+                "/api/v2/mix/account/set-margin-mode",
+                symbol=symbol,
+                productType="USDT-FUTURES",
+                marginCoin="USDT",
+                marginMode="isolated",
+            )
+            switch_result = _bitget_result(switched, "margin mode configuration")
+            if str(switch_result.get("marginMode") or "").lower() != "isolated":
+                raise PrivateRequestError(
+                    "Bitget isolated margin configuration was not confirmed"
+                )
+        configured = await self._post(
+            "/api/v2/mix/account/set-leverage",
+            symbol=symbol,
+            productType="USDT-FUTURES",
+            marginCoin="USDT",
+            leverage=str(leverage),
+        )
+        leverage_result = _bitget_result(configured, "leverage configuration")
+        if (
+            Decimal(str(leverage_result.get("shortLeverage") or "0"))
+            != Decimal(leverage)
+            or str(leverage_result.get("marginMode") or "").lower() != "isolated"
+        ):
+            raise PrivateRequestError(
+                "Bitget leverage configuration was not confirmed"
+            )
+        confirmed = await self._get(
+            "/api/v2/mix/account/account",
+            symbol=symbol,
+            productType="USDT-FUTURES",
+            marginCoin="USDT",
+        )
+        _bitget_success(confirmed)
+        confirmed_details = confirmed.get("data") or {}
+        if (
+            str(confirmed_details.get("marginMode") or "").lower() != "isolated"
+            or Decimal(
+                str(confirmed_details.get("isolatedShortLever") or "0")
+            )
+            != Decimal(leverage)
+        ):
+            raise PrivateRequestError(
+                "Bitget isolated leverage was not confirmed by account state"
+            )
+        return PerpConfiguration(
+            symbol=symbol,
+            leverage=leverage,
+            isolated=True,
+            position_mode=position_mode,
         )
 
     async def close(self) -> None:
@@ -2336,6 +2569,21 @@ def _bitget_success(payload: Any) -> None:
         raise PrivateRequestError("Bitget private account request was rejected")
 
 
+def _bitget_result(payload: Any, action: str) -> dict[str, Any]:
+    _bitget_success(payload)
+    result = payload.get("data")
+    if not isinstance(result, dict):
+        raise PrivateRequestError(f"Bitget {action} returned no result")
+    return result
+
+
+def _bitget_side(item: dict[str, Any], *, market: str) -> str:
+    side = str(item.get("side") or "").lower()
+    if market == "perp" and str(item.get("tradeSide") or "").lower() == "close":
+        return "buy" if side == "sell" else "sell"
+    return side
+
+
 def _optional_decimal(value: object) -> Decimal | None:
     if value in (None, ""):
         return None
@@ -2465,14 +2713,17 @@ def _bitget_order(item: dict[str, Any], *, market: str) -> RemoteOrder:
         client_order_id=str(item["clientOid"]) if item.get("clientOid") else None,
         market=market,
         symbol=str(item.get("symbol") or ""),
-        side=str(item.get("side") or "").lower(),
+        side=_bitget_side(item, market=market),
         status=str(item.get("status") or item.get("state") or ""),
         price=Decimal(str(item.get("priceAvg") or item.get("price") or "0")),
         original_quantity=Decimal(str(item.get("size") or "0")),
         filled_quantity=Decimal(
             str(item.get("baseVolume") or item.get("filledQty") or "0")
         ),
-        reduce_only=str(item.get("reduceOnly") or "").lower() == "yes",
+        reduce_only=(
+            str(item.get("reduceOnly") or "").lower() == "yes"
+            or str(item.get("tradeSide") or "").lower() == "close"
+        ),
     )
 
 

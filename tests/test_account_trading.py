@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from basis_hawk.accounts import (
     BinanceAccountClient,
+    BitgetAccountClient,
     BybitAccountClient,
     LimitIocOrder,
     OkxAccountClient,
@@ -922,5 +923,326 @@ async def test_bybit_rejects_invalid_client_ids_and_missing_order_ack() -> None:
 
     valid = invalid.model_copy(update={"client_order_id": "bh-order"})
     with pytest.raises(PrivateRequestError, match="no order ID"):
+        await client.place_limit_ioc(valid)
+    await http.aclose()
+
+
+async def test_bitget_places_spot_and_hedge_mode_perp_ioc_orders() -> None:
+    requests: list[tuple[str, dict[str, object], httpx.Headers]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        raw = json.loads(body)
+        requests.append((request.url.path, raw, request.headers))
+        assert request.headers["ACCESS-SIGN"] == _hmac_base64(
+            SECRETS.api_secret,
+            f"1785088000000POST{request.url.path}{body}",
+        )
+        return httpx.Response(
+            200,
+            json={
+                "code": "00000",
+                "data": {
+                    "orderId": str(701 + len(requests)),
+                    "clientOid": raw["clientOid"],
+                },
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://bitget.test",
+    )
+    client = BitgetAccountClient(
+        SECRETS,
+        ExchangeEnvironment.SANDBOX,
+        clock_ms=lambda: 1_785_088_000_000,
+        client=http,
+    )
+
+    spot = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="spot",
+            symbol="ORDERUSDT",
+            side="buy",
+            quantity=Decimal("20"),
+            limit_price=Decimal("0.05"),
+            client_order_id="bh-open-spot",
+        )
+    )
+    open_short = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="perp",
+            symbol="ORDERUSDT",
+            side="sell",
+            quantity=Decimal("20"),
+            limit_price=Decimal("0.051"),
+            client_order_id="bh-open-perp",
+            position_mode=PositionMode.HEDGE,
+        )
+    )
+    close_short = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="perp",
+            symbol="ORDERUSDT",
+            side="buy",
+            quantity=Decimal("20"),
+            limit_price=Decimal("0.052"),
+            client_order_id="bh-close-perp",
+            reduce_only=True,
+            position_mode=PositionMode.HEDGE,
+        )
+    )
+
+    assert spot.exchange_order_id == "702"
+    assert open_short.exchange_order_id == "703"
+    assert close_short.exchange_order_id == "704"
+    assert requests[0][1] == {
+        "clientOid": "bh-open-spot",
+        "force": "ioc",
+        "orderType": "limit",
+        "price": "0.05",
+        "side": "buy",
+        "size": "20",
+        "symbol": "ORDERUSDT",
+    }
+    assert requests[0][2]["paptrading"] == "1"
+    assert requests[1][1]["marginMode"] == "isolated"
+    assert requests[1][1]["side"] == "sell"
+    assert requests[1][1]["tradeSide"] == "open"
+    assert "reduceOnly" not in requests[1][1]
+    assert requests[2][1]["side"] == "sell"
+    assert requests[2][1]["tradeSide"] == "close"
+    await http.aclose()
+
+
+async def test_bitget_one_way_reduce_only_recovers_missing_order_id_and_cancels() -> None:
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raw = json.loads(request.content.decode())
+        requests.append((request.url.path, raw))
+        if request.url.path.endswith("/place-order"):
+            data = {"clientOid": raw["clientOid"]}
+        else:
+            data = {"orderId": "801", "clientOid": raw.get("clientOid", "")}
+        return httpx.Response(200, json={"code": "00000", "data": data})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://bitget.test",
+    )
+    client = BitgetAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    order = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="perp",
+            symbol="ORDERUSDT",
+            side="buy",
+            quantity=Decimal("20"),
+            limit_price=Decimal("0.051"),
+            client_order_id="bh-close-perp",
+            reduce_only=True,
+            position_mode=PositionMode.ONE_WAY,
+        )
+    )
+    canceled = await client.cancel_order(
+        market="perp",
+        symbol="ORDERUSDT",
+        exchange_order_id=order.exchange_order_id,
+        client_order_id=order.client_order_id,
+    )
+
+    assert order.exchange_order_id is None
+    assert requests[0][1]["side"] == "buy"
+    assert requests[0][1]["reduceOnly"] == "YES"
+    assert requests[1] == (
+        "/api/v2/mix/order/cancel-order",
+        {
+            "clientOid": "bh-close-perp",
+            "marginCoin": "USDT",
+            "productType": "USDT-FUTURES",
+            "symbol": "ORDERUSDT",
+        },
+    )
+    assert canceled.accepted is True
+    assert canceled.exchange_order_id == "801"
+    await http.aclose()
+
+
+async def test_bitget_safely_sets_isolated_margin_and_leverage() -> None:
+    margin_mode = "crossed"
+    current_leverage = "1"
+    requests: list[tuple[str, str, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal margin_mode, current_leverage
+        raw = (
+            json.loads(request.content.decode())
+            if request.method == "POST"
+            else dict(request.url.params)
+        )
+        requests.append((request.method, request.url.path, raw))
+        if request.url.path.endswith("/account/account"):
+            data: object = {
+                "marginMode": margin_mode,
+                "posMode": "hedge_mode",
+                "isolatedShortLever": current_leverage,
+            }
+        elif request.url.path.endswith("/orders-pending"):
+            data = {"entrustedList": []}
+        elif request.url.path.endswith("/all-position"):
+            data = []
+        elif request.url.path.endswith("/set-margin-mode"):
+            margin_mode = "isolated"
+            data = {
+                "symbol": "ORDERUSDT",
+                "marginMode": "isolated",
+                "shortLeverage": current_leverage,
+            }
+        else:
+            current_leverage = str(raw["leverage"])
+            data = {
+                "symbol": "ORDERUSDT",
+                "marginMode": "isolated",
+                "shortLeverage": current_leverage,
+            }
+        return httpx.Response(200, json={"code": "00000", "data": data})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://bitget.test",
+    )
+    client = BitgetAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    result = await client.configure_perp(
+        symbol="ORDERUSDT",
+        leverage=3,
+        position_mode=PositionMode.HEDGE,
+    )
+
+    assert result.isolated is True
+    assert result.leverage == 3
+    margin_request = next(
+        item for item in requests if item[1].endswith("/set-margin-mode")
+    )
+    assert margin_request[2]["marginMode"] == "isolated"
+    leverage_request = next(
+        item for item in requests if item[1].endswith("/set-leverage")
+    )
+    assert leverage_request[2] == {
+        "leverage": "3",
+        "marginCoin": "USDT",
+        "productType": "USDT-FUTURES",
+        "symbol": "ORDERUSDT",
+    }
+    with pytest.raises(ValueError, match="between 1 and 10"):
+        await client.configure_perp(
+            symbol="ORDERUSDT",
+            leverage=11,
+            position_mode=PositionMode.HEDGE,
+        )
+    await http.aclose()
+
+
+async def test_bitget_reuses_matching_configuration_and_refuses_exposure() -> None:
+    current_leverage = "3"
+    has_position = False
+    mutations: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            mutations.append(request.url.path)
+        if request.url.path.endswith("/account/account"):
+            data: object = {
+                "marginMode": "isolated",
+                "posMode": "one_way_mode",
+                "isolatedShortLever": current_leverage,
+            }
+        elif request.url.path.endswith("/orders-pending"):
+            data = {"entrustedList": []}
+        else:
+            data = (
+                [{"symbol": "ORDERUSDT", "total": "20"}]
+                if has_position
+                else []
+            )
+        return httpx.Response(200, json={"code": "00000", "data": data})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://bitget.test",
+    )
+    client = BitgetAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    result = await client.configure_perp(
+        symbol="ORDERUSDT",
+        leverage=3,
+        position_mode=PositionMode.ONE_WAY,
+    )
+    assert result.leverage == 3
+    assert mutations == []
+
+    current_leverage = "2"
+    has_position = True
+    with pytest.raises(PrivateRequestError, match="open orders or positions"):
+        await client.configure_perp(
+            symbol="ORDERUSDT",
+            leverage=3,
+            position_mode=PositionMode.ONE_WAY,
+        )
+    assert mutations == []
+    await http.aclose()
+
+
+async def test_bitget_normalizes_hedge_close_and_rejects_bad_ack() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "code": "00000",
+                    "data": {
+                        "symbol": "ORDERUSDT",
+                        "orderId": "901",
+                        "clientOid": "bh-close-perp",
+                        "price": "0.051",
+                        "size": "20",
+                        "baseVolume": "0",
+                        "side": "sell",
+                        "tradeSide": "close",
+                        "state": "live",
+                    },
+                },
+            )
+        return httpx.Response(200, json={"code": "00000", "data": None})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://bitget.test",
+    )
+    client = BitgetAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    lookup = await client.order_by_client_id(
+        market="perp",
+        symbol="ORDERUSDT",
+        client_order_id="bh-close-perp",
+    )
+    assert lookup.order is not None
+    assert lookup.order.side == "buy"
+    assert lookup.order.reduce_only is True
+
+    invalid = LimitIocOrder(
+        market="spot",
+        symbol="ORDERUSDT",
+        side="buy",
+        quantity=Decimal("20"),
+        limit_price=Decimal("0.05"),
+        client_order_id="invalid.client.id",
+    )
+    with pytest.raises(ValueError, match="supported ASCII"):
+        await client.place_limit_ioc(invalid)
+    valid = invalid.model_copy(update={"client_order_id": "bh-order"})
+    with pytest.raises(PrivateRequestError, match="no result"):
         await client.place_limit_ioc(valid)
     await http.aclose()
