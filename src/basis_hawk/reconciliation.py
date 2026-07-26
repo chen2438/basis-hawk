@@ -17,6 +17,7 @@ from basis_hawk.credentials import (
 )
 from basis_hawk.models import Exchange
 from basis_hawk.storage import Database
+from basis_hawk.trading import PaperExecutionService
 
 
 class ReconciliationResult(BaseModel):
@@ -42,12 +43,15 @@ class ReconciliationService:
             [Exchange, ExchangeSecrets, ExchangeEnvironment],
             PrivateAccountClient,
         ] = create_account_client,
+        paper_executor: PaperExecutionService | None = None,
     ) -> None:
         self.database = database
         self.credentials = credentials
         self.account_client_factory = account_client_factory
+        self.paper_executor = paper_executor or PaperExecutionService(database)
 
     async def run_once(self) -> ReconciliationResult:
+        await self.paper_executor.run_once()
         await self.database.set_execution_control(
             state="reconciling",
             reason="startup account reconciliation is running",

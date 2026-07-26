@@ -9,6 +9,7 @@ from basis_hawk.api import create_app
 from basis_hawk.models import Exchange, Opportunity, Quality
 from basis_hawk.service import ScannerService
 from basis_hawk.storage import Database
+from basis_hawk.trading import PaperExecutionService
 
 
 def opportunity() -> Opportunity:
@@ -87,6 +88,12 @@ async def test_rest_contract_and_settings() -> None:
         assert fetched.json()["intent"]["legs"][0]["client_order_id"].startswith(
             "bh-"
         )
+        result = await PaperExecutionService(database).run_once()
+        assert result.executed == 1
+        fills = await client.get(f"/api/trades/intents/{intent_id}/fills")
+        assert len(fills.json()["items"]) == 2
+        positions = await client.get("/api/trades/positions", params={"status": "open"})
+        assert positions.json()["items"][0]["opening_intent_id"] == intent_id
     await database.close()
 
 

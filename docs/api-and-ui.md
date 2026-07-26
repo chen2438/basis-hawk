@@ -20,8 +20,10 @@
 - `GET /api/system/execution`：读取 worker 的全局执行阻断状态，以及各账户最近一次启动对账状态、
   远端结果完整性、挂单数和仓位数。
 - `POST /api/trades/paper/open`：使用当前健康机会持久化纸面开仓意图和现货买入/永续卖出双腿；
-  必须提供 UUID `Idempotency-Key`，目前只计划、不模拟成交。
+  必须提供 UUID `Idempotency-Key`，随后由唯一 worker 原子模拟双腿 taker 成交。
 - `GET /api/trades/intents/{uuid}`：读取交易意图、版本和双腿状态。
+- `GET /api/trades/intents/{uuid}/fills`：读取该意图的成交和手续费。
+- `GET /api/trades/positions?status=open`：读取配对仓位。
 
 写入接口只接受已认证且 CSRF 校验通过的请求。明文只在单次请求内进入内存，随后使用绑定交易所与环境的
 AES-GCM 关联数据加密；响应、审计事件和日志均不得包含 API Secret、passphrase 或完整 API Key。
@@ -41,7 +43,11 @@ Bybit 游标会读取到末页；其余接口一旦达到单页上限或交易�
 
 纸面开仓计划只接受 15 秒内的 `healthy` 行情，且名义金额不得超过当前两腿最优档容量。服务在任何执行前
 写入交易意图、配置哈希和两腿唯一客户端订单 ID；重复 UUID 加相同请求返回原意图，不同请求复用 UUID
-返回冲突。状态更新使用版本号乐观锁，禁止跳过既定状态。当前接口不会发送或模拟订单。
+返回冲突。状态更新使用版本号乐观锁，禁止跳过既定状态。当前接口不会直接成交或发送交易所订单。
+HTTP 接口本身不直接成交。纸面 worker 使用计划时保存的价格和费率，在同一事务中填满两腿、写入两条
+taker 成交并创建配对仓位；
+崩溃发生在提交前会保留 `planned` 供重试，提交后再次运行不会重复生成成交。该模型不代表真实撮合，
+不会访问交易所，也不用于实盘收益承诺。
 
 WebSocket 首帧为 `snapshot`，后续帧为带单调 `sequence` 的 `update`；客户端发现序号断层或重连时重新读取 REST 快照。
 

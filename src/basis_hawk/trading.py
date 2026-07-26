@@ -10,7 +10,13 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, field_serializer
 
 from basis_hawk.models import Exchange, Opportunity, Quality, ScannerSettings
-from basis_hawk.storage import Database, OrderLegRow, TradeIntentRow
+from basis_hawk.storage import (
+    Database,
+    FillRow,
+    OrderLegRow,
+    PairedPositionRow,
+    TradeIntentRow,
+)
 
 
 class TradeIntentStatus(StrEnum):
@@ -87,6 +93,8 @@ class TradeIntentView(BaseModel):
     status: TradeIntentStatus
     requested_notional: Decimal
     base_quantity: Decimal
+    spot_fee_rate: Decimal
+    perp_fee_rate: Decimal
     market_observed_at: datetime
     config_version: str
     version: int
@@ -94,9 +102,67 @@ class TradeIntentView(BaseModel):
     updated_at: datetime
     legs: list[OrderLegView]
 
-    @field_serializer("requested_notional", "base_quantity", when_used="json")
+    @field_serializer(
+        "requested_notional",
+        "base_quantity",
+        "spot_fee_rate",
+        "perp_fee_rate",
+        when_used="json",
+    )
     def serialize_decimal(self, value: Decimal) -> str:
         return format(value, "f")
+
+
+class FillView(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    exchange_trade_id: str
+    quantity: Decimal
+    price: Decimal
+    fee_amount: Decimal
+    fee_asset: str
+    liquidity: str
+    occurred_at: datetime
+
+    @field_serializer("quantity", "price", "fee_amount", when_used="json")
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+
+class PairedPositionView(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    opening_intent_id: str
+    closing_intent_id: str | None
+    exchange: Exchange
+    environment: str
+    base_asset: str
+    quantity: Decimal
+    spot_entry_price: Decimal
+    perp_entry_price: Decimal
+    opening_fees_usdt: Decimal
+    status: str
+    opened_at: datetime
+    closed_at: datetime | None
+
+    @field_serializer(
+        "quantity",
+        "spot_entry_price",
+        "perp_entry_price",
+        "opening_fees_usdt",
+        when_used="json",
+    )
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+
+class PaperExecutionResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    examined: int
+    executed: int
 
 
 TRANSITIONS: dict[TradeIntentStatus, set[TradeIntentStatus]] = {
@@ -164,6 +230,7 @@ class TradeLedger:
             raise TradeValidationError("market prices must be positive")
 
         quantity = notional_usdt / opportunity.spot_ask
+        fees = settings.fees[opportunity.exchange]
         config_version = hashlib.sha256(
             settings.model_dump_json().encode()
         ).hexdigest()
@@ -199,6 +266,8 @@ class TradeLedger:
                 "status": TradeIntentStatus.PLANNED.value,
                 "requested_notional": notional_usdt,
                 "base_quantity": quantity,
+                "spot_fee_rate": fees.spot_taker,
+                "perp_fee_rate": fees.perp_taker,
                 "market_observed_at": opportunity.observed_at,
                 "config_version": config_version,
                 "version": 1,
@@ -273,6 +342,39 @@ class TradeLedger:
         value = await self.database.trade_intent(intent_id)
         return _view(*value) if value is not None else None
 
+    async def positions(self, *, status: str | None = None) -> list[PairedPositionView]:
+        return [
+            _position_view(item)
+            for item in await self.database.list_paired_positions(status=status)
+        ]
+
+    async def fills(self, intent_id: str) -> list[FillView]:
+        return [
+            _fill_view(item)
+            for item in await self.database.fills_for_intent(intent_id)
+        ]
+
+
+class PaperExecutionService:
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def run_once(self) -> PaperExecutionResult:
+        recoverable = await self.database.recoverable_trade_intents()
+        candidates = [
+            item
+            for item in recoverable
+            if item.environment == "paper"
+            and item.action == "open"
+            and item.status == TradeIntentStatus.PLANNED.value
+        ]
+        executed = 0
+        for item in candidates:
+            result = await self.database.execute_paper_open(intent_id=item.id)
+            if result is not None and result[2]:
+                executed += 1
+        return PaperExecutionResult(examined=len(candidates), executed=executed)
+
 
 def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:
     return TradeIntentView(
@@ -285,6 +387,8 @@ def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:
         status=TradeIntentStatus(row.status),
         requested_notional=row.requested_notional,
         base_quantity=row.base_quantity,
+        spot_fee_rate=row.spot_fee_rate,
+        perp_fee_rate=row.perp_fee_rate,
         market_observed_at=row.market_observed_at,
         config_version=row.config_version,
         version=row.version,
@@ -308,4 +412,35 @@ def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:
             )
             for item in legs
         ],
+    )
+
+
+def _fill_view(row: FillRow) -> FillView:
+    return FillView(
+        id=row.id,
+        exchange_trade_id=row.exchange_trade_id,
+        quantity=row.quantity,
+        price=row.price,
+        fee_amount=row.fee_amount,
+        fee_asset=row.fee_asset,
+        liquidity=row.liquidity,
+        occurred_at=row.occurred_at,
+    )
+
+
+def _position_view(row: PairedPositionRow) -> PairedPositionView:
+    return PairedPositionView(
+        id=row.id,
+        opening_intent_id=row.opening_intent_id,
+        closing_intent_id=row.closing_intent_id,
+        exchange=Exchange(row.exchange),
+        environment=row.environment,
+        base_asset=row.base_asset,
+        quantity=row.quantity,
+        spot_entry_price=row.spot_entry_price,
+        perp_entry_price=row.perp_entry_price,
+        opening_fees_usdt=row.opening_fees_usdt,
+        status=row.status,
+        opened_at=row.opened_at,
+        closed_at=row.closed_at,
     )

@@ -362,6 +362,27 @@ def create_app(
             raise HTTPException(status_code=404, detail="trade intent was not found")
         return {"intent": intent.model_dump(mode="json")}
 
+    @app.get("/api/trades/intents/{intent_id}/fills")
+    async def trade_fills(intent_id: UUID) -> dict[str, object]:
+        intent = await trade_ledger.get(str(intent_id))
+        if intent is None:
+            raise HTTPException(status_code=404, detail="trade intent was not found")
+        return {
+            "items": [
+                item.model_dump(mode="json")
+                for item in await trade_ledger.fills(str(intent_id))
+            ]
+        }
+
+    @app.get("/api/trades/positions")
+    async def paired_positions(status: str | None = None) -> dict[str, object]:
+        return {
+            "items": [
+                item.model_dump(mode="json")
+                for item in await trade_ledger.positions(status=status)
+            ]
+        }
+
     @app.get("/api/accounts/credentials")
     async def credential_summaries() -> dict[str, object]:
         if credential_service is None:

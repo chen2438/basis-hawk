@@ -8,6 +8,7 @@ from basis_hawk.models import Exchange, Opportunity, Quality, ScannerSettings
 from basis_hawk.storage import Database
 from basis_hawk.trading import (
     IdempotencyConflict,
+    PaperExecutionService,
     StateConflict,
     TradeIntentStatus,
     TradeLedger,
@@ -114,6 +115,39 @@ async def test_trade_state_machine_uses_optimistic_versions() -> None:
             expected_version=2,
             target=TradeIntentStatus.CLOSED,
         )
+    await database.close()
+
+
+async def test_paper_executor_atomically_fills_both_legs_and_opens_position() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = TradeLedger(database)
+    intent, _ = await ledger.plan_paper_open(
+        opportunity=_opportunity(),
+        notional_usdt=Decimal("100"),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+    executor = PaperExecutionService(database)
+
+    first = await executor.run_once()
+    repeated = await executor.run_once()
+
+    assert first.executed == 1
+    assert repeated.executed == 0
+    executed = await ledger.get(intent.id)
+    assert executed is not None
+    assert executed.status == TradeIntentStatus.HEDGED
+    assert executed.version == 2
+    assert all(leg.status == "filled" for leg in executed.legs)
+    fills = await ledger.fills(intent.id)
+    assert len(fills) == 2
+    positions = await ledger.positions(status="open")
+    assert len(positions) == 1
+    assert positions[0].quantity == Decimal("2000")
+    assert positions[0].opening_fees_usdt.quantize(Decimal("0.001")) == Decimal(
+        "0.151"
+    )
     await database.close()
 
 

@@ -222,6 +222,14 @@ class TradeIntentRow(Base):
     status: Mapped[str] = mapped_column(String(30), index=True)
     requested_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     base_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    spot_fee_rate: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        default=Decimal("0"),
+    )
+    perp_fee_rate: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        default=Decimal("0"),
+    )
     market_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     config_version: Mapped[str] = mapped_column(String(64))
     version: Mapped[int] = mapped_column(Integer, default=1)
@@ -258,6 +266,49 @@ class OrderLegRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         UniqueConstraint("trade_intent_id", "leg", name="uq_order_leg_intent_leg"),
+    )
+
+
+class FillRow(Base):
+    __tablename__ = "fills"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    order_leg_id: Mapped[str] = mapped_column(
+        ForeignKey("order_legs.id", ondelete="CASCADE"),
+        index=True,
+    )
+    exchange_trade_id: Mapped[str] = mapped_column(String(100), unique=True)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    fee_amount: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    fee_asset: Mapped[str] = mapped_column(String(40))
+    liquidity: Mapped[str] = mapped_column(String(20))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PairedPositionRow(Base):
+    __tablename__ = "paired_positions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    opening_intent_id: Mapped[str] = mapped_column(
+        ForeignKey("trade_intents.id", ondelete="RESTRICT"),
+        unique=True,
+    )
+    closing_intent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("trade_intents.id", ondelete="RESTRICT"),
+        unique=True,
+        nullable=True,
+    )
+    exchange: Mapped[str] = mapped_column(String(20), index=True)
+    environment: Mapped[str] = mapped_column(String(20))
+    base_asset: Mapped[str] = mapped_column(String(40))
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    spot_entry_price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    perp_entry_price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    opening_fees_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
 
@@ -544,6 +595,119 @@ class Database:
                 return None
             await session.commit()
             return await session.get(TradeIntentRow, intent_id)
+
+    async def execute_paper_open(
+        self,
+        *,
+        intent_id: str,
+    ) -> tuple[TradeIntentRow, PairedPositionRow, bool] | None:
+        async with self.sessions() as session:
+            intent = await session.scalar(
+                select(TradeIntentRow)
+                .where(TradeIntentRow.id == intent_id)
+                .with_for_update()
+            )
+            if intent is None:
+                return None
+            existing_position = await session.scalar(
+                select(PairedPositionRow).where(
+                    PairedPositionRow.opening_intent_id == intent.id
+                )
+            )
+            if existing_position is not None:
+                return intent, existing_position, False
+            if (
+                intent.environment != "paper"
+                or intent.action != "open"
+                or intent.status != "planned"
+            ):
+                return None
+            legs = list(
+                await session.scalars(
+                    select(OrderLegRow)
+                    .where(OrderLegRow.trade_intent_id == intent.id)
+                    .with_for_update()
+                )
+            )
+            by_leg = {item.leg: item for item in legs}
+            if set(by_leg) != {"spot", "perp"}:
+                return None
+            now = datetime.now(UTC)
+            fills: list[FillRow] = []
+            total_fees = Decimal("0")
+            for leg_name, leg in by_leg.items():
+                fee_rate = (
+                    intent.spot_fee_rate
+                    if leg_name == "spot"
+                    else intent.perp_fee_rate
+                )
+                fee = leg.quantity * leg.limit_price * fee_rate
+                total_fees += fee
+                leg.exchange_order_id = f"paper:{leg.id}"
+                leg.status = "filled"
+                leg.filled_quantity = leg.quantity
+                leg.average_price = leg.limit_price
+                leg.updated_at = now
+                fills.append(
+                    FillRow(
+                        id=str(uuid.uuid4()),
+                        order_leg_id=leg.id,
+                        exchange_trade_id=f"paper:{leg.id}:fill",
+                        quantity=leg.quantity,
+                        price=leg.limit_price,
+                        fee_amount=fee,
+                        fee_asset="USDT",
+                        liquidity="taker",
+                        occurred_at=now,
+                    )
+                )
+            quantity = min(by_leg["spot"].quantity, by_leg["perp"].quantity)
+            position = PairedPositionRow(
+                id=str(uuid.uuid4()),
+                opening_intent_id=intent.id,
+                exchange=intent.exchange,
+                environment=intent.environment,
+                base_asset=intent.base_asset,
+                quantity=quantity,
+                spot_entry_price=by_leg["spot"].limit_price,
+                perp_entry_price=by_leg["perp"].limit_price,
+                opening_fees_usdt=total_fees,
+                status="open",
+                opened_at=now,
+            )
+            intent.status = "hedged"
+            intent.version += 1
+            intent.updated_at = now
+            session.add_all(fills)
+            session.add(position)
+            await session.commit()
+            await session.refresh(intent)
+            await session.refresh(position)
+            return intent, position, True
+
+    async def list_paired_positions(
+        self, *, status: str | None = None
+    ) -> list[PairedPositionRow]:
+        async with self.sessions() as session:
+            statement = select(PairedPositionRow)
+            if status is not None:
+                statement = statement.where(PairedPositionRow.status == status)
+            return list(
+                await session.scalars(
+                    statement.order_by(PairedPositionRow.opened_at.desc())
+                )
+            )
+
+    async def fills_for_intent(self, intent_id: str) -> list[FillRow]:
+        async with self.sessions() as session:
+            return list(
+                await session.scalars(
+                    select(FillRow)
+                    .join(OrderLegRow, FillRow.order_leg_id == OrderLegRow.id)
+                    .where(OrderLegRow.trade_intent_id == intent_id)
+                    .order_by(FillRow.occurred_at, FillRow.id)
+                )
+            )
 
     async def load_settings(self) -> ScannerSettings:
         async with self.sessions() as session:
