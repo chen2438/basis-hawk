@@ -20,7 +20,7 @@
 - `GET /api/accounts/{exchange}/{sandbox|live}/snapshot`：按需解密凭据并从交易所读取 USDT
   现货可用余额、永续可用余额/权益、账户类型和持仓模式；响应仍不包含任何凭据。
 - `GET /api/system/execution`：读取 worker 的全局执行阻断状态，以及各账户最近一次启动对账状态、
-  远端结果完整性、挂单数和仓位数。
+  私有流就绪状态、远端结果完整性、挂单数和仓位数。
 - `POST /api/trades/paper/open`：使用当前健康机会持久化纸面开仓意图和现货买入/永续卖出双腿；
   必须提供 UUID `Idempotency-Key`，随后由唯一 worker 原子模拟双腿 taker 成交。
 - `GET /api/trades/intents/{uuid}`：读取交易意图、版本和双腿状态。
@@ -55,7 +55,9 @@ Bybit 游标会读取到末页；其余接口一旦达到单页上限或交易�
 公开，也尚未解除 worker 的全局阻断。worker 会对非终态真实订单腿调用该接口，校验市场、标的、方向、
 客户端 ID 和交易所订单 ID 后幂等写入本地 `fills`，再由全部成交重算订单腿累计数量、加权均价及状态。
 `GET /api/system/execution` 的账户项包含 `fill_reconciliation_complete` 和 `fill_count`；分页不完整
-或缺少必需的交易所订单 ID 时前者为 `false`。
+或缺少必需的交易所订单 ID 时前者为 `false`。账户项同时包含 `private_stream_ready`；它只在认证完成、
+订单/成交/仓位三类订阅全部成功且最近心跳不超过 30 秒时为 `true`。当前六所认证连接尚未接入，因此
+生产 worker 仍会以该字段为 `false` 保持阻断。
 六所客户端也可按客户端订单 ID 查询单笔订单。worker 对明确进入已提交状态但缺少交易所订单 ID 的
 本地订单腿执行恢复，并对已经关联但仍非终态的 IOC 持续刷新；两种情况都严格核对市场、标的、方向、
 原生数量及 reduce-only，`created` 订单不会被误当成 ACK 丢失订单。部分成交后撤销的 IOC 保留撤销

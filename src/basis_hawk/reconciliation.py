@@ -99,7 +99,15 @@ class ReconciliationService:
                     client.snapshot(),
                     client.trading_state(),
                 )
-                reasons = ["private event streams have not been connected yet"]
+                private_stream_ready = await self.database.private_stream_ready(
+                    exchange=summary.exchange.value,
+                    environment=summary.environment.value,
+                )
+                reasons = []
+                if not private_stream_ready:
+                    reasons.append(
+                        "private event stream is disconnected, incomplete, or stale"
+                    )
                 order_reconciliation_complete = True
                 recovered_order_count = 0
                 fill_reconciliation_complete = True
@@ -228,6 +236,7 @@ class ReconciliationService:
                     recovered_order_count=recovered_order_count,
                     fill_reconciliation_complete=fill_reconciliation_complete,
                     fill_count=fill_count,
+                    private_stream_ready=private_stream_ready,
                 )
                 blocked += 1
             except Exception:

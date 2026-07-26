@@ -231,6 +231,7 @@ async def test_startup_reconciliation_persists_snapshot_but_keeps_execution_bloc
     assert states[0].status == "blocked"
     assert states[0].snapshot_id is not None
     assert states[0].trading_state_complete is True
+    assert states[0].private_stream_ready is False
     assert states[0].open_order_count == 1
     assert states[0].position_count == 1
     assert "local intent" in states[0].reason

@@ -178,11 +178,36 @@ class AccountReconciliationRow(Base):
         Boolean,
         default=False,
     )
+    private_stream_ready: Mapped[bool] = mapped_column(Boolean, default=False)
     open_order_count: Mapped[int] = mapped_column(Integer, default=0)
     position_count: Mapped[int] = mapped_column(Integer, default=0)
     fill_count: Mapped[int] = mapped_column(Integer, default=0)
     recovered_order_count: Mapped[int] = mapped_column(Integer, default=0)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PrivateStreamStateRow(Base):
+    __tablename__ = "private_stream_states"
+    exchange: Mapped[str] = mapped_column(String(20), primary_key=True)
+    environment: Mapped[str] = mapped_column(String(20), primary_key=True)
+    connected: Mapped[bool] = mapped_column(Boolean, default=False)
+    authenticated: Mapped[bool] = mapped_column(Boolean, default=False)
+    orders_subscribed: Mapped[bool] = mapped_column(Boolean, default=False)
+    fills_subscribed: Mapped[bool] = mapped_column(Boolean, default=False)
+    positions_subscribed: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    last_event_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    disconnected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class RemoteOpenOrderSnapshotRow(Base):
@@ -446,6 +471,7 @@ class Database:
         recovered_order_count: int = 0,
         fill_reconciliation_complete: bool = False,
         fill_count: int = 0,
+        private_stream_ready: bool = False,
     ) -> None:
         async with self.sessions() as session:
             snapshot_id: str | None = None
@@ -518,6 +544,7 @@ class Database:
                     trading_state_complete=state_complete,
                     order_reconciliation_complete=order_reconciliation_complete,
                     fill_reconciliation_complete=fill_reconciliation_complete,
+                    private_stream_ready=private_stream_ready,
                     open_order_count=open_order_count,
                     position_count=position_count,
                     fill_count=fill_count,
@@ -532,6 +559,7 @@ class Database:
                 row.trading_state_complete = state_complete
                 row.order_reconciliation_complete = order_reconciliation_complete
                 row.fill_reconciliation_complete = fill_reconciliation_complete
+                row.private_stream_ready = private_stream_ready
                 row.open_order_count = open_order_count
                 row.position_count = position_count
                 row.fill_count = fill_count
@@ -561,6 +589,116 @@ class Database:
     async def execution_control(self) -> ExecutionControlRow | None:
         async with self.sessions() as session:
             return await session.get(ExecutionControlRow, 1)
+
+    async def set_private_stream_state(
+        self,
+        *,
+        exchange: str,
+        environment: str,
+        connected: bool,
+        authenticated: bool,
+        orders_subscribed: bool,
+        fills_subscribed: bool,
+        positions_subscribed: bool,
+        heartbeat: bool = False,
+        event: bool = False,
+    ) -> None:
+        async with self.sessions() as session:
+            now = datetime.now(UTC)
+            row = await session.get(
+                PrivateStreamStateRow,
+                {"exchange": exchange, "environment": environment},
+            )
+            if row is None:
+                row = PrivateStreamStateRow(
+                    exchange=exchange,
+                    environment=environment,
+                    connected=connected,
+                    authenticated=authenticated,
+                    orders_subscribed=orders_subscribed,
+                    fills_subscribed=fills_subscribed,
+                    positions_subscribed=positions_subscribed,
+                    last_heartbeat_at=now if heartbeat else None,
+                    last_event_at=now if event else None,
+                    disconnected_at=None if connected else now,
+                    updated_at=now,
+                )
+                session.add(row)
+            else:
+                row.connected = connected
+                row.authenticated = authenticated
+                row.orders_subscribed = orders_subscribed
+                row.fills_subscribed = fills_subscribed
+                row.positions_subscribed = positions_subscribed
+                if heartbeat:
+                    row.last_heartbeat_at = now
+                if event:
+                    row.last_event_at = now
+                row.disconnected_at = None if connected else now
+                row.updated_at = now
+            if not connected:
+                control = await session.get(ExecutionControlRow, 1)
+                if control is not None and control.state == "ready":
+                    control.state = "paused"
+                    control.reason = (
+                        "private account event stream disconnected; "
+                        "REST reconciliation is required"
+                    )
+                    control.updated_at = now
+            await session.commit()
+
+    async def private_stream_state(
+        self,
+        *,
+        exchange: str,
+        environment: str,
+    ) -> PrivateStreamStateRow | None:
+        async with self.sessions() as session:
+            return await session.get(
+                PrivateStreamStateRow,
+                {"exchange": exchange, "environment": environment},
+            )
+
+    async def private_stream_ready(
+        self,
+        *,
+        exchange: str,
+        environment: str,
+        maximum_heartbeat_age_seconds: int = 30,
+    ) -> bool:
+        row = await self.private_stream_state(
+            exchange=exchange,
+            environment=environment,
+        )
+        if row is None or row.last_heartbeat_at is None:
+            return False
+        heartbeat = _utc(row.last_heartbeat_at)
+        return (
+            row.connected
+            and row.authenticated
+            and row.orders_subscribed
+            and row.fills_subscribed
+            and row.positions_subscribed
+            and heartbeat
+            >= datetime.now(UTC)
+            - timedelta(seconds=maximum_heartbeat_age_seconds)
+        )
+
+    async def reset_private_stream_states(self) -> None:
+        async with self.sessions() as session:
+            now = datetime.now(UTC)
+            await session.execute(
+                update(PrivateStreamStateRow).values(
+                    connected=False,
+                    authenticated=False,
+                    orders_subscribed=False,
+                    fills_subscribed=False,
+                    positions_subscribed=False,
+                    disconnected_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
 
     async def reconciliation_states(self) -> list[AccountReconciliationRow]:
         async with self.sessions() as session:

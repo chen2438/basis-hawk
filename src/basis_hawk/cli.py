@@ -91,6 +91,7 @@ async def run_worker(*, once: bool) -> int:
         return 1
     database = Database(config.database_url)
     await database.initialize()
+    await database.reset_private_stream_states()
     credentials = CredentialService(
         database,
         SecretCipher(config.credential_master_key.get_secret_value()),

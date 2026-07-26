@@ -308,6 +308,7 @@ def create_app(
                     "fill_reconciliation_complete": (
                         item.fill_reconciliation_complete
                     ),
+                    "private_stream_ready": item.private_stream_ready,
                     "open_order_count": item.open_order_count,
                     "position_count": item.position_count,
                     "fill_count": item.fill_count,
