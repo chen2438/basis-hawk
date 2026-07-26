@@ -21,6 +21,8 @@ from basis_hawk.exchanges import (
     OkxAdapter,
 )
 from basis_hawk.models import Exchange
+from basis_hawk.private_stream import PrivateStreamRegistry, PrivateStreamSupervisor
+from basis_hawk.private_stream_factory import create_private_stream_connections
 from basis_hawk.reconciliation import ReconciliationService, WorkerLockUnavailable
 from basis_hawk.storage import Database
 
@@ -119,7 +121,21 @@ async def run_worker(*, once: bool) -> int:
                 f"execution={result.execution_state}"
             )
             return 0
-        await reconciler.run_forever()
+        connections = await create_private_stream_connections(
+            credentials,
+            timeout_seconds=config.http_timeout_seconds,
+        )
+        supervisor = PrivateStreamSupervisor(PrivateStreamRegistry(database))
+        tasks = [
+            asyncio.create_task(supervisor.run(connections)),
+            asyncio.create_task(reconciler.run_forever()),
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
     except WorkerLockUnavailable as exc:
         print(f"worker: {exc}")
         return 1
