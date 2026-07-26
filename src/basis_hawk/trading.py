@@ -65,6 +65,7 @@ class OrderLegView(BaseModel):
     exchange_order_id: str | None
     status: OrderLegStatus
     quantity: Decimal
+    base_multiplier: Decimal
     limit_price: Decimal
     filled_quantity: Decimal
     average_price: Decimal | None
@@ -72,6 +73,7 @@ class OrderLegView(BaseModel):
 
     @field_serializer(
         "quantity",
+        "base_multiplier",
         "limit_price",
         "filled_quantity",
         "average_price",
@@ -689,6 +691,7 @@ def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:
                 exchange_order_id=item.exchange_order_id,
                 status=OrderLegStatus(item.status),
                 quantity=item.quantity,
+                base_multiplier=item.base_multiplier,
                 limit_price=item.limit_price,
                 filled_quantity=item.filled_quantity,
                 average_price=item.average_price,

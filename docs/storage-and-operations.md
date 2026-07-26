@@ -57,7 +57,9 @@ worker 定期写入 `account_snapshots`、`remote_open_order_snapshots`、
 `order_reconciliation_complete` 和本轮 `recovered_order_count`。
 
 `trade_intents` 在执行前保存幂等键、请求指纹、市场时间、配置哈希、金融数量、状态与乐观锁版本；
-`order_legs` 同一意图固定一条现货腿和一条永续腿，并在提交交易所前生成唯一客户端订单 ID。
+`order_legs` 同一意图固定一条现货腿和一条永续腿，并在提交交易所前生成唯一客户端订单 ID；每条腿还
+保存严格为正的 `base_multiplier`，使交易所原生数量及成交量可以无歧义换算成基础币。已有纸面订单腿
+迁移时乘数为 1；后续真实永续腿必须使用标的目录的合约乘数。
 非终态意图可由 worker 按创建时间恢复。纸面 worker 在单一数据库事务中更新双腿、写入 `fills` 并创建
 `paired_positions`；唯一交易 ID 和开仓意图约束保证重复运行不会重复成交。真实成交仍必须以交易所
 私有流或 REST 查询为准。

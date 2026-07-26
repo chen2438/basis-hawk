@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -277,6 +278,10 @@ class OrderLegRow(Base):
     exchange_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str] = mapped_column(String(30))
     quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    base_multiplier: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        default=Decimal("1"),
+    )
     limit_price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     filled_quantity: Mapped[Decimal] = mapped_column(
         Numeric(38, 18),
@@ -289,7 +294,13 @@ class OrderLegRow(Base):
     reduce_only: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    __table_args__ = (UniqueConstraint("trade_intent_id", "leg", name="uq_order_leg_intent_leg"),)
+    __table_args__ = (
+        UniqueConstraint("trade_intent_id", "leg", name="uq_order_leg_intent_leg"),
+        CheckConstraint(
+            "base_multiplier > 0",
+            name="ck_order_leg_base_multiplier_positive",
+        ),
+    )
 
 
 class FillRow(Base):

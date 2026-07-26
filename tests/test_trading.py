@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from basis_hawk.models import Exchange, Opportunity, Quality, ScannerSettings
 from basis_hawk.storage import Database
@@ -74,6 +75,7 @@ async def test_paper_intent_is_persisted_before_execution_and_idempotent() -> No
         ("spot", "buy"),
         ("perp", "sell"),
     }
+    assert all(leg.base_multiplier == Decimal("1") for leg in first.legs)
     assert all(leg.client_order_id.startswith("bh-") for leg in first.legs)
     assert [row.id for row in await database.recoverable_trade_intents()] == [first.id]
 
@@ -115,6 +117,67 @@ async def test_trade_state_machine_uses_optimistic_versions() -> None:
             intent_id=intent.id,
             expected_version=2,
             target=TradeIntentStatus.CLOSED,
+        )
+    await database.close()
+
+
+async def test_order_leg_rejects_non_positive_base_multiplier() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    opportunity = _opportunity()
+    ledger = TradeLedger(database)
+    intent, _ = await ledger.plan_paper_open(
+        opportunity=opportunity,
+        notional_usdt=Decimal("100"),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+    stored = await database.trade_intent(intent.id)
+    assert stored is not None
+    assert all(item.base_multiplier == Decimal("1") for item in stored[1])
+
+    now = datetime.now(UTC)
+    invalid_intent_id = str(uuid.uuid4())
+    with pytest.raises(IntegrityError):
+        await database.create_trade_intent(
+            intent={
+                "id": invalid_intent_id,
+                "idempotency_key": str(uuid.uuid4()),
+                "request_fingerprint": "a" * 64,
+                "exchange": "okx",
+                "environment": "live",
+                "base_asset": "ORDER",
+                "action": "open",
+                "status": "planned",
+                "requested_notional": Decimal("100"),
+                "base_quantity": Decimal("20"),
+                "spot_fee_rate": Decimal("0.001"),
+                "perp_fee_rate": Decimal("0.0005"),
+                "market_observed_at": now,
+                "config_version": "b" * 64,
+                "version": 1,
+                "created_at": now,
+                "updated_at": now,
+            },
+            legs=[
+                {
+                    "id": str(uuid.uuid4()),
+                    "trade_intent_id": invalid_intent_id,
+                    "leg": "perp",
+                    "market": "perp",
+                    "symbol": "ORDER-USDT-SWAP",
+                    "side": "sell",
+                    "client_order_id": "bh-invalid-multiplier",
+                    "status": "created",
+                    "quantity": Decimal("2"),
+                    "base_multiplier": Decimal("0"),
+                    "limit_price": Decimal("0.05"),
+                    "filled_quantity": Decimal("0"),
+                    "reduce_only": False,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            ],
         )
     await database.close()
 
