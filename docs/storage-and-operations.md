@@ -48,10 +48,12 @@ worker 定期写入 `account_snapshots`、`remote_open_order_snapshots`、
 写入前强制核对市场、标的、方向和订单 ID，随后从完整本地成交集合重算订单腿累计数量及加权均价。
 每个账户最近的 `fill_reconciliation_complete` 和 `fill_count` 随启动快照持久化。
 本地订单腿已经处于 `submitted`、`acknowledged`、`partially_filled` 或 `unknown`，但下单 ACK
-未能保存交易所订单 ID 时，worker 会先使用持久化的客户端订单 ID 向对应交易所查单。找回结果必须逐项
+未能保存交易所订单 ID 时，worker 会先使用持久化的客户端订单 ID 向对应交易所查单；已经有关联 ID 的
+非终态 IOC 也在每轮用同一客户端 ID 刷新终态，不能把一次 ACK 当作订单仍然活动。找回结果必须逐项
 核对客户端 ID、市场、标的、方向、原始数量和 reduce-only 标记，完全一致才允许关联
 `exchange_order_id` 并继续查询成交；单纯查单响应不会把订单标记为已成交，成交状态仍只从幂等成交账本
-推导。未找到、查询窗口受限或结果不完整时保持阻断，绝不据此重发订单。每个账户同时保存
+推导。IOC 在部分成交后撤销时，订单腿保留 `canceled` 终态及真实累计成交量，成交汇总不会把它重新改成
+活动的 `partially_filled`。未找到、查询窗口受限或结果不完整时保持阻断，绝不据此重发订单。每个账户同时保存
 `order_reconciliation_complete` 和本轮 `recovered_order_count`。
 
 `trade_intents` 在执行前保存幂等键、请求指纹、市场时间、配置哈希、金融数量、状态与乐观锁版本；

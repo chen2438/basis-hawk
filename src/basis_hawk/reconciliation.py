@@ -107,16 +107,13 @@ class ReconciliationService:
                 )
                 for leg in local_legs:
                     exchange_order_id = leg.exchange_order_id
-                    if (
-                        exchange_order_id is None
-                        and leg.status
-                        in {
-                            "submitted",
-                            "acknowledged",
-                            "partially_filled",
-                            "unknown",
-                        }
-                    ):
+                    if leg.status in {
+                        "submitted",
+                        "acknowledged",
+                        "partially_filled",
+                        "unknown",
+                    }:
+                        recovering_order_id = exchange_order_id is None
                         lookup = await client.order_by_client_id(
                             market=leg.market,
                             symbol=leg.symbol,
@@ -132,6 +129,8 @@ class ReconciliationService:
                             order_reconciliation_complete = False
                             reasons.append(
                                 "submitted order was not found by client order ID"
+                                if recovering_order_id
+                                else "linked order was not found by client order ID"
                             )
                         else:
                             exchange_order_id = (
@@ -140,7 +139,7 @@ class ReconciliationService:
                                     order=lookup.order,
                                 )
                             )
-                            recovered_order_count += 1
+                            recovered_order_count += int(recovering_order_id)
                     if exchange_order_id is None:
                         if leg.status not in {"created", "failed", "canceled"}:
                             fill_reconciliation_complete = False

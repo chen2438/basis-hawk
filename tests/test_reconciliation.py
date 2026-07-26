@@ -284,6 +284,104 @@ async def test_reconciliation_persists_remote_fills_idempotently() -> None:
     await database.close()
 
 
+async def test_reconciliation_refreshes_linked_ioc_and_preserves_partial_terminal_state() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials = await _credentials(database)
+    intent_id = str(uuid.uuid4())
+    now = datetime(2026, 7, 26, 18, 0, tzinfo=UTC)
+    _, legs, _ = await database.create_trade_intent(
+        intent={
+            "id": intent_id,
+            "idempotency_key": str(uuid.uuid4()),
+            "request_fingerprint": "1" * 64,
+            "exchange": "binance",
+            "environment": "live",
+            "base_asset": "ORDER",
+            "action": "open",
+            "status": "executing",
+            "requested_notional": Decimal("1"),
+            "base_quantity": Decimal("20"),
+            "spot_fee_rate": Decimal("0.001"),
+            "perp_fee_rate": Decimal("0.0005"),
+            "market_observed_at": now,
+            "config_version": "2" * 64,
+            "version": 1,
+            "created_at": now,
+            "updated_at": now,
+        },
+        legs=[
+            {
+                "id": str(uuid.uuid4()),
+                "trade_intent_id": intent_id,
+                "leg": "spot",
+                "market": "spot",
+                "symbol": "ORDERUSDT",
+                "side": "buy",
+                "client_order_id": "bh-partial-ioc",
+                "exchange_order_id": "remote-partial",
+                "status": "acknowledged",
+                "quantity": Decimal("20"),
+                "limit_price": Decimal("0.05"),
+                "filled_quantity": Decimal("0"),
+                "reduce_only": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+        ],
+    )
+    remote_order = RemoteOrder(
+        exchange_order_id="remote-partial",
+        client_order_id="bh-partial-ioc",
+        market="spot",
+        symbol="ORDERUSDT",
+        side="buy",
+        status="EXPIRED",
+        price=Decimal("0.05"),
+        original_quantity=Decimal("20"),
+        filled_quantity=Decimal("8"),
+    )
+    remote_fill = RemoteFill(
+        exchange_trade_id="trade-partial",
+        exchange_order_id="remote-partial",
+        client_order_id="bh-partial-ioc",
+        market="spot",
+        symbol="ORDERUSDT",
+        side="buy",
+        quantity=Decimal("8"),
+        price=Decimal("0.049"),
+        fee_amount=Decimal("0.001"),
+        fee_asset="ORDER",
+        liquidity="taker",
+        occurred_at=now,
+    )
+    client = FakeAccountClient(
+        orders={"bh-partial-ioc": remote_order},
+        fills={"bh-partial-ioc": [remote_fill]},
+    )
+    reconciler = ReconciliationService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    )
+
+    await reconciler.run_once()
+
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    assert stored[1][0].id == legs[0].id
+    assert stored[1][0].status == "canceled"
+    assert stored[1][0].filled_quantity == Decimal("8")
+    assert stored[1][0].average_price is not None
+    assert stored[1][0].average_price.quantize(Decimal("0.001")) == Decimal(
+        "0.049"
+    )
+    states = await database.reconciliation_states()
+    assert states[0].order_reconciliation_complete is True
+    assert states[0].recovered_order_count == 0
+    await database.close()
+
+
 async def test_reconciliation_recovers_ack_lost_order_before_querying_fills() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()

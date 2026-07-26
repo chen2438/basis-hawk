@@ -810,7 +810,7 @@ class Database:
             )
             if filled_quantity >= leg.quantity:
                 leg.status = "filled"
-            elif filled_quantity > 0:
+            elif filled_quantity > 0 and leg.status not in {"canceled", "failed"}:
                 leg.status = "partially_filled"
             leg.updated_at = datetime.now(UTC)
             await session.commit()
@@ -859,14 +859,19 @@ class Database:
                 )
             leg.exchange_order_id = order.exchange_order_id
             remote_status = order.status.strip().lower()
-            if order.filled_quantity == 0 and remote_status in {
+            if remote_status in {
                 "cancelled",
                 "canceled",
                 "deactivated",
+                "expired",
+                "expired_in_match",
+                "partiallyfilledcanceled",
+                "partially_filled_canceled",
+                "finished",
                 "4",
             }:
                 leg.status = "canceled"
-            elif order.filled_quantity == 0 and remote_status in {
+            elif remote_status in {
                 "failed",
                 "invalid",
                 "rejected",
