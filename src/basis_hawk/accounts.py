@@ -1537,6 +1537,8 @@ class BitgetAccountClient(PrivateAccountClient):
             timeout=timeout,
         )
         self._owned = client is None
+        self._account_generation: Literal["classic", "uta"] | None = None
+        self._uta_settings: dict[str, Any] | None = None
 
     async def _get(self, path: str, **params: object) -> Any:
         params = _ordered(params)
@@ -1583,7 +1585,89 @@ class BitgetAccountClient(PrivateAccountClient):
             headers["paptrading"] = "1"
         return headers
 
+    async def _detect_account_generation(self) -> Literal["classic", "uta"]:
+        if self._account_generation is not None:
+            return self._account_generation
+        settings = await self._get("/api/v3/account/settings")
+        if isinstance(settings, dict) and settings.get("code") == "00000":
+            details = settings.get("data")
+            mode = (
+                str(details.get("accountMode") or "").lower()
+                if isinstance(details, dict)
+                else ""
+            )
+            if mode in {"unified", "hybrid"}:
+                self._account_generation = "uta"
+                self._uta_settings = details
+                return "uta"
+            if mode in {"upgrading", "switching"}:
+                raise PrivateRequestError(
+                    "Bitget account is changing account mode; trading is blocked"
+                )
+        classic = await self._get(
+            "/api/v2/mix/account/account",
+            symbol="BTCUSDT",
+            productType="USDT-FUTURES",
+            marginCoin="USDT",
+        )
+        _bitget_success(classic)
+        details = classic.get("data")
+        if not isinstance(details, dict) or str(
+            details.get("posMode") or ""
+        ) not in {"one_way_mode", "hedge_mode"}:
+            raise PrivateRequestError(
+                "Bitget account generation could not be identified safely"
+            )
+        self._account_generation = "classic"
+        return "classic"
+
+    async def _settings(self, *, refresh: bool = False) -> dict[str, Any]:
+        if not refresh and self._uta_settings is not None:
+            return self._uta_settings
+        payload = await self._get("/api/v3/account/settings")
+        result = _bitget_result(payload, "UTA account settings")
+        mode = str(result.get("accountMode") or "").lower()
+        if mode not in {"unified", "hybrid"}:
+            raise PrivateRequestError("Bitget UTA account mode is not stable")
+        self._uta_settings = result
+        return result
+
     async def snapshot(self) -> AccountSnapshot:
+        generation = await self._detect_account_generation()
+        if generation == "uta":
+            settings, assets_payload = await _gather(
+                self._settings(refresh=True),
+                self._get("/api/v3/account/assets"),
+            )
+            assets = _bitget_result(assets_payload, "UTA account assets")
+            asset_items = assets.get("assets") or []
+            usdt = next(
+                (
+                    item
+                    for item in asset_items
+                    if str(item.get("coin") or "").upper() == "USDT"
+                ),
+                {},
+            )
+            available = Decimal(str(usdt.get("available") or "0"))
+            return AccountSnapshot(
+                exchange=self.exchange,
+                environment=self.environment,
+                observed_at=datetime.now(UTC),
+                spot_usdt_available=available,
+                perp_usdt_available=available,
+                perp_usdt_equity=Decimal(
+                    str(assets.get("usdtEquity") or usdt.get("equity") or "0")
+                ),
+                shared_balance=True,
+                account_mode=(
+                    f"uta:{settings.get('accountMode', 'unknown')}:"
+                    f"{settings.get('accountLevel', 'unknown')}:"
+                    f"{settings.get('assetMode', 'unknown')}"
+                ),
+                position_mode=_bitget_position_mode(settings.get("holdMode")),
+                trade_permission=None,
+            )
         spot, perp = await _gather(
             self._get("/api/v2/spot/account/assets", coin="USDT"),
             self._get(
@@ -1620,6 +1704,69 @@ class BitgetAccountClient(PrivateAccountClient):
         )
 
     async def trading_state(self) -> RemoteTradingState:
+        generation = await self._detect_account_generation()
+        if generation == "uta":
+            spot_payload, perp_payload, position_payload = await _gather(
+                self._get(
+                    "/api/v3/trade/unfilled-orders",
+                    category="SPOT",
+                    limit=100,
+                ),
+                self._get(
+                    "/api/v3/trade/unfilled-orders",
+                    category="USDT-FUTURES",
+                    limit=100,
+                ),
+                self._get(
+                    "/api/v3/position/current-position",
+                    category="USDT-FUTURES",
+                ),
+            )
+            for payload in (spot_payload, perp_payload, position_payload):
+                _bitget_success(payload)
+            spot_data = spot_payload.get("data") or {}
+            perp_data = perp_payload.get("data") or {}
+            position_data = position_payload.get("data") or {}
+            spot_orders = spot_data.get("list") or []
+            perp_orders = perp_data.get("list") or []
+            position_items = position_data.get("list") or []
+            orders = [
+                _bitget_uta_order(item, market="spot") for item in spot_orders
+            ]
+            orders.extend(
+                _bitget_uta_order(item, market="perp") for item in perp_orders
+            )
+            positions = [
+                RemotePosition(
+                    symbol=str(item.get("symbol") or ""),
+                    side=str(item.get("posSide") or "").lower(),
+                    quantity=Decimal(str(item.get("total") or "0")),
+                    entry_price=Decimal(str(item.get("avgPrice") or "0")),
+                    mark_price=Decimal(str(item.get("markPrice") or "0")),
+                    liquidation_price=_optional_decimal(
+                        item.get("liquidationPrice")
+                    ),
+                    leverage=Decimal(str(item.get("leverage") or "0")),
+                    isolated=(
+                        str(item.get("marginMode") or "").lower() == "isolated"
+                    ),
+                )
+                for item in position_items
+                if Decimal(str(item.get("total") or "0")) != 0
+            ]
+            complete = len(spot_orders) < 100 and len(perp_orders) < 100
+            return _state(
+                self.exchange,
+                self.environment,
+                orders,
+                positions,
+                complete=complete,
+                incomplete_reason=(
+                    None
+                    if complete
+                    else "Bitget UTA open-order result requires another page"
+                ),
+            )
         spot_payload, perp_payload, position_payload = await _gather(
             self._get("/api/v2/spot/trade/unfilled-orders", limit=100),
             self._get(
@@ -1679,6 +1826,54 @@ class BitgetAccountClient(PrivateAccountClient):
         client_order_id: str | None,
         since: datetime,
     ) -> RemoteFillBatch:
+        generation = await self._detect_account_generation()
+        if generation == "uta":
+            if exchange_order_id is None:
+                return _missing_order_id("Bitget UTA")
+            payload = await self._get(
+                "/api/v3/trade/fills",
+                category=_bitget_uta_category(market),
+                orderId=exchange_order_id,
+                startTime=_milliseconds(since),
+                endTime=self.clock_ms(),
+                limit=100,
+            )
+            data = _bitget_result(payload, "UTA fills")
+            items = data.get("list") or []
+            fills = [
+                RemoteFill(
+                    exchange_trade_id=str(
+                        item.get("execId") or item.get("execLinkId") or ""
+                    ),
+                    exchange_order_id=str(
+                        item.get("orderId") or exchange_order_id
+                    ),
+                    client_order_id=(
+                        str(item["clientOid"])
+                        if item.get("clientOid")
+                        else client_order_id
+                    ),
+                    market=market,
+                    symbol=str(item.get("symbol") or symbol),
+                    side=str(item.get("side") or "").lower(),
+                    quantity=Decimal(str(item.get("execQty") or "0")),
+                    price=Decimal(str(item.get("execPrice") or "0")),
+                    fee_amount=_bitget_uta_fee(item),
+                    fee_asset=_bitget_fee_asset(item),
+                    liquidity=str(item.get("tradeScope") or "taker").lower(),
+                    occurred_at=_from_milliseconds(item.get("createdTime")),
+                )
+                for item in items
+            ]
+            return RemoteFillBatch(
+                fills=fills,
+                complete=len(items) < 100,
+                incomplete_reason=(
+                    "Bitget UTA order fills require another page"
+                    if len(items) >= 100
+                    else None
+                ),
+            )
         params: dict[str, object] = {
             "symbol": symbol,
             "startTime": _milliseconds(since),
@@ -1754,6 +1949,22 @@ class BitgetAccountClient(PrivateAccountClient):
         symbol: str,
         client_order_id: str,
     ) -> RemoteOrderLookup:
+        generation = await self._detect_account_generation()
+        if generation == "uta":
+            payload = await self._get(
+                "/api/v3/trade/order-info",
+                clientOid=client_order_id,
+            )
+            _bitget_success(payload)
+            data = payload.get("data")
+            return RemoteOrderLookup(
+                order=(
+                    _bitget_uta_order(data, market=market)
+                    if isinstance(data, dict)
+                    else None
+                ),
+                complete=True,
+            )
         if market == "spot":
             payload = await self._get(
                 "/api/v2/spot/trade/orderInfo",
@@ -1776,6 +1987,46 @@ class BitgetAccountClient(PrivateAccountClient):
         )
 
     async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
+        generation = await self._detect_account_generation()
+        if generation == "uta":
+            if not re.fullmatch(r"[.A-Za-z0-9_:/\-]{1,32}", order.client_order_id):
+                raise ValueError(
+                    "Bitget UTA client order IDs must be at most 32 supported "
+                    "ASCII characters"
+                )
+            values: dict[str, object] = {
+                "category": _bitget_uta_category(order.market),
+                "symbol": order.symbol,
+                "qty": format(order.quantity, "f"),
+                "price": format(order.limit_price, "f"),
+                "side": order.side,
+                "orderType": "limit",
+                "timeInForce": "ioc",
+                "clientOid": order.client_order_id,
+            }
+            if order.market == "perp":
+                values["marginMode"] = "isolated"
+                if order.position_mode == PositionMode.HEDGE:
+                    values["posSide"] = "short"
+                elif order.reduce_only:
+                    values["reduceOnly"] = "yes"
+            payload = await self._post("/api/v3/trade/place-order", **values)
+            result = _bitget_result(payload, "UTA order submission")
+            result_client_id = str(
+                result.get("clientOid") or order.client_order_id
+            )
+            if not result_client_id:
+                raise PrivateRequestError(
+                    "Bitget UTA order submission returned no client order ID"
+                )
+            return OrderSubmission(
+                market=order.market,
+                symbol=order.symbol,
+                client_order_id=result_client_id,
+                exchange_order_id=(
+                    str(result["orderId"]) if result.get("orderId") else None
+                ),
+            )
         if not re.fullmatch(r"[A-Za-z0-9_:#\-+]{1,32}", order.client_order_id):
             raise ValueError(
                 "Bitget client order IDs must be at most 32 supported ASCII characters"
@@ -1830,6 +2081,38 @@ class BitgetAccountClient(PrivateAccountClient):
     ) -> OrderCancellation:
         if exchange_order_id is None and client_order_id is None:
             raise ValueError("an exchange or client order ID is required")
+        generation = await self._detect_account_generation()
+        if generation == "uta":
+            values: dict[str, object] = {
+                "category": _bitget_uta_category(market),
+            }
+            if exchange_order_id is not None:
+                values["orderId"] = exchange_order_id
+            else:
+                values["clientOid"] = client_order_id or ""
+            payload = await self._post("/api/v3/trade/cancel-order", **values)
+            result = _bitget_result(payload, "UTA order cancellation")
+            result_order_id = (
+                str(result["orderId"])
+                if result.get("orderId")
+                else exchange_order_id
+            )
+            result_client_id = (
+                str(result["clientOid"])
+                if result.get("clientOid")
+                else client_order_id
+            )
+            if result_order_id is None and result_client_id is None:
+                raise PrivateRequestError(
+                    "Bitget UTA order cancellation returned no order identifier"
+                )
+            return OrderCancellation(
+                market=market,
+                symbol=symbol,
+                client_order_id=result_client_id,
+                exchange_order_id=result_order_id,
+                accepted=True,
+            )
         values: dict[str, object] = {"symbol": symbol}
         path = "/api/v2/spot/trade/cancel-order"
         if market == "perp":
@@ -1872,6 +2155,13 @@ class BitgetAccountClient(PrivateAccountClient):
             raise ValueError("leverage must be between 1 and 10")
         if position_mode == PositionMode.UNKNOWN:
             raise ValueError("position mode must be known before configuration")
+        generation = await self._detect_account_generation()
+        if generation == "uta":
+            return await self._configure_uta_perp(
+                symbol=symbol,
+                leverage=leverage,
+                position_mode=position_mode,
+            )
         account = await self._get(
             "/api/v2/mix/account/account",
             symbol=symbol,
@@ -1974,6 +2264,71 @@ class BitgetAccountClient(PrivateAccountClient):
         ):
             raise PrivateRequestError(
                 "Bitget isolated leverage was not confirmed by account state"
+            )
+        return PerpConfiguration(
+            symbol=symbol,
+            leverage=leverage,
+            isolated=True,
+            position_mode=position_mode,
+        )
+
+    async def _configure_uta_perp(
+        self,
+        *,
+        symbol: str,
+        leverage: int,
+        position_mode: PositionMode,
+    ) -> PerpConfiguration:
+        settings = await self._settings(refresh=True)
+        detected_mode = _bitget_position_mode(settings.get("holdMode"))
+        if detected_mode != position_mode:
+            raise PrivateRequestError(
+                "Bitget UTA position mode does not match the requested configuration"
+            )
+        current = _bitget_uta_symbol_configuration(settings, symbol)
+        if _bitget_uta_configuration_matches(current, leverage):
+            return PerpConfiguration(
+                symbol=symbol,
+                leverage=leverage,
+                isolated=True,
+                position_mode=position_mode,
+            )
+        pending_payload, positions_payload = await _gather(
+            self._get(
+                "/api/v3/trade/unfilled-orders",
+                category="USDT-FUTURES",
+                symbol=symbol,
+                limit=100,
+            ),
+            self._get(
+                "/api/v3/position/current-position",
+                category="USDT-FUTURES",
+                symbol=symbol,
+            ),
+        )
+        pending = _bitget_result(pending_payload, "UTA open orders")
+        positions = _bitget_result(positions_payload, "UTA positions")
+        if pending.get("list") or any(
+            Decimal(str(item.get("total") or "0")) != 0
+            for item in positions.get("list") or []
+        ):
+            raise PrivateRequestError(
+                "cannot change Bitget UTA leverage with open orders or positions"
+            )
+        configured = await self._post(
+            "/api/v3/account/set-leverage",
+            category="USDT-FUTURES",
+            symbol=symbol,
+            leverage=str(leverage),
+            marginMode="isolated",
+            posSide="short",
+        )
+        _bitget_success(configured)
+        confirmed_settings = await self._settings(refresh=True)
+        confirmed = _bitget_uta_symbol_configuration(confirmed_settings, symbol)
+        if not _bitget_uta_configuration_matches(confirmed, leverage):
+            raise PrivateRequestError(
+                "Bitget UTA isolated leverage was not confirmed by account state"
             )
         return PerpConfiguration(
             symbol=symbol,
@@ -3111,6 +3466,59 @@ def _bitget_side(item: dict[str, Any], *, market: str) -> str:
     return side
 
 
+def _bitget_position_mode(value: object) -> PositionMode:
+    return (
+        PositionMode.HEDGE
+        if value == "hedge_mode"
+        else PositionMode.ONE_WAY
+        if value == "one_way_mode"
+        else PositionMode.UNKNOWN
+    )
+
+
+def _bitget_uta_category(market: str) -> str:
+    return "SPOT" if market == "spot" else "USDT-FUTURES"
+
+
+def _bitget_uta_symbol_configuration(
+    settings: dict[str, Any],
+    symbol: str,
+) -> dict[str, Any] | None:
+    return next(
+        (
+            item
+            for item in settings.get("symbolConfigList") or []
+            if str(item.get("category") or "").upper() == "USDT-FUTURES"
+            and str(item.get("symbol") or "") == symbol
+        ),
+        None,
+    )
+
+
+def _bitget_uta_configuration_matches(
+    configuration: dict[str, Any] | None,
+    leverage: int,
+) -> bool:
+    if configuration is None:
+        return False
+    raw_leverage = configuration.get("leverage")
+    if isinstance(raw_leverage, list):
+        values = {
+            Decimal(str(item))
+            for item in raw_leverage
+            if item not in (None, "")
+        }
+        leverage_matches = Decimal(leverage) in values
+    else:
+        leverage_matches = Decimal(
+            str(raw_leverage or "0")
+        ) == Decimal(leverage)
+    return (
+        str(configuration.get("marginMode") or "").lower() == "isolated"
+        and leverage_matches
+    )
+
+
 def _mexc_success(payload: Any) -> bool:
     return (
         isinstance(payload, dict)
@@ -3189,6 +3597,17 @@ def _bitget_fee(item: dict[str, Any]) -> Decimal:
     return -Decimal(str(item.get("fee") or "0"))
 
 
+def _bitget_uta_fee(item: dict[str, Any]) -> Decimal:
+    details = _bitget_fee_details(item)
+    return sum(
+        (
+            abs(Decimal(str(detail.get("fee") or "0")))
+            for detail in details
+        ),
+        Decimal("0"),
+    )
+
+
 def _bitget_fee_asset(item: dict[str, Any]) -> str:
     details = _bitget_fee_details(item)
     if details:
@@ -3258,6 +3677,28 @@ def _bitget_order(item: dict[str, Any], *, market: str) -> RemoteOrder:
         reduce_only=(
             str(item.get("reduceOnly") or "").lower() == "yes"
             or str(item.get("tradeSide") or "").lower() == "close"
+        ),
+    )
+
+
+def _bitget_uta_order(item: dict[str, Any], *, market: str) -> RemoteOrder:
+    return RemoteOrder(
+        exchange_order_id=str(item.get("orderId") or ""),
+        client_order_id=str(item["clientOid"]) if item.get("clientOid") else None,
+        market=market,
+        symbol=str(item.get("symbol") or ""),
+        side=str(item.get("side") or "").lower(),
+        status=str(item.get("orderStatus") or ""),
+        price=Decimal(str(item.get("avgPrice") or item.get("price") or "0")),
+        original_quantity=Decimal(str(item.get("qty") or "0")),
+        filled_quantity=Decimal(str(item.get("cumExecQty") or "0")),
+        reduce_only=(
+            str(item.get("reduceOnly") or "").lower() == "yes"
+            or (
+                market == "perp"
+                and str(item.get("posSide") or "").lower() == "short"
+                and str(item.get("side") or "").lower() == "buy"
+            )
         ),
     )
 

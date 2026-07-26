@@ -199,6 +199,7 @@ async def test_bybit_history_fallback_and_bitget_orders_are_normalized() -> None
         clock_ms=lambda: 1785088000000,
         client=bitget_http,
     )
+    bitget._account_generation = "classic"
 
     spot_lookup = await bitget.order_by_client_id(
         market="spot",

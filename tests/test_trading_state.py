@@ -225,6 +225,7 @@ async def test_bitget_gate_and_mexc_trading_states_are_normalized() -> None:
         ExchangeEnvironment.LIVE,
         client=bitget_http,
     )
+    bitget._account_generation = "classic"
     bitget_state = await bitget.trading_state()
     assert bitget_state.open_orders[0].market == "spot"
     assert bitget_state.positions[0].quantity == 8

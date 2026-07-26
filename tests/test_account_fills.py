@@ -212,6 +212,7 @@ async def test_bybit_and_bitget_order_fills_are_normalized() -> None:
         clock_ms=lambda: 1785088000000,
         client=bitget_http,
     )
+    bitget._account_generation = "classic"
     spot_batch = await bitget.fills_for_order(
         market="spot",
         symbol="ORDERUSDT",

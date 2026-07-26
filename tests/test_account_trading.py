@@ -962,6 +962,7 @@ async def test_bitget_places_spot_and_hedge_mode_perp_ioc_orders() -> None:
         clock_ms=lambda: 1_785_088_000_000,
         client=http,
     )
+    client._account_generation = "classic"
 
     spot = await client.place_limit_ioc(
         LimitIocOrder(
@@ -1036,6 +1037,7 @@ async def test_bitget_one_way_reduce_only_recovers_missing_order_id_and_cancels(
         base_url="https://bitget.test",
     )
     client = BitgetAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+    client._account_generation = "classic"
 
     order = await client.place_limit_ioc(
         LimitIocOrder(
@@ -1117,6 +1119,7 @@ async def test_bitget_safely_sets_isolated_margin_and_leverage() -> None:
         base_url="https://bitget.test",
     )
     client = BitgetAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+    client._account_generation = "classic"
 
     result = await client.configure_perp(
         symbol="ORDERUSDT",
@@ -1177,6 +1180,7 @@ async def test_bitget_reuses_matching_configuration_and_refuses_exposure() -> No
         base_url="https://bitget.test",
     )
     client = BitgetAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+    client._account_generation = "classic"
 
     result = await client.configure_perp(
         symbol="ORDERUSDT",
@@ -1225,6 +1229,7 @@ async def test_bitget_normalizes_hedge_close_and_rejects_bad_ack() -> None:
         base_url="https://bitget.test",
     )
     client = BitgetAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+    client._account_generation = "classic"
 
     lookup = await client.order_by_client_id(
         market="perp",
