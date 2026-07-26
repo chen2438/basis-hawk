@@ -22,6 +22,7 @@ async def test_factory_builds_implemented_private_stream_connections() -> None:
         (Exchange.BYBIT, None),
         (Exchange.BITGET, "test-passphrase"),
         (Exchange.GATE, None),
+        (Exchange.MEXC, None),
     ):
         await credentials.save(
             exchange=exchange,
@@ -45,6 +46,7 @@ async def test_factory_builds_implemented_private_stream_connections() -> None:
         Exchange.BITGET,
         Exchange.BYBIT,
         Exchange.GATE,
+        Exchange.MEXC,
         Exchange.OKX,
     ]
     assert all(

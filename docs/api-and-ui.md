@@ -56,8 +56,8 @@ Bybit 游标会读取到末页；其余接口一旦达到单页上限或交易�
 客户端 ID 和交易所订单 ID 后幂等写入本地 `fills`，再由全部成交重算订单腿累计数量、加权均价及状态。
 `GET /api/system/execution` 的账户项包含 `fill_reconciliation_complete` 和 `fill_count`；分页不完整
 或缺少必需的交易所订单 ID 时前者为 `false`。账户项同时包含 `private_stream_ready`；它只在认证完成、
-订单/成交/仓位三类订阅全部成功且最近心跳不超过 30 秒时为 `true`。Binance、OKX、Bybit、Bitget
-与 Gate LIVE 的认证连接已装配到常驻 worker；MEXC 仍会以该字段为 `false` 保持阻断。已接入的私有事件当前用于连接健康确认，
+订单/成交/仓位三类订阅全部成功且最近心跳不超过 30 秒时为 `true`。Binance、OKX、Bybit、Bitget、
+Gate LIVE 与 MEXC LIVE 的认证连接均已装配到常驻 worker。已接入的私有事件当前用于连接健康确认，
 订单、成交和仓位账本仍由每轮严格 REST 对账更新。
 当全部已配置账户的余额、交易权限、持仓模式、远端挂单/成交/仓位关联以及私有流新鲜度都通过时，
 worker 才会把账户项和全局状态置为 `ready`；任一账户失败或阻断都会保持 `blocked`，已有的

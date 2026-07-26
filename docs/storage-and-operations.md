@@ -79,7 +79,14 @@ Gate LIVE 使用现货与 USDT 永续两条私有连接。现货订阅 `spot.ord
 `futures.usertrades`、`futures.positions` 的全合约更新，连接显式发送
 `X-Gate-Size-Decimal: 1` 以保留十进制合约数量。两条连接都必须通过 WebSocket 协议 ping/pong；
 任一通道断开即使整个 Gate 连接失败并由监督器重连。Gate 沙盒不满足同所现货和 USDT 永续要求，
-因此明确拒绝且不得回退到实盘。常驻 worker 已装配 Gate；MEXC 仍保持私有流阻断。
+因此明确拒绝且不得回退到实盘。常驻 worker 已装配 Gate。
+MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
+`spot@private.orders.v3.api.pb`、`spot@private.deals.v3.api.pb` 和
+`spot@private.account.v3.api.pb` 三个 Protobuf 频道；每 30 分钟续期，续期失败或返回不同 key 即断线，
+正常关闭时主动释放 key。合约连接按 `apiKey + reqTime` 做 HMAC-SHA256 登录；官方登录成功后默认推送
+订单、成交、仓位和资产等全部私有数据。现货 `PING`/`PONG` 与合约 `ping`/`pong` 都必须验证，
+任一通道失败即整条连接重连。MEXC 没有受支持的合约沙盒，因此明确拒绝且不得回退到实盘。常驻 worker
+已装配 MEXC。
 每轮对账对每个账户独立汇总阻断原因；只有全部已配置账户都没有原因且没有请求失败，才把账户状态写为
 `ready`。写入全局 `ready` 前会再次检查每个账户的私有流心跳，避免把本轮处理中已经陈旧的连接放行。
 任一账户为 `blocked`/`error` 或已有补偿失败等安全暂停时，全局状态不会进入 `ready`。
