@@ -109,6 +109,22 @@ class OrderCancellation(BaseModel):
     accepted: bool
 
 
+class InternalTransferSubmission(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    transfer_id: str
+    status: Literal["pending", "completed"]
+
+
+class RemoteInternalTransfer(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    transfer_id: str
+    status: Literal["pending", "completed", "failed", "unknown"]
+    direction: Literal["spot_to_perp", "perp_to_spot"]
+    amount: Decimal
+
+
 class AccountSnapshot(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -239,6 +255,36 @@ def _query(params: dict[str, object]) -> str:
     return urlencode(sorted((key, str(value)) for key, value in params.items()))
 
 
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _binance_transfer_type(direction: str) -> str:
+    if direction == "spot_to_perp":
+        return "MAIN_UMFUTURE"
+    if direction == "perp_to_spot":
+        return "UMFUTURE_MAIN"
+    raise ValueError("unsupported internal transfer direction")
+
+
+def _mexc_transfer_accounts(direction: str) -> tuple[str, str]:
+    if direction == "spot_to_perp":
+        return "SPOT", "FUTURES"
+    if direction == "perp_to_spot":
+        return "FUTURES", "SPOT"
+    raise ValueError("unsupported internal transfer direction")
+
+
+def _gate_transfer_accounts(direction: str) -> tuple[str, str]:
+    if direction == "spot_to_perp":
+        return "spot", "futures"
+    if direction == "perp_to_spot":
+        return "futures", "spot"
+    raise ValueError("unsupported internal transfer direction")
+
+
 def _ordered(params: dict[str, object]) -> dict[str, object]:
     return dict(sorted(params.items()))
 
@@ -347,6 +393,30 @@ class PrivateAccountClient(ABC):
             f"{self.exchange.value} perpetual configuration is not implemented"
         )
 
+    async def submit_internal_transfer(
+        self,
+        *,
+        transfer_id: str,
+        direction: str,
+        amount: Decimal,
+    ) -> InternalTransferSubmission:
+        raise UnsupportedTradingError(
+            f"{self.exchange.value} internal transfer is not implemented"
+        )
+
+    async def internal_transfer_status(
+        self,
+        *,
+        transfer_id: str,
+        client_transfer_id: str,
+        direction: str,
+        amount: Decimal,
+        created_at: datetime,
+    ) -> RemoteInternalTransfer:
+        raise UnsupportedTradingError(
+            f"{self.exchange.value} internal transfer lookup is not implemented"
+        )
+
     @abstractmethod
     async def close(self) -> None: ...
 
@@ -439,6 +509,106 @@ class BinanceAccountClient(PrivateAccountClient):
                 else PositionMode.ONE_WAY
             ),
             trade_permission=bool(spot.get("canTrade")) and bool(perp.get("canTrade")),
+        )
+
+    async def submit_internal_transfer(
+        self,
+        *,
+        transfer_id: str,
+        direction: str,
+        amount: Decimal,
+    ) -> InternalTransferSubmission:
+        del transfer_id
+        if self.environment != ExchangeEnvironment.LIVE:
+            raise UnsupportedEnvironmentError(
+                "Binance internal transfer is unavailable in sandbox"
+            )
+        transfer_type = _binance_transfer_type(direction)
+        payload = await self._signed_request(
+            self.spot,
+            "POST",
+            "/sapi/v1/asset/transfer",
+            type=transfer_type,
+            asset="USDT",
+            amount=format(amount, "f"),
+        )
+        remote_id = str(payload.get("tranId") or "")
+        if not remote_id:
+            raise PrivateRequestError(
+                "Binance internal transfer response is incomplete"
+            )
+        return InternalTransferSubmission(
+            transfer_id=remote_id,
+            status="pending",
+        )
+
+    async def internal_transfer_status(
+        self,
+        *,
+        transfer_id: str,
+        client_transfer_id: str,
+        direction: str,
+        amount: Decimal,
+        created_at: datetime,
+    ) -> RemoteInternalTransfer:
+        del client_transfer_id
+        if self.environment != ExchangeEnvironment.LIVE:
+            raise UnsupportedEnvironmentError(
+                "Binance internal transfer is unavailable in sandbox"
+            )
+        transfer_type = _binance_transfer_type(direction)
+        payload = await self._get(
+            self.spot,
+            "/sapi/v1/asset/transfer",
+            type=transfer_type,
+            startTime=int(_utc_datetime(created_at).timestamp() * 1000),
+            endTime=self.clock_ms(),
+            current=1,
+            size=100,
+        )
+        rows = payload.get("rows")
+        if not isinstance(rows, list):
+            raise PrivateRequestError(
+                "Binance internal transfer history is incomplete"
+            )
+        match = next(
+            (
+                item
+                for item in rows
+                if str(item.get("tranId") or "") == transfer_id
+            ),
+            None,
+        )
+        if match is None:
+            return RemoteInternalTransfer(
+                transfer_id=transfer_id,
+                status="unknown",
+                direction=direction,
+                amount=amount,
+            )
+        if (
+            str(match.get("asset") or "") != "USDT"
+            or str(match.get("type") or "") != transfer_type
+            or Decimal(str(match.get("amount") or "0")) != amount
+        ):
+            raise PrivateRequestError(
+                "Binance internal transfer history does not match the request"
+            )
+        raw_status = str(match.get("status") or "").upper()
+        status: Literal["pending", "completed", "failed", "unknown"]
+        if raw_status == "CONFIRMED":
+            status = "completed"
+        elif raw_status in {"PENDING", "PROCESS"}:
+            status = "pending"
+        elif raw_status in {"FAILED", "FAILURE"}:
+            status = "failed"
+        else:
+            status = "unknown"
+        return RemoteInternalTransfer(
+            transfer_id=transfer_id,
+            status=status,
+            direction=direction,
+            amount=amount,
         )
 
     async def trading_state(self) -> RemoteTradingState:
@@ -2378,6 +2548,111 @@ class BitgetAccountClient(PrivateAccountClient):
             position_mode=position_mode,
         )
 
+    async def submit_internal_transfer(
+        self,
+        *,
+        transfer_id: str,
+        direction: str,
+        amount: Decimal,
+    ) -> InternalTransferSubmission:
+        generation = await self._detect_account_generation()
+        if generation == "uta":
+            raise UnsupportedTradingError(
+                "Bitget unified accounts share spot and futures collateral"
+            )
+        from_type, to_type = _bitget_transfer_accounts(direction)
+        payload = await self._post(
+            "/api/v2/spot/wallet/transfer",
+            fromType=from_type,
+            toType=to_type,
+            amount=format(amount, "f"),
+            coin="USDT",
+            clientOid=transfer_id,
+        )
+        result = _bitget_result(payload, "internal transfer")
+        remote_id = str(result.get("transferId") or "")
+        returned_client_id = str(result.get("clientOid") or "")
+        if not remote_id or returned_client_id != transfer_id:
+            raise PrivateRequestError(
+                "Bitget internal transfer response identifiers do not match"
+            )
+        return InternalTransferSubmission(
+            transfer_id=remote_id,
+            status="pending",
+        )
+
+    async def internal_transfer_status(
+        self,
+        *,
+        transfer_id: str,
+        client_transfer_id: str,
+        direction: str,
+        amount: Decimal,
+        created_at: datetime,
+    ) -> RemoteInternalTransfer:
+        generation = await self._detect_account_generation()
+        if generation == "uta":
+            raise UnsupportedTradingError(
+                "Bitget unified accounts share spot and futures collateral"
+            )
+        from_type, to_type = _bitget_transfer_accounts(direction)
+        payload = await self._get(
+            "/api/v2/spot/account/transferRecords",
+            coin="USDT",
+            fromType=from_type,
+            startTime=int(_utc_datetime(created_at).timestamp() * 1000),
+            endTime=self.clock_ms(),
+            clientOid=client_transfer_id,
+            limit=100,
+        )
+        _bitget_success(payload)
+        rows = payload.get("data")
+        if not isinstance(rows, list):
+            raise PrivateRequestError(
+                "Bitget internal transfer history is incomplete"
+            )
+        match = next(
+            (
+                item
+                for item in rows
+                if str(item.get("clientOid") or "") == client_transfer_id
+            ),
+            None,
+        )
+        if match is None:
+            return RemoteInternalTransfer(
+                transfer_id=transfer_id,
+                status="unknown",
+                direction=direction,
+                amount=amount,
+            )
+        if (
+            str(match.get("transferId") or "") != transfer_id
+            or str(match.get("coin") or "").upper() != "USDT"
+            or str(match.get("fromType") or "") != from_type
+            or str(match.get("toType") or "") != to_type
+            or Decimal(str(match.get("size") or "0")) != amount
+        ):
+            raise PrivateRequestError(
+                "Bitget internal transfer history does not match the request"
+            )
+        raw_status = str(match.get("status") or "").lower()
+        status: Literal["pending", "completed", "failed", "unknown"]
+        if raw_status == "successful":
+            status = "completed"
+        elif raw_status == "processing":
+            status = "pending"
+        elif raw_status == "failed":
+            status = "failed"
+        else:
+            status = "unknown"
+        return RemoteInternalTransfer(
+            transfer_id=transfer_id,
+            status=status,
+            direction=direction,
+            amount=amount,
+        )
+
     async def close(self) -> None:
         if self._owned:
             await self.http.aclose()
@@ -2499,6 +2774,81 @@ class GateAccountClient(PrivateAccountClient):
                 else PositionMode.ONE_WAY
             ),
             trade_permission=trade_permission,
+        )
+
+    async def submit_internal_transfer(
+        self,
+        *,
+        transfer_id: str,
+        direction: str,
+        amount: Decimal,
+    ) -> InternalTransferSubmission:
+        from_type, to_type = _gate_transfer_accounts(direction)
+        payload = await self._post(
+            "/api/v4/wallet/transfers",
+            body={
+                "currency": "USDT",
+                "from": from_type,
+                "to": to_type,
+                "amount": format(amount, "f"),
+                "settle": "usdt",
+                "client_order_id": transfer_id,
+            },
+        )
+        remote_id = (
+            str(payload.get("tx_id") or "")
+            if isinstance(payload, dict)
+            else ""
+        )
+        if not remote_id:
+            raise PrivateRequestError(
+                "Gate internal transfer response is incomplete"
+            )
+        return InternalTransferSubmission(
+            transfer_id=remote_id,
+            status="pending",
+        )
+
+    async def internal_transfer_status(
+        self,
+        *,
+        transfer_id: str,
+        client_transfer_id: str,
+        direction: str,
+        amount: Decimal,
+        created_at: datetime,
+    ) -> RemoteInternalTransfer:
+        del created_at
+        _gate_transfer_accounts(direction)
+        payload = await self._get(
+            "/api/v4/wallet/order_status",
+            client_order_id=client_transfer_id,
+            tx_id=transfer_id,
+        )
+        if not isinstance(payload, dict):
+            raise PrivateRequestError(
+                "Gate internal transfer lookup is incomplete"
+            )
+        returned_id = str(payload.get("tx_id") or "")
+        if returned_id and returned_id != transfer_id:
+            raise PrivateRequestError(
+                "Gate internal transfer lookup does not match the request"
+            )
+        raw_status = str(payload.get("status") or "").upper()
+        status: Literal["pending", "completed", "failed", "unknown"]
+        if raw_status == "SUCCESS":
+            status = "completed"
+        elif raw_status == "PENDING":
+            status = "pending"
+        elif raw_status in {"FAIL", "PARTIAL_SUCCESS"}:
+            status = "failed"
+        else:
+            status = "unknown"
+        return RemoteInternalTransfer(
+            transfer_id=transfer_id,
+            status=status,
+            direction=direction,
+            amount=amount,
         )
 
     async def user_id(self) -> str:
@@ -2991,6 +3341,88 @@ class MexcAccountClient(PrivateAccountClient):
                 if spot.get("canTrade") is False
                 else None
             ),
+        )
+
+    async def submit_internal_transfer(
+        self,
+        *,
+        transfer_id: str,
+        direction: str,
+        amount: Decimal,
+    ) -> InternalTransferSubmission:
+        del transfer_id
+        from_type, to_type = _mexc_transfer_accounts(direction)
+        payload = await self._spot_signed(
+            "POST",
+            "/api/v3/capital/transfer",
+            fromAccountType=from_type,
+            toAccountType=to_type,
+            asset="USDT",
+            amount=format(amount, "f"),
+        )
+        item = (
+            payload[0]
+            if isinstance(payload, list) and payload
+            else payload
+        )
+        remote_id = (
+            str(item.get("tranId") or "")
+            if isinstance(item, dict)
+            else ""
+        )
+        if not remote_id:
+            raise PrivateRequestError(
+                "MEXC internal transfer response is incomplete"
+            )
+        return InternalTransferSubmission(
+            transfer_id=remote_id,
+            status="pending",
+        )
+
+    async def internal_transfer_status(
+        self,
+        *,
+        transfer_id: str,
+        client_transfer_id: str,
+        direction: str,
+        amount: Decimal,
+        created_at: datetime,
+    ) -> RemoteInternalTransfer:
+        del client_transfer_id, created_at
+        from_type, to_type = _mexc_transfer_accounts(direction)
+        item = await self._spot_get(
+            "/api/v3/capital/transfer/tranId",
+            tranId=transfer_id,
+        )
+        if not isinstance(item, dict):
+            raise PrivateRequestError(
+                "MEXC internal transfer lookup is incomplete"
+            )
+        if (
+            str(item.get("tranId") or "") != transfer_id
+            or str(item.get("asset") or "").upper() != "USDT"
+            or str(item.get("fromAccountType") or "") != from_type
+            or str(item.get("toAccountType") or "") != to_type
+            or Decimal(str(item.get("amount") or "0")) != amount
+        ):
+            raise PrivateRequestError(
+                "MEXC internal transfer history does not match the request"
+            )
+        raw_status = str(item.get("status") or "").upper()
+        status: Literal["pending", "completed", "failed", "unknown"]
+        if raw_status == "SUCCESS":
+            status = "completed"
+        elif raw_status in {"PENDING", "PROCESSING"}:
+            status = "pending"
+        elif raw_status in {"FAILED", "FAILURE"}:
+            status = "failed"
+        else:
+            status = "unknown"
+        return RemoteInternalTransfer(
+            transfer_id=transfer_id,
+            status=status,
+            direction=direction,
+            amount=amount,
         )
 
     async def trading_state(self) -> RemoteTradingState:
@@ -3539,6 +3971,14 @@ def _bitget_position_mode(value: object) -> PositionMode:
         if value == "one_way_mode"
         else PositionMode.UNKNOWN
     )
+
+
+def _bitget_transfer_accounts(direction: str) -> tuple[str, str]:
+    if direction == "spot_to_perp":
+        return "spot", "usdt_futures"
+    if direction == "perp_to_spot":
+        return "usdt_futures", "spot"
+    raise ValueError("unsupported internal transfer direction")
 
 
 def _bitget_uta_category(market: str) -> str:

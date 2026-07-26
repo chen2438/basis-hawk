@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
-from urllib.parse import urlencode
+from decimal import Decimal
+from urllib.parse import parse_qs, urlencode
 
 import httpx
 import pytest
@@ -14,6 +15,7 @@ from basis_hawk.accounts import (
     PositionMode,
     PrivateRequestError,
     UnsupportedEnvironmentError,
+    UnsupportedTradingError,
     _bitget_trade_permission,
     _gate_trade_permission,
     _hmac_base64,
@@ -491,3 +493,292 @@ async def test_private_error_never_contains_signed_url_or_secret() -> None:
     assert "X-BAPI-SIGN" not in message
     assert "signature" not in message.lower()
     await http.aclose()
+
+
+async def test_binance_internal_transfer_submission_and_confirmation() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            values = parse_qs(request.content.decode())
+            assert values["type"] == ["MAIN_UMFUTURE"]
+            assert values["asset"] == ["USDT"]
+            assert values["amount"] == ["12.5"]
+            return httpx.Response(200, json={"tranId": 12345})
+        assert request.url.params["type"] == "MAIN_UMFUTURE"
+        return httpx.Response(
+            200,
+            json={
+                "total": 1,
+                "rows": [
+                    {
+                        "asset": "USDT",
+                        "amount": "12.5",
+                        "type": "MAIN_UMFUTURE",
+                        "status": "CONFIRMED",
+                        "tranId": 12345,
+                        "timestamp": 1_700_000_000_000,
+                    }
+                ],
+            },
+        )
+
+    spot = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://binance.test",
+    )
+    perp = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://binance-futures.test",
+    )
+    client = BinanceAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        clock_ms=lambda: 1_700_000_100_000,
+        spot_client=spot,
+        perp_client=perp,
+    )
+
+    submitted = await client.submit_internal_transfer(
+        transfer_id="local-id",
+        direction="spot_to_perp",
+        amount=Decimal("12.5"),
+    )
+    assert submitted.transfer_id == "12345"
+    assert submitted.status == "pending"
+    confirmed = await client.internal_transfer_status(
+        transfer_id="12345",
+        client_transfer_id="local-id",
+        direction="spot_to_perp",
+        amount=Decimal("12.5"),
+        created_at=datetime(2026, 7, 26, tzinfo=UTC),
+    )
+    assert confirmed.status == "completed"
+    assert len(requests) == 2
+    await spot.aclose()
+    await perp.aclose()
+
+
+async def test_binance_internal_transfer_rejects_sandbox() -> None:
+    spot = httpx.AsyncClient(base_url="https://binance.test")
+    perp = httpx.AsyncClient(base_url="https://binance-futures.test")
+    client = BinanceAccountClient(
+        SECRETS,
+        ExchangeEnvironment.SANDBOX,
+        spot_client=spot,
+        perp_client=perp,
+    )
+    with pytest.raises(UnsupportedEnvironmentError):
+        await client.submit_internal_transfer(
+            transfer_id="local-id",
+            direction="perp_to_spot",
+            amount=Decimal("1"),
+        )
+    await spot.aclose()
+    await perp.aclose()
+
+
+async def test_bitget_classic_internal_transfer_is_idempotent_and_confirmed() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/account/settings":
+            return httpx.Response(200, json={"code": "40000", "msg": "classic"})
+        if request.url.path == "/api/v2/mix/account/account":
+            return httpx.Response(
+                200,
+                json={"code": "00000", "data": {"posMode": "one_way_mode"}},
+            )
+        if request.url.path == "/api/v2/spot/wallet/transfer":
+            body = __import__("json").loads(request.content)
+            assert body == {
+                "amount": "7.25",
+                "clientOid": "local-transfer-id",
+                "coin": "USDT",
+                "fromType": "spot",
+                "toType": "usdt_futures",
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "code": "00000",
+                    "data": {
+                        "transferId": "bitget-remote-id",
+                        "clientOid": "local-transfer-id",
+                    },
+                },
+            )
+        assert request.url.path == "/api/v2/spot/account/transferRecords"
+        assert request.url.params["clientOid"] == "local-transfer-id"
+        return httpx.Response(
+            200,
+            json={
+                "code": "00000",
+                "data": [
+                    {
+                        "transferId": "bitget-remote-id",
+                        "clientOid": "local-transfer-id",
+                        "coin": "USDT",
+                        "fromType": "spot",
+                        "toType": "usdt_futures",
+                        "size": "7.25",
+                        "status": "Successful",
+                    }
+                ],
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://bitget.test",
+    )
+    client = BitgetAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        clock_ms=lambda: 1_800_000_000_000,
+        client=http,
+    )
+    submitted = await client.submit_internal_transfer(
+        transfer_id="local-transfer-id",
+        direction="spot_to_perp",
+        amount=Decimal("7.25"),
+    )
+    assert submitted.transfer_id == "bitget-remote-id"
+    confirmed = await client.internal_transfer_status(
+        transfer_id=submitted.transfer_id,
+        client_transfer_id="local-transfer-id",
+        direction="spot_to_perp",
+        amount=Decimal("7.25"),
+        created_at=datetime(2026, 7, 26, tzinfo=UTC),
+    )
+    assert confirmed.status == "completed"
+    await http.aclose()
+
+
+async def test_bitget_unified_internal_transfer_is_not_required() -> None:
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json={
+                    "code": "00000",
+                    "data": {"accountMode": "unified"},
+                },
+            )
+        ),
+        base_url="https://bitget.test",
+    )
+    client = BitgetAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        client=http,
+    )
+    with pytest.raises(
+        UnsupportedTradingError,
+        match="share spot and futures collateral",
+    ):
+        await client.submit_internal_transfer(
+            transfer_id="local-transfer-id",
+            direction="perp_to_spot",
+            amount=Decimal("1"),
+        )
+    await http.aclose()
+
+
+async def test_gate_internal_transfer_submission_and_confirmation() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            body = __import__("json").loads(request.content)
+            assert body == {
+                "amount": "3.5",
+                "client_order_id": "local-transfer-id",
+                "currency": "USDT",
+                "from": "futures",
+                "settle": "usdt",
+                "to": "spot",
+            }
+            return httpx.Response(200, json={"tx_id": "gate-remote-id"})
+        assert request.url.path == "/api/v4/wallet/order_status"
+        assert request.url.params["client_order_id"] == "local-transfer-id"
+        assert request.url.params["tx_id"] == "gate-remote-id"
+        return httpx.Response(
+            200,
+            json={"tx_id": "gate-remote-id", "status": "SUCCESS"},
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://gate.test",
+    )
+    client = GateAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        clock_s=lambda: 1_700_000_000,
+        client=http,
+    )
+    submitted = await client.submit_internal_transfer(
+        transfer_id="local-transfer-id",
+        direction="perp_to_spot",
+        amount=Decimal("3.5"),
+    )
+    assert submitted.transfer_id == "gate-remote-id"
+    confirmed = await client.internal_transfer_status(
+        transfer_id=submitted.transfer_id,
+        client_transfer_id="local-transfer-id",
+        direction="perp_to_spot",
+        amount=Decimal("3.5"),
+        created_at=datetime(2026, 7, 26, tzinfo=UTC),
+    )
+    assert confirmed.status == "completed"
+    await http.aclose()
+
+
+async def test_mexc_internal_transfer_submission_and_confirmation() -> None:
+    def spot_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            values = parse_qs(request.content.decode())
+            assert values["fromAccountType"] == ["SPOT"]
+            assert values["toAccountType"] == ["FUTURES"]
+            assert values["asset"] == ["USDT"]
+            assert values["amount"] == ["2.75"]
+            return httpx.Response(200, json={"tranId": "mexc-remote-id"})
+        assert request.url.params["tranId"] == "mexc-remote-id"
+        return httpx.Response(
+            200,
+            json={
+                "tranId": "mexc-remote-id",
+                "asset": "USDT",
+                "fromAccountType": "SPOT",
+                "toAccountType": "FUTURES",
+                "amount": "2.75",
+                "status": "SUCCESS",
+            },
+        )
+
+    spot = httpx.AsyncClient(
+        transport=httpx.MockTransport(spot_handler),
+        base_url="https://mexc.test",
+    )
+    perp = httpx.AsyncClient(base_url="https://mexc-futures.test")
+    client = MexcAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        clock_ms=lambda: 1_700_000_000_000,
+        spot_client=spot,
+        perp_client=perp,
+    )
+    submitted = await client.submit_internal_transfer(
+        transfer_id="local-transfer-id",
+        direction="spot_to_perp",
+        amount=Decimal("2.75"),
+    )
+    assert submitted.transfer_id == "mexc-remote-id"
+    confirmed = await client.internal_transfer_status(
+        transfer_id=submitted.transfer_id,
+        client_transfer_id="local-transfer-id",
+        direction="spot_to_perp",
+        amount=Decimal("2.75"),
+        created_at=datetime(2026, 7, 26, tzinfo=UTC),
+    )
+    assert confirmed.status == "completed"
+    await spot.aclose()
+    await perp.aclose()

@@ -186,8 +186,10 @@ Telegram 入站固定为 `POST /api/integrations/telegram/webhook`，这是唯�
 模型完全不存在地址、链、UID、邮箱或提现字段。`BASIS_HAWK_TRANSFER_PER_REQUEST_LIMIT_USDT` 和
 `BASIS_HAWK_TRANSFER_DAILY_LIMIT_USDT` 默认均为 0，即功能关闭；两者都必须为正且单次限额不得超过
 日限额。计划事务锁定全局执行控制，按 UTC 日累计所有非明确 failed 金额，超限则不落库；成功计划会
-立即暂停新交易并写入不含凭据的审计事件。划转提交和到账确认尚未接入交易所前，该账本不会作为公开
-HTTP 写入口，避免产生永远停留的伪任务。
+立即暂停新交易并写入不含凭据的审计事件。私有适配层现已支持 Binance、Bitget Classic、Gate 和
+MEXC LIVE 的提交与远端状态查询；Bitget 和 Gate 还把本地 UUID 作为交易所防重 ID。OKX、Bybit 与
+Bitget UTA 的当前交易账户共享现货和永续余额，因此明确返回无需划转。worker 的单次提交、ACK 不确定
+恢复及新余额到账确认尚未闭环前，该账本仍不作为公开 HTTP 写入口，避免产生永远停留的伪任务。
 真实意图额外固化 1–10 倍请求杠杆，旧记录迁移为安全默认值 1；
 `order_legs` 同一意图固定一条现货腿和一条永续腿，并在提交交易所前生成唯一客户端订单 ID；每条腿还
 保存严格为正的 `base_multiplier`，使交易所原生数量及成交量可以无歧义换算成基础币。已有纸面订单腿
