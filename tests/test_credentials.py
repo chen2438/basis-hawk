@@ -1,6 +1,10 @@
+from datetime import UTC, datetime
+from decimal import Decimal
+
 import httpx
 import pytest
 
+from basis_hawk.accounts import AccountSnapshot, PositionMode
 from basis_hawk.api import create_app
 from basis_hawk.credentials import (
     CredentialService,
@@ -36,11 +40,38 @@ async def test_credential_api_never_echoes_plaintext() -> None:
     scanner = ScannerService(database, {})
     await scanner.initialize()
     credentials = CredentialService(database, SecretCipher(SecretCipher.generate_key()))
+    received_secrets: list[ExchangeSecrets] = []
+
+    class FakeAccountClient:
+        async def snapshot(self) -> AccountSnapshot:
+            return AccountSnapshot(
+                exchange=Exchange.BINANCE,
+                environment=ExchangeEnvironment.LIVE,
+                observed_at=datetime.now(UTC),
+                spot_usdt_available=Decimal("10"),
+                perp_usdt_available=Decimal("8"),
+                perp_usdt_equity=Decimal("9"),
+                shared_balance=False,
+                account_mode="spot+usdt_futures",
+                position_mode=PositionMode.ONE_WAY,
+                trade_permission=True,
+            )
+
+        async def close(self) -> None:
+            return None
+
+    def account_factory(exchange, secrets, environment):
+        assert exchange == Exchange.BINANCE
+        assert environment == ExchangeEnvironment.LIVE
+        received_secrets.append(secrets)
+        return FakeAccountClient()
+
     app = create_app(
         scanner,
         manage_lifecycle=False,
         auth_required=False,
         credential_service=credentials,
+        account_client_factory=account_factory,
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -62,6 +93,17 @@ async def test_credential_api_never_echoes_plaintext() -> None:
         summaries = await client.get("/api/accounts/credentials")
         assert summaries.json()["items"][0]["label"] == "primary"
         assert "super-secret-value" not in summaries.text
+
+        snapshot = await client.get("/api/accounts/binance/live/snapshot")
+        assert snapshot.status_code == 200
+        assert snapshot.json()["spot_usdt_available"] == "10"
+        assert snapshot.json()["position_mode"] == "one_way"
+        assert received_secrets == [
+            ExchangeSecrets(
+                api_key="abcd1234-api-key",
+                api_secret="super-secret-value",
+            )
+        ]
 
         loaded = await credentials.load(Exchange.BINANCE, ExchangeEnvironment.LIVE)
         assert loaded == ExchangeSecrets(

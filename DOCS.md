@@ -6,7 +6,8 @@
 
 - 已完成：计划固化；PostgreSQL/Alembic、Compose/Caddy、管理员密码+TOTP、Cookie/CSRF 会话和
   AES-GCM 凭据加密与掩码配置 API；Binance、OKX、MEXC、Bybit、Bitget、Gate 六所公共行情适配。
-- 进行中：私有账户能力与余额读取、交易状态机、自动风控、通知和生产验收仍按下述顺序实施。
+- 已完成：六所私有 REST 签名、USDT 余额、账户类型和可读取持仓模式的只读能力探测。
+- 进行中：私有流与启动对账、交易状态机、自动风控、通知和生产验收仍按下述顺序实施。
 
 ## 1. 目标架构
 

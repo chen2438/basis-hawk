@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -9,6 +10,12 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
 
+from basis_hawk.accounts import (
+    PrivateAccountClient,
+    PrivateRequestError,
+    UnsupportedEnvironmentError,
+    create_account_client,
+)
 from basis_hawk.auth import AuthenticationError, AuthService, LoginAttemptLimiter
 from basis_hawk.config import get_config
 from basis_hawk.credentials import (
@@ -45,12 +52,35 @@ def create_app(
     auth_required: bool | None = None,
     auth_service: AuthService | None = None,
     credential_service: CredentialService | None = None,
+    account_client_factory: (
+        Callable[
+            [Exchange, ExchangeSecrets, ExchangeEnvironment],
+            PrivateAccountClient,
+        ]
+        | None
+    ) = None,
 ) -> FastAPI:
     config = get_config()
     scanner = service or ScannerService(
         Database(config.database_url), default_adapters(config.http_timeout_seconds)
     )
     require_auth = config.auth_required if auth_required is None else auth_required
+    if account_client_factory is None:
+        def default_account_client_factory(
+            exchange: Exchange,
+            secrets: ExchangeSecrets,
+            environment: ExchangeEnvironment,
+        ) -> PrivateAccountClient:
+            return create_account_client(
+                exchange,
+                secrets,
+                environment,
+                timeout=config.http_timeout_seconds,
+            )
+
+        resolved_account_client_factory = default_account_client_factory
+    else:
+        resolved_account_client_factory = account_client_factory
     if config.credential_master_key:
         cipher = SecretCipher(config.credential_master_key.get_secret_value())
         if auth_service is None:
@@ -309,6 +339,37 @@ def create_app(
         if not deleted:
             raise HTTPException(status_code=404, detail="credential is not configured")
         return Response(status_code=204)
+
+    @app.get("/api/accounts/{exchange}/{environment}/snapshot")
+    async def account_snapshot(
+        exchange: Exchange,
+        environment: ExchangeEnvironment,
+    ) -> dict[str, object]:
+        if credential_service is None:
+            raise HTTPException(status_code=503, detail="credential encryption is unavailable")
+        secrets = await credential_service.load(exchange, environment)
+        if secrets is None:
+            raise HTTPException(status_code=404, detail="credential is not configured")
+        try:
+            client = resolved_account_client_factory(exchange, secrets, environment)
+        except (UnsupportedEnvironmentError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        try:
+            snapshot = await client.snapshot()
+        except (
+            ArithmeticError,
+            KeyError,
+            PrivateRequestError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{exchange.value} private account probe failed",
+            ) from exc
+        finally:
+            await client.close()
+        return snapshot.model_dump(mode="json")
 
     @app.get("/api/settings", response_model=ScannerSettings)
     async def settings() -> ScannerSettings:

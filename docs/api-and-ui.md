@@ -15,10 +15,17 @@
 - `PUT /api/accounts/{exchange}/{sandbox|live}/credentials`：保存或替换 API Key、Secret，
   OKX/Bitget 还必须提供 passphrase；
 - `DELETE /api/accounts/{exchange}/{sandbox|live}/credentials`：删除本地加密凭据。
+- `GET /api/accounts/{exchange}/{sandbox|live}/snapshot`：按需解密凭据并从交易所读取 USDT
+  现货可用余额、永续可用余额/权益、账户类型和持仓模式；响应仍不包含任何凭据。
 
 写入接口只接受已认证且 CSRF 校验通过的请求。明文只在单次请求内进入内存，随后使用绑定交易所与环境的
 AES-GCM 关联数据加密；响应、审计事件和日志均不得包含 API Secret、passphrase 或完整 API Key。
 `paper` 环境不接受交易所凭据。
+
+账户快照使用各所官方只读接口和签名规则。签名错误、超时及 HTTP 错误统一映射为不带请求 URL、
+签名参数或响应原文的脱敏错误。MEXC 和 Gate 没有满足同所现货+USDT 永续完整验收要求的沙盒，
+其 `sandbox` 快照明确返回不支持，不会回退到实盘地址。Bybit V5 不直接返回无持仓标的的全局持仓模式，
+因此当前快照如实返回 `unknown`；模式未知时后续状态机必须禁止下单，不能按默认值猜测。
 
 WebSocket 首帧为 `snapshot`，后续帧为带单调 `sequence` 的 `update`；客户端发现序号断层或重连时重新读取 REST 快照。
 
