@@ -31,6 +31,8 @@ worker 定期写入 `account_snapshots`、`remote_open_order_snapshots`、
 非终态意图可由 worker 按创建时间恢复。纸面 worker 在单一数据库事务中更新双腿、写入 `fills` 并创建
 `paired_positions`；唯一交易 ID 和开仓意图约束保证重复运行不会重复成交。真实成交仍必须以交易所
 私有流或 REST 查询为准。
+平仓意图通过唯一 `paired_position_id` 关联原仓位，计划时即把仓位置为 `closing`，执行事务完成后
+写入平仓费用、已实现净盈亏和 `closed_at`；同一仓位不能并发创建两个平仓意图。
 
 可使用单次命令验证解密、签名、持久化与安全阻断：
 

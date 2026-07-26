@@ -383,6 +383,52 @@ def create_app(
             ]
         }
 
+    @app.post("/api/trades/paper/positions/{position_id}/close")
+    async def plan_paper_close(
+        position_id: UUID,
+        request: Request,
+        idempotency_key: Annotated[UUID, Header(alias="Idempotency-Key")],
+    ) -> dict[str, object]:
+        position = await trade_ledger.position(str(position_id))
+        if position is None:
+            raise HTTPException(status_code=404, detail="paired position was not found")
+        opportunity = scanner.opportunities.get(
+            f"{position.exchange.value}:{position.base_asset}"
+        )
+        if opportunity is None:
+            raise HTTPException(status_code=404, detail="opportunity is not available")
+        try:
+            intent, created = await trade_ledger.plan_paper_close(
+                position_id=position.id,
+                opportunity=opportunity,
+                idempotency_key=idempotency_key,
+                settings=scanner.settings,
+            )
+        except (TradeValidationError, IdempotencyConflict) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if created:
+            actor = (
+                request.state.admin.username
+                if getattr(request.state, "admin", None)
+                else "local"
+            )
+            await scanner.database.append_audit(
+                "trade.intent_planned",
+                actor=actor,
+                details={
+                    "intent_id": intent.id,
+                    "position_id": position.id,
+                    "exchange": intent.exchange.value,
+                    "environment": intent.environment,
+                    "base_asset": intent.base_asset,
+                    "action": intent.action,
+                },
+            )
+        return {
+            "created": created,
+            "intent": intent.model_dump(mode="json"),
+        }
+
     @app.get("/api/accounts/credentials")
     async def credential_summaries() -> dict[str, object]:
         if credential_service is None:

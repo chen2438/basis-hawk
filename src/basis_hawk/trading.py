@@ -85,6 +85,7 @@ class TradeIntentView(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     id: str
+    paired_position_id: str | None
     idempotency_key: str
     exchange: Exchange
     environment: str
@@ -143,6 +144,8 @@ class PairedPositionView(BaseModel):
     spot_entry_price: Decimal
     perp_entry_price: Decimal
     opening_fees_usdt: Decimal
+    closing_fees_usdt: Decimal | None
+    realized_pnl_usdt: Decimal | None
     status: str
     opened_at: datetime
     closed_at: datetime | None
@@ -152,10 +155,12 @@ class PairedPositionView(BaseModel):
         "spot_entry_price",
         "perp_entry_price",
         "opening_fees_usdt",
+        "closing_fees_usdt",
+        "realized_pnl_usdt",
         when_used="json",
     )
-    def serialize_decimal(self, value: Decimal) -> str:
-        return format(value, "f")
+    def serialize_decimal(self, value: Decimal | None) -> str | None:
+        return format(value, "f") if value is not None else None
 
 
 class PaperExecutionResult(BaseModel):
@@ -215,6 +220,20 @@ class TradeLedger:
         settings: ScannerSettings,
         now: datetime | None = None,
     ) -> tuple[TradeIntentView, bool]:
+        existing = await self.database.trade_intent_by_idempotency(str(idempotency_key))
+        if existing is not None:
+            row, legs = existing
+            if (
+                row.environment == "paper"
+                and row.action == "open"
+                and row.exchange == opportunity.exchange.value
+                and row.base_asset == opportunity.base_asset
+                and row.requested_notional == notional_usdt
+            ):
+                return _view(row, legs), False
+            raise IdempotencyConflict(
+                "idempotency key was already used for a different trade request"
+            )
         observed_now = now or datetime.now(UTC)
         if opportunity.quality != Quality.HEALTHY:
             raise TradeValidationError("only healthy opportunities can be planned")
@@ -231,9 +250,7 @@ class TradeLedger:
 
         quantity = notional_usdt / opportunity.spot_ask
         fees = settings.fees[opportunity.exchange]
-        config_version = hashlib.sha256(
-            settings.model_dump_json().encode()
-        ).hexdigest()
+        config_version = hashlib.sha256(settings.model_dump_json().encode()).hexdigest()
         fingerprint = hashlib.sha256(
             json.dumps(
                 {
@@ -338,6 +355,140 @@ class TradeLedger:
             raise StateConflict("trade intent version changed")
         return _view(updated, legs)
 
+    async def plan_paper_close(
+        self,
+        *,
+        position_id: str,
+        opportunity: Opportunity,
+        idempotency_key: uuid.UUID,
+        settings: ScannerSettings,
+        now: datetime | None = None,
+    ) -> tuple[TradeIntentView, bool]:
+        existing = await self.database.trade_intent_by_idempotency(str(idempotency_key))
+        if existing is not None:
+            row, legs = existing
+            if (
+                row.environment == "paper"
+                and row.action == "close"
+                and row.paired_position_id == position_id
+            ):
+                return _view(row, legs), False
+            raise IdempotencyConflict(
+                "idempotency key was already used for a different trade request"
+            )
+        observed_now = now or datetime.now(UTC)
+        position = await self.database.paired_position(position_id)
+        if position is None:
+            raise TradeValidationError("paired position was not found")
+        if position.environment != "paper" or position.status != "open":
+            raise TradeValidationError("paired position is not open for paper closing")
+        if (
+            position.exchange != opportunity.exchange.value
+            or position.base_asset != opportunity.base_asset
+        ):
+            raise TradeValidationError("opportunity does not match paired position")
+        if opportunity.quality != Quality.HEALTHY:
+            raise TradeValidationError("only healthy opportunities can be closed normally")
+        if opportunity.observed_at > observed_now + timedelta(seconds=5):
+            raise TradeValidationError("market quote timestamp is in the future")
+        if observed_now - opportunity.observed_at > timedelta(seconds=15):
+            raise TradeValidationError("market quote is stale")
+        if opportunity.spot_bid <= 0 or opportunity.perp_ask <= 0:
+            raise TradeValidationError("closing market prices must be positive")
+        required_capacity = max(
+            position.quantity * opportunity.spot_bid,
+            position.quantity * opportunity.perp_ask,
+        )
+        if required_capacity > opportunity.close_top_book_notional:
+            raise TradeValidationError("position exceeds current closing top-book capacity")
+
+        fees = settings.fees[opportunity.exchange]
+        config_version = hashlib.sha256(settings.model_dump_json().encode()).hexdigest()
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "position_id": position.id,
+                    "exchange": opportunity.exchange.value,
+                    "base_asset": opportunity.base_asset,
+                    "quantity": format(position.quantity, "f"),
+                    "spot_price": format(opportunity.spot_bid, "f"),
+                    "perp_price": format(opportunity.perp_ask, "f"),
+                    "market_observed_at": opportunity.observed_at.isoformat(),
+                    "config_version": config_version,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        intent_id = str(uuid.uuid4())
+        now_value = datetime.now(UTC)
+        client_prefix = f"bh-{intent_id.replace('-', '')[:20]}"
+        try:
+            row, legs, created = await self.database.create_paper_close_intent(
+                position_id=position.id,
+                intent={
+                    "id": intent_id,
+                    "paired_position_id": position.id,
+                    "idempotency_key": str(idempotency_key),
+                    "request_fingerprint": fingerprint,
+                    "exchange": opportunity.exchange.value,
+                    "environment": "paper",
+                    "base_asset": opportunity.base_asset,
+                    "action": "close",
+                    "status": TradeIntentStatus.PLANNED.value,
+                    "requested_notional": position.quantity * opportunity.spot_bid,
+                    "base_quantity": position.quantity,
+                    "spot_fee_rate": fees.spot_taker,
+                    "perp_fee_rate": fees.perp_taker,
+                    "market_observed_at": opportunity.observed_at,
+                    "config_version": config_version,
+                    "version": 1,
+                    "created_at": now_value,
+                    "updated_at": now_value,
+                },
+                legs=[
+                    {
+                        "id": str(uuid.uuid4()),
+                        "trade_intent_id": intent_id,
+                        "leg": "spot",
+                        "market": "spot",
+                        "symbol": opportunity.spot_symbol,
+                        "side": "sell",
+                        "client_order_id": f"{client_prefix}-s",
+                        "status": OrderLegStatus.CREATED.value,
+                        "quantity": position.quantity,
+                        "limit_price": opportunity.spot_bid,
+                        "filled_quantity": Decimal("0"),
+                        "reduce_only": False,
+                        "created_at": now_value,
+                        "updated_at": now_value,
+                    },
+                    {
+                        "id": str(uuid.uuid4()),
+                        "trade_intent_id": intent_id,
+                        "leg": "perp",
+                        "market": "perp",
+                        "symbol": opportunity.perp_symbol,
+                        "side": "buy",
+                        "client_order_id": f"{client_prefix}-p",
+                        "status": OrderLegStatus.CREATED.value,
+                        "quantity": position.quantity,
+                        "limit_price": opportunity.perp_ask,
+                        "filled_quantity": Decimal("0"),
+                        "reduce_only": True,
+                        "created_at": now_value,
+                        "updated_at": now_value,
+                    },
+                ],
+            )
+        except ValueError as exc:
+            raise TradeValidationError(str(exc)) from exc
+        if row.request_fingerprint != fingerprint:
+            raise IdempotencyConflict(
+                "idempotency key was already used for a different trade request"
+            )
+        return _view(row, legs), created
+
     async def get(self, intent_id: str) -> TradeIntentView | None:
         value = await self.database.trade_intent(intent_id)
         return _view(*value) if value is not None else None
@@ -348,11 +499,12 @@ class TradeLedger:
             for item in await self.database.list_paired_positions(status=status)
         ]
 
+    async def position(self, position_id: str) -> PairedPositionView | None:
+        row = await self.database.paired_position(position_id)
+        return _position_view(row) if row is not None else None
+
     async def fills(self, intent_id: str) -> list[FillView]:
-        return [
-            _fill_view(item)
-            for item in await self.database.fills_for_intent(intent_id)
-        ]
+        return [_fill_view(item) for item in await self.database.fills_for_intent(intent_id)]
 
 
 class PaperExecutionService:
@@ -364,13 +516,17 @@ class PaperExecutionService:
         candidates = [
             item
             for item in recoverable
-            if item.environment == "paper"
-            and item.action == "open"
-            and item.status == TradeIntentStatus.PLANNED.value
+            if item.environment == "paper" and item.status == TradeIntentStatus.PLANNED.value
         ]
         executed = 0
         for item in candidates:
-            result = await self.database.execute_paper_open(intent_id=item.id)
+            result = (
+                await self.database.execute_paper_open(intent_id=item.id)
+                if item.action == "open"
+                else await self.database.execute_paper_close(intent_id=item.id)
+                if item.action == "close"
+                else None
+            )
             if result is not None and result[2]:
                 executed += 1
         return PaperExecutionResult(examined=len(candidates), executed=executed)
@@ -379,6 +535,7 @@ class PaperExecutionService:
 def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:
     return TradeIntentView(
         id=row.id,
+        paired_position_id=row.paired_position_id,
         idempotency_key=row.idempotency_key,
         exchange=Exchange(row.exchange),
         environment=row.environment,
@@ -410,7 +567,7 @@ def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:
                 average_price=item.average_price,
                 reduce_only=item.reduce_only,
             )
-            for item in legs
+            for item in sorted(legs, key=lambda value: value.leg, reverse=True)
         ],
     )
 
@@ -440,6 +597,8 @@ def _position_view(row: PairedPositionRow) -> PairedPositionView:
         spot_entry_price=row.spot_entry_price,
         perp_entry_price=row.perp_entry_price,
         opening_fees_usdt=row.opening_fees_usdt,
+        closing_fees_usdt=row.closing_fees_usdt,
+        realized_pnl_usdt=row.realized_pnl_usdt,
         status=row.status,
         opened_at=row.opened_at,
         closed_at=row.closed_at,

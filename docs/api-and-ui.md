@@ -26,6 +26,8 @@
 - `GET /api/trades/intents/{uuid}`：读取交易意图、版本和双腿状态。
 - `GET /api/trades/intents/{uuid}/fills`：读取该意图的成交和手续费。
 - `GET /api/trades/positions?status=open`：读取配对仓位。
+- `POST /api/trades/paper/positions/{uuid}/close`：使用现货 bid 卖出及永续 ask reduce-only
+  买回计划纸面平仓，同样要求 UUID `Idempotency-Key`。
 
 写入接口只接受已认证且 CSRF 校验通过的请求。明文只在单次请求内进入内存，随后使用绑定交易所与环境的
 AES-GCM 关联数据加密；响应、审计事件和日志均不得包含 API Secret、passphrase 或完整 API Key。
@@ -50,6 +52,8 @@ HTTP 接口本身不直接成交。纸面 worker 使用计划时保存的价格�
 taker 成交并创建配对仓位；
 崩溃发生在提交前会保留 `planned` 供重试，提交后再次运行不会重复生成成交。该模型不代表真实撮合，
 不会访问交易所，也不用于实盘收益承诺。
+纸面平仓只接受匹配标的的最新健康行情及足够的平仓方向容量；完成后持久化平仓费用，并以现货价差加
+永续空仓价差减去开平仓双边费用计算 `realized_pnl_usdt`。重复平仓请求不会重复生成成交。
 
 WebSocket 首帧为 `snapshot`，后续帧为带单调 `sequence` 的 `update`；客户端发现序号断层或重连时重新读取 REST 快照。
 

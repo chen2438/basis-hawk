@@ -151,6 +151,40 @@ async def test_paper_executor_atomically_fills_both_legs_and_opens_position() ->
     assert positions[0].opening_fees_usdt.quantize(Decimal("0.001")) == Decimal(
         "0.151"
     )
+
+    close_key = uuid.uuid4()
+    close_intent, close_created = await ledger.plan_paper_close(
+        position_id=positions[0].id,
+        opportunity=_opportunity(),
+        idempotency_key=close_key,
+        settings=ScannerSettings(),
+    )
+    close_repeated, repeated_created = await ledger.plan_paper_close(
+        position_id=positions[0].id,
+        opportunity=_opportunity(),
+        idempotency_key=close_key,
+        settings=ScannerSettings(),
+    )
+    assert close_created is True
+    assert repeated_created is False
+    assert close_repeated.id == close_intent.id
+    assert {(leg.leg, leg.side, leg.reduce_only) for leg in close_intent.legs} == {
+        ("spot", "sell", False),
+        ("perp", "buy", True),
+    }
+
+    closed_result = await executor.run_once()
+    closed_position = (await ledger.positions(status="closed"))[0]
+    assert closed_result.executed == 1
+    assert closed_position.closing_intent_id == close_intent.id
+    assert closed_position.closing_fees_usdt is not None
+    assert closed_position.closing_fees_usdt.quantize(
+        Decimal("0.001")
+    ) == Decimal("0.150")
+    assert closed_position.realized_pnl_usdt is not None
+    assert closed_position.realized_pnl_usdt.quantize(
+        Decimal("0.001")
+    ) == Decimal("-4.301")
     await database.close()
 
 

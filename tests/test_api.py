@@ -96,7 +96,22 @@ async def test_rest_contract_and_settings() -> None:
         fills = await client.get(f"/api/trades/intents/{intent_id}/fills")
         assert len(fills.json()["items"]) == 2
         positions = await client.get("/api/trades/positions", params={"status": "open"})
+        position_id = positions.json()["items"][0]["id"]
         assert positions.json()["items"][0]["opening_intent_id"] == intent_id
+        close = await client.post(
+            f"/api/trades/paper/positions/{position_id}/close",
+            headers={"Idempotency-Key": str(uuid.uuid4())},
+        )
+        assert close.status_code == 200
+        assert close.json()["intent"]["action"] == "close"
+        assert next(
+            leg
+            for leg in close.json()["intent"]["legs"]
+            if leg["market"] == "perp"
+        )["reduce_only"] is True
+        assert (await PaperExecutionService(database).run_once()).executed == 1
+        closed = await client.get("/api/trades/positions", params={"status": "closed"})
+        assert closed.json()["items"][0]["id"] == position_id
     await database.close()
 
 
