@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 from basis_hawk.credentials import ExchangeEnvironment
 from basis_hawk.models import (
@@ -29,6 +29,10 @@ from basis_hawk.storage import (
     PairedPositionRow,
     TradeIntentRow,
 )
+
+
+def _canonical_decimal(value: Decimal) -> str:
+    return format(value.normalize(), "f") if value else "0"
 
 
 class TradeIntentStatus(StrEnum):
@@ -182,6 +186,55 @@ class PairedPositionView(BaseModel):
         return format(value, "f") if value is not None else None
 
 
+class LiveOpenPreview(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    request_fingerprint: str = Field(exclude=True)
+    config_version: str = Field(exclude=True)
+    exchange: Exchange
+    environment: ExchangeEnvironment
+    base_asset: str
+    leverage: int
+    requested_notional: Decimal
+    maximum_slippage: Decimal
+    market_observed_at: datetime
+    expires_at: datetime
+    spot_symbol: str
+    spot_reference_price: Decimal
+    spot_limit_price: Decimal
+    spot_quantity: Decimal
+    spot_usdt_required: Decimal
+    perp_symbol: str
+    perp_reference_price: Decimal
+    perp_limit_price: Decimal
+    perp_quantity: Decimal
+    perp_base_multiplier: Decimal
+    perp_usdt_margin_required: Decimal
+    base_quantity: Decimal
+    estimated_total_fees_usdt: Decimal
+    worst_case_basis: Decimal
+
+    @field_serializer(
+        "requested_notional",
+        "maximum_slippage",
+        "spot_reference_price",
+        "spot_limit_price",
+        "spot_quantity",
+        "spot_usdt_required",
+        "perp_reference_price",
+        "perp_limit_price",
+        "perp_quantity",
+        "perp_base_multiplier",
+        "perp_usdt_margin_required",
+        "base_quantity",
+        "estimated_total_fees_usdt",
+        "worst_case_basis",
+        when_used="json",
+    )
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+
 class PaperExecutionResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -231,6 +284,151 @@ TRANSITIONS: dict[TradeIntentStatus, set[TradeIntentStatus]] = {
 class TradeLedger:
     def __init__(self, database: Database) -> None:
         self.database = database
+
+    def preview_live_open(
+        self,
+        *,
+        opportunity: Opportunity,
+        pair: InstrumentPair,
+        notional_usdt: Decimal,
+        settings: ScannerSettings,
+        environment: ExchangeEnvironment,
+        leverage: int = 1,
+        maximum_slippage: Decimal = Decimal("0.001"),
+        now: datetime | None = None,
+    ) -> LiveOpenPreview:
+        if leverage < 1 or leverage > 10:
+            raise TradeValidationError("leverage must be between 1 and 10")
+        if maximum_slippage <= 0 or maximum_slippage > Decimal("0.1"):
+            raise TradeValidationError(
+                "maximum slippage must be above 0 and at most 0.1"
+            )
+        if (
+            environment == ExchangeEnvironment.SANDBOX
+            and opportunity.exchange in {Exchange.MEXC, Exchange.GATE}
+        ):
+            raise TradeValidationError(
+                f"{opportunity.exchange.value} does not provide a supported sandbox"
+            )
+        if (
+            pair.exchange != opportunity.exchange
+            or pair.base_asset != opportunity.base_asset
+            or pair.spot_symbol != opportunity.spot_symbol
+            or pair.perp_symbol != opportunity.perp_symbol
+        ):
+            raise TradeValidationError(
+                "instrument rules do not match the selected opportunity"
+            )
+        observed_now = now or datetime.now(UTC)
+        if opportunity.quality != Quality.HEALTHY:
+            raise TradeValidationError("only healthy opportunities can be planned")
+        if opportunity.observed_at > observed_now + timedelta(seconds=5):
+            raise TradeValidationError("market quote timestamp is in the future")
+        if observed_now - opportunity.observed_at > timedelta(seconds=15):
+            raise TradeValidationError("market quote is stale")
+        if notional_usdt <= 0:
+            raise TradeValidationError("notional must be positive")
+        if notional_usdt > opportunity.top_book_notional:
+            raise TradeValidationError("notional exceeds current top-book capacity")
+        try:
+            sizing = size_paired_order(
+                pair,
+                requested_notional=notional_usdt,
+                spot_price=opportunity.spot_ask,
+                perp_price=opportunity.perp_bid,
+            )
+            spot_limit = protective_limit_price(
+                reference_price=opportunity.spot_ask,
+                maximum_slippage=maximum_slippage,
+                side="buy",
+                price_increment=pair.spot_price_increment,
+            )
+            perp_limit = protective_limit_price(
+                reference_price=opportunity.perp_bid,
+                maximum_slippage=maximum_slippage,
+                side="sell",
+                price_increment=pair.perp_price_increment,
+            )
+        except OrderSizingError as exc:
+            raise TradeValidationError(str(exc)) from exc
+        fees = settings.fees[opportunity.exchange]
+        spot_notional = sizing.spot_quantity * spot_limit
+        perp_notional = sizing.base_quantity * perp_limit
+        spot_fee = spot_notional * fees.spot_taker
+        perp_fee = perp_notional * fees.perp_taker
+        config_version = hashlib.sha256(
+            json.dumps(
+                {
+                    "scanner": settings.model_dump(mode="json"),
+                    "environment": environment.value,
+                    "leverage": leverage,
+                    "maximum_slippage": _canonical_decimal(
+                        maximum_slippage
+                    ),
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "exchange": opportunity.exchange.value,
+                    "environment": environment.value,
+                    "base_asset": opportunity.base_asset,
+                    "notional_usdt": _canonical_decimal(notional_usdt),
+                    "leverage": leverage,
+                    "maximum_slippage": _canonical_decimal(
+                        maximum_slippage
+                    ),
+                    "spot_symbol": pair.spot_symbol,
+                    "perp_symbol": pair.perp_symbol,
+                    "spot_quantity": _canonical_decimal(
+                        sizing.spot_quantity
+                    ),
+                    "perp_quantity": _canonical_decimal(
+                        sizing.perp_quantity
+                    ),
+                    "perp_contract_size": _canonical_decimal(
+                        pair.perp_contract_size
+                    ),
+                    "spot_limit": _canonical_decimal(spot_limit),
+                    "perp_limit": _canonical_decimal(perp_limit),
+                    "market_observed_at": opportunity.observed_at.isoformat(),
+                    "config_version": config_version,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        return LiveOpenPreview(
+            request_fingerprint=fingerprint,
+            config_version=config_version,
+            exchange=opportunity.exchange,
+            environment=environment,
+            base_asset=opportunity.base_asset,
+            leverage=leverage,
+            requested_notional=notional_usdt,
+            maximum_slippage=maximum_slippage,
+            market_observed_at=opportunity.observed_at,
+            expires_at=opportunity.observed_at + timedelta(seconds=15),
+            spot_symbol=pair.spot_symbol,
+            spot_reference_price=opportunity.spot_ask,
+            spot_limit_price=spot_limit,
+            spot_quantity=sizing.spot_quantity,
+            spot_usdt_required=spot_notional + spot_fee,
+            perp_symbol=pair.perp_symbol,
+            perp_reference_price=opportunity.perp_bid,
+            perp_limit_price=perp_limit,
+            perp_quantity=sizing.perp_quantity,
+            perp_base_multiplier=pair.perp_contract_size,
+            perp_usdt_margin_required=(
+                perp_notional / Decimal(leverage) + perp_fee
+            ),
+            base_quantity=sizing.base_quantity,
+            estimated_total_fees_usdt=spot_fee + perp_fee,
+            worst_case_basis=(perp_limit - spot_limit) / spot_limit,
+        )
 
     async def plan_paper_open(
         self,
@@ -406,92 +604,17 @@ class TradeLedger:
             raise IdempotencyConflict(
                 "idempotency key was already used for a different trade request"
             )
-        if leverage < 1 or leverage > 10:
-            raise TradeValidationError("leverage must be between 1 and 10")
-        if (
-            environment == ExchangeEnvironment.SANDBOX
-            and opportunity.exchange in {Exchange.MEXC, Exchange.GATE}
-        ):
-            raise TradeValidationError(
-                f"{opportunity.exchange.value} does not provide a supported sandbox"
-            )
-        if (
-            pair.exchange != opportunity.exchange
-            or pair.base_asset != opportunity.base_asset
-            or pair.spot_symbol != opportunity.spot_symbol
-            or pair.perp_symbol != opportunity.perp_symbol
-        ):
-            raise TradeValidationError(
-                "instrument rules do not match the selected opportunity"
-            )
-        observed_now = now or datetime.now(UTC)
-        if opportunity.quality != Quality.HEALTHY:
-            raise TradeValidationError("only healthy opportunities can be planned")
-        if opportunity.observed_at > observed_now + timedelta(seconds=5):
-            raise TradeValidationError("market quote timestamp is in the future")
-        if observed_now - opportunity.observed_at > timedelta(seconds=15):
-            raise TradeValidationError("market quote is stale")
-        if notional_usdt <= 0:
-            raise TradeValidationError("notional must be positive")
-        if notional_usdt > opportunity.top_book_notional:
-            raise TradeValidationError("notional exceeds current top-book capacity")
-        try:
-            sizing = size_paired_order(
-                pair,
-                requested_notional=notional_usdt,
-                spot_price=opportunity.spot_ask,
-                perp_price=opportunity.perp_bid,
-            )
-            spot_limit = protective_limit_price(
-                reference_price=opportunity.spot_ask,
-                maximum_slippage=maximum_slippage,
-                side="buy",
-                price_increment=pair.spot_price_increment,
-            )
-            perp_limit = protective_limit_price(
-                reference_price=opportunity.perp_bid,
-                maximum_slippage=maximum_slippage,
-                side="sell",
-                price_increment=pair.perp_price_increment,
-            )
-        except OrderSizingError as exc:
-            raise TradeValidationError(str(exc)) from exc
-
+        preview = self.preview_live_open(
+            opportunity=opportunity,
+            pair=pair,
+            notional_usdt=notional_usdt,
+            settings=settings,
+            environment=environment,
+            leverage=leverage,
+            maximum_slippage=maximum_slippage,
+            now=now,
+        )
         fees = settings.fees[opportunity.exchange]
-        config_version = hashlib.sha256(
-            json.dumps(
-                {
-                    "scanner": settings.model_dump(mode="json"),
-                    "environment": environment.value,
-                    "leverage": leverage,
-                    "maximum_slippage": format(maximum_slippage, "f"),
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode()
-        ).hexdigest()
-        fingerprint = hashlib.sha256(
-            json.dumps(
-                {
-                    "exchange": opportunity.exchange.value,
-                    "environment": environment.value,
-                    "base_asset": opportunity.base_asset,
-                    "notional_usdt": format(notional_usdt, "f"),
-                    "leverage": leverage,
-                    "spot_symbol": pair.spot_symbol,
-                    "perp_symbol": pair.perp_symbol,
-                    "spot_quantity": format(sizing.spot_quantity, "f"),
-                    "perp_quantity": format(sizing.perp_quantity, "f"),
-                    "perp_contract_size": format(pair.perp_contract_size, "f"),
-                    "spot_limit": format(spot_limit, "f"),
-                    "perp_limit": format(perp_limit, "f"),
-                    "market_observed_at": opportunity.observed_at.isoformat(),
-                    "config_version": config_version,
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode()
-        ).hexdigest()
         intent_id = str(uuid.uuid4())
         spot_client_id, perp_client_id = _live_client_order_ids(
             opportunity.exchange,
@@ -502,7 +625,7 @@ class TradeLedger:
             intent={
                 "id": intent_id,
                 "idempotency_key": str(idempotency_key),
-                "request_fingerprint": fingerprint,
+                "request_fingerprint": preview.request_fingerprint,
                 "exchange": opportunity.exchange.value,
                 "environment": environment.value,
                 "base_asset": opportunity.base_asset,
@@ -510,11 +633,11 @@ class TradeLedger:
                 "status": TradeIntentStatus.PLANNED.value,
                 "leverage": leverage,
                 "requested_notional": notional_usdt,
-                "base_quantity": sizing.base_quantity,
+                "base_quantity": preview.base_quantity,
                 "spot_fee_rate": fees.spot_taker,
                 "perp_fee_rate": fees.perp_taker,
                 "market_observed_at": opportunity.observed_at,
-                "config_version": config_version,
+                "config_version": preview.config_version,
                 "version": 1,
                 "created_at": now_value,
                 "updated_at": now_value,
@@ -529,9 +652,9 @@ class TradeLedger:
                     "side": "buy",
                     "client_order_id": spot_client_id,
                     "status": OrderLegStatus.CREATED.value,
-                    "quantity": sizing.spot_quantity,
+                    "quantity": preview.spot_quantity,
                     "base_multiplier": Decimal("1"),
-                    "limit_price": spot_limit,
+                    "limit_price": preview.spot_limit_price,
                     "filled_quantity": Decimal("0"),
                     "reduce_only": False,
                     "created_at": now_value,
@@ -546,9 +669,9 @@ class TradeLedger:
                     "side": "sell",
                     "client_order_id": perp_client_id,
                     "status": OrderLegStatus.CREATED.value,
-                    "quantity": sizing.perp_quantity,
-                    "base_multiplier": pair.perp_contract_size,
-                    "limit_price": perp_limit,
+                    "quantity": preview.perp_quantity,
+                    "base_multiplier": preview.perp_base_multiplier,
+                    "limit_price": preview.perp_limit_price,
                     "filled_quantity": Decimal("0"),
                     "reduce_only": False,
                     "created_at": now_value,
@@ -556,7 +679,7 @@ class TradeLedger:
                 },
             ],
         )
-        if row.request_fingerprint != fingerprint:
+        if row.request_fingerprint != preview.request_fingerprint:
             raise IdempotencyConflict(
                 "idempotency key was already used for a different trade request"
             )

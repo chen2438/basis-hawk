@@ -251,6 +251,13 @@ class ScannerService:
         exchange = Exchange(key.split(":", 1)[0])
         return next((pair for pair in self.pairs.get(exchange, []) if pair.key == key), None)
 
+    def instrument_pair(
+        self,
+        exchange: Exchange,
+        base_asset: str,
+    ) -> InstrumentPair | None:
+        return self._pair(f"{exchange.value}:{base_asset.strip().upper()}")
+
     def _rebuild(self, key: str) -> None:
         pair = self._pair(key)
         if not pair or key not in self.quotes or key not in self.current:

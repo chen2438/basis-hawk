@@ -5,8 +5,8 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated
-from uuid import UUID
+from typing import Annotated, Literal
+from uuid import UUID, uuid4
 
 from fastapi import (
     FastAPI,
@@ -61,6 +61,24 @@ class PaperOpenRequest(BaseModel):
     exchange: Exchange
     base_asset: str = Field(min_length=1, max_length=40)
     notional_usdt: Decimal = Field(gt=0)
+
+
+class LiveOpenPreviewRequest(BaseModel):
+    exchange: Exchange
+    environment: ExchangeEnvironment
+    base_asset: str = Field(min_length=1, max_length=40)
+    notional_usdt: Decimal = Field(gt=0)
+    leverage: int = Field(default=1, ge=1, le=10)
+    maximum_slippage: Decimal = Field(
+        default=Decimal("0.001"),
+        gt=0,
+        le=Decimal("0.1"),
+    )
+
+
+class LiveOpenConfirmRequest(BaseModel):
+    preview_id: UUID
+    confirmed: Literal[True]
 
 
 def create_app(
@@ -123,6 +141,10 @@ def create_app(
     app.state.auth_service = auth_service
     trade_ledger = TradeLedger(scanner.database)
     login_limiter = LoginAttemptLimiter()
+
+    def request_actor(request: Request) -> str:
+        admin = getattr(request.state, "admin", None)
+        return admin.username if admin is not None else "local"
 
     @app.middleware("http")
     async def authenticate_request(request: Request, call_next):
@@ -352,6 +374,177 @@ def create_app(
                 "trade.intent_planned",
                 actor=actor,
                 details={
+                    "intent_id": intent.id,
+                    "exchange": intent.exchange.value,
+                    "environment": intent.environment,
+                    "base_asset": intent.base_asset,
+                    "action": intent.action,
+                },
+            )
+        return {
+            "created": created,
+            "intent": intent.model_dump(mode="json"),
+        }
+
+    @app.post("/api/trades/open/preview")
+    async def preview_live_open(
+        value: LiveOpenPreviewRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        if credential_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        if (
+            await credential_service.load(value.exchange, value.environment)
+            is None
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="exchange credential is not configured",
+            )
+        base_asset = value.base_asset.strip().upper()
+        opportunity = scanner.opportunities.get(
+            f"{value.exchange.value}:{base_asset}"
+        )
+        if opportunity is None:
+            raise HTTPException(
+                status_code=404,
+                detail="opportunity is not available",
+            )
+        pair = scanner.instrument_pair(value.exchange, base_asset)
+        if pair is None:
+            raise HTTPException(
+                status_code=409,
+                detail="instrument trading rules are not available",
+            )
+        try:
+            preview = trade_ledger.preview_live_open(
+                opportunity=opportunity,
+                pair=pair,
+                notional_usdt=value.notional_usdt,
+                settings=scanner.settings,
+                environment=value.environment,
+                leverage=value.leverage,
+                maximum_slippage=value.maximum_slippage,
+            )
+        except TradeValidationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        preview_id = str(uuid4())
+        actor = request_actor(request)
+        created_at = datetime.now(UTC)
+        await scanner.database.create_trade_preview(
+            preview={
+                "id": preview_id,
+                "actor": actor,
+                "request_fingerprint": preview.request_fingerprint,
+                "exchange": preview.exchange.value,
+                "environment": preview.environment.value,
+                "base_asset": preview.base_asset,
+                "requested_notional": preview.requested_notional,
+                "leverage": preview.leverage,
+                "maximum_slippage": preview.maximum_slippage,
+                "market_observed_at": preview.market_observed_at,
+                "confirmation_idempotency_key": None,
+                "created_at": created_at,
+                "expires_at": preview.expires_at,
+                "confirmed_at": None,
+            }
+        )
+        await scanner.database.append_audit(
+            "trade.preview_created",
+            actor=actor,
+            details={
+                "preview_id": preview_id,
+                "exchange": preview.exchange.value,
+                "environment": preview.environment.value,
+                "base_asset": preview.base_asset,
+                "expires_at": preview.expires_at.isoformat(),
+            },
+        )
+        return {
+            "preview_id": preview_id,
+            "preview": preview.model_dump(mode="json"),
+        }
+
+    @app.post("/api/trades/open/confirm")
+    async def confirm_live_open(
+        value: LiveOpenConfirmRequest,
+        request: Request,
+        idempotency_key: Annotated[UUID, Header(alias="Idempotency-Key")],
+    ) -> dict[str, object]:
+        control = await scanner.database.execution_control()
+        if control is None or control.state != "ready":
+            raise HTTPException(
+                status_code=409,
+                detail="execution is not ready for live confirmation",
+            )
+        stored = await scanner.database.trade_preview(str(value.preview_id))
+        if stored is None:
+            raise HTTPException(
+                status_code=404,
+                detail="trade preview was not found",
+            )
+        exchange = Exchange(stored.exchange)
+        environment = ExchangeEnvironment(stored.environment)
+        if credential_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        if await credential_service.load(exchange, environment) is None:
+            raise HTTPException(
+                status_code=409,
+                detail="exchange credential is not configured",
+            )
+        opportunity = scanner.opportunities.get(
+            f"{exchange.value}:{stored.base_asset}"
+        )
+        pair = scanner.instrument_pair(exchange, stored.base_asset)
+        if opportunity is None or pair is None:
+            raise HTTPException(
+                status_code=409,
+                detail="current market or trading rules are not available",
+            )
+        try:
+            current_preview = trade_ledger.preview_live_open(
+                opportunity=opportunity,
+                pair=pair,
+                notional_usdt=stored.requested_notional,
+                settings=scanner.settings,
+                environment=environment,
+                leverage=stored.leverage,
+                maximum_slippage=stored.maximum_slippage,
+            )
+            await scanner.database.reserve_trade_preview(
+                preview_id=stored.id,
+                actor=request_actor(request),
+                request_fingerprint=current_preview.request_fingerprint,
+                idempotency_key=str(idempotency_key),
+            )
+            intent, created = await trade_ledger.plan_live_open(
+                opportunity=opportunity,
+                pair=pair,
+                notional_usdt=stored.requested_notional,
+                idempotency_key=idempotency_key,
+                settings=scanner.settings,
+                environment=environment,
+                leverage=stored.leverage,
+                maximum_slippage=stored.maximum_slippage,
+            )
+        except (
+            IdempotencyConflict,
+            TradeValidationError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if created:
+            await scanner.database.append_audit(
+                "trade.intent_confirmed",
+                actor=request_actor(request),
+                details={
+                    "preview_id": stored.id,
                     "intent_id": intent.id,
                     "exchange": intent.exchange.value,
                     "environment": intent.environment,
