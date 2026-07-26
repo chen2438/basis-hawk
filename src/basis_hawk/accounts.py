@@ -10,11 +10,18 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlencode
 
 import httpx
-from pydantic import BaseModel, ConfigDict, field_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from basis_hawk.credentials import ExchangeEnvironment, ExchangeSecrets
 from basis_hawk.models import Exchange
@@ -32,6 +39,53 @@ class PrivateRequestError(RuntimeError):
 
 class UnsupportedEnvironmentError(RuntimeError):
     pass
+
+
+class UnsupportedTradingError(RuntimeError):
+    pass
+
+
+class LimitIocOrder(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    market: Literal["spot", "perp"]
+    symbol: str = Field(min_length=1, max_length=100)
+    side: Literal["buy", "sell"]
+    quantity: Decimal = Field(gt=0)
+    limit_price: Decimal = Field(gt=0)
+    client_order_id: str = Field(min_length=1, max_length=64)
+    reduce_only: bool = False
+    position_mode: PositionMode = PositionMode.UNKNOWN
+
+    @field_validator("symbol", "client_order_id")
+    @classmethod
+    def reject_surrounding_whitespace(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError("order identifiers cannot contain surrounding whitespace")
+        return value
+
+    @model_validator(mode="after")
+    def enforce_paired_strategy_direction(self) -> LimitIocOrder:
+        if self.market == "spot":
+            if self.reduce_only:
+                raise ValueError("spot orders cannot be reduce-only")
+            return self
+        if self.position_mode == PositionMode.UNKNOWN:
+            raise ValueError("perpetual position mode must be known")
+        if self.side == "sell" and self.reduce_only:
+            raise ValueError("opening short orders cannot be reduce-only")
+        if self.side == "buy" and not self.reduce_only:
+            raise ValueError("short-closing buy orders must be reduce-only")
+        return self
+
+
+class PerpConfiguration(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    leverage: int
+    isolated: bool
+    position_mode: PositionMode
 
 
 class AccountSnapshot(BaseModel):
@@ -188,10 +242,19 @@ async def _json_request(
     path: str,
     *,
     params: dict[str, object] | None = None,
+    data: dict[str, object] | None = None,
+    json_body: dict[str, object] | None = None,
     headers: dict[str, str] | None = None,
 ) -> Any:
     try:
-        response = await client.request(method, path, params=params, headers=headers)
+        response = await client.request(
+            method,
+            path,
+            params=params,
+            data=data,
+            json=json_body,
+            headers=headers,
+        )
     except httpx.HTTPError as exc:
         raise PrivateRequestError("private account request failed") from exc
     if not response.is_success:
@@ -232,6 +295,34 @@ class PrivateAccountClient(ABC):
         symbol: str,
         client_order_id: str,
     ) -> RemoteOrderLookup: ...
+
+    async def place_limit_ioc(self, order: LimitIocOrder) -> RemoteOrder:
+        raise UnsupportedTradingError(
+            f"{self.exchange.value} order placement is not implemented"
+        )
+
+    async def cancel_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+    ) -> RemoteOrder:
+        raise UnsupportedTradingError(
+            f"{self.exchange.value} order cancellation is not implemented"
+        )
+
+    async def configure_perp(
+        self,
+        *,
+        symbol: str,
+        leverage: int,
+        position_mode: PositionMode,
+    ) -> PerpConfiguration:
+        raise UnsupportedTradingError(
+            f"{self.exchange.value} perpetual configuration is not implemented"
+        )
 
     @abstractmethod
     async def close(self) -> None: ...
@@ -274,13 +365,23 @@ class BinanceAccountClient(PrivateAccountClient):
         path: str,
         **params: object,
     ) -> Any:
+        return await self._signed_request(client, "GET", path, **params)
+
+    async def _signed_request(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        path: str,
+        **params: object,
+    ) -> Any:
         values = _ordered({"recvWindow": 5000, "timestamp": self.clock_ms(), **params})
         values["signature"] = _hmac_hex(self.secrets.api_secret, _query(values))
         return await _json_request(
             client,
-            "GET",
+            method,
             path,
-            params=values,
+            params=values if method in {"GET", "DELETE"} else None,
+            data=values if method == "POST" else None,
             headers={"X-MBX-APIKEY": self.secrets.api_key},
         )
 
@@ -342,7 +443,7 @@ class BinanceAccountClient(PrivateAccountClient):
                 client_id="clientOrderId",
                 quantity="origQty",
                 filled="executedQty",
-                reduce_only=bool(item.get("reduceOnly")),
+                reduce_only=_binance_reduce_only(item),
             )
             for item in perp_orders
         )
@@ -438,9 +539,126 @@ class BinanceAccountClient(PrivateAccountClient):
                 client_id="clientOrderId",
                 quantity="origQty",
                 filled="executedQty",
-                reduce_only=bool(item.get("reduceOnly")),
+                reduce_only=(
+                    _binance_reduce_only(item) if market == "perp" else False
+                ),
             ),
             complete=True,
+        )
+
+    async def place_limit_ioc(self, order: LimitIocOrder) -> RemoteOrder:
+        if len(order.client_order_id) > 36:
+            raise ValueError("Binance client order IDs cannot exceed 36 characters")
+        client = self.spot if order.market == "spot" else self.perp
+        path = "/api/v3/order" if order.market == "spot" else "/fapi/v1/order"
+        params: dict[str, object] = {
+            "symbol": order.symbol,
+            "side": order.side.upper(),
+            "type": "LIMIT",
+            "timeInForce": "IOC",
+            "quantity": format(order.quantity, "f"),
+            "price": format(order.limit_price, "f"),
+            "newClientOrderId": order.client_order_id,
+            "newOrderRespType": "RESULT",
+        }
+        if order.market == "perp":
+            if order.position_mode == PositionMode.HEDGE:
+                params["positionSide"] = "SHORT"
+            else:
+                params["positionSide"] = "BOTH"
+                params["reduceOnly"] = str(order.reduce_only).lower()
+        item = await self._signed_request(client, "POST", path, **params)
+        return _order(
+            item,
+            market=order.market,
+            order_id="orderId",
+            client_id="clientOrderId",
+            quantity="origQty",
+            filled="executedQty",
+            reduce_only=order.reduce_only,
+        )
+
+    async def cancel_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+    ) -> RemoteOrder:
+        if exchange_order_id is None and client_order_id is None:
+            raise ValueError("an exchange or client order ID is required")
+        client = self.spot if market == "spot" else self.perp
+        path = "/api/v3/order" if market == "spot" else "/fapi/v1/order"
+        params: dict[str, object] = {"symbol": symbol}
+        if exchange_order_id is not None:
+            params["orderId"] = exchange_order_id
+        else:
+            params["origClientOrderId"] = client_order_id or ""
+        item = await self._signed_request(client, "DELETE", path, **params)
+        return _order(
+            item,
+            market=market,
+            order_id="orderId",
+            client_id="clientOrderId",
+            quantity="origQty",
+            filled="executedQty",
+            reduce_only=(
+                _binance_reduce_only(item) if market == "perp" else False
+            ),
+        )
+
+    async def configure_perp(
+        self,
+        *,
+        symbol: str,
+        leverage: int,
+        position_mode: PositionMode,
+    ) -> PerpConfiguration:
+        if leverage < 1 or leverage > 10:
+            raise ValueError("leverage must be between 1 and 10")
+        if position_mode == PositionMode.UNKNOWN:
+            raise ValueError("position mode must be known before configuration")
+        orders, positions = await _gather(
+            self._get(self.perp, "/fapi/v1/openOrders", symbol=symbol),
+            self._get(self.perp, "/fapi/v3/positionRisk", symbol=symbol),
+        )
+        isolated = bool(positions) and all(
+            str(item.get("marginType") or "").lower() == "isolated"
+            for item in positions
+        )
+        if not isolated:
+            has_position = any(
+                Decimal(str(item.get("positionAmt") or "0")) != 0
+                for item in positions
+            )
+            if orders or has_position:
+                raise PrivateRequestError(
+                    "cannot change Binance margin type with open orders or positions"
+                )
+            result = await self._signed_request(
+                self.perp,
+                "POST",
+                "/fapi/v1/marginType",
+                symbol=symbol,
+                marginType="ISOLATED",
+            )
+            if int(result.get("code") or 0) != 200:
+                raise PrivateRequestError("Binance isolated margin configuration failed")
+        result = await self._signed_request(
+            self.perp,
+            "POST",
+            "/fapi/v1/leverage",
+            symbol=symbol,
+            leverage=leverage,
+        )
+        if int(result.get("leverage") or 0) != leverage:
+            raise PrivateRequestError("Binance leverage configuration was not confirmed")
+        return PerpConfiguration(
+            symbol=symbol,
+            leverage=leverage,
+            isolated=True,
+            position_mode=position_mode,
         )
 
     async def close(self) -> None:
@@ -1777,6 +1995,13 @@ def _order(
         original_quantity=Decimal(str(item.get(quantity) or "0")),
         filled_quantity=Decimal(str(item.get(filled) or "0")),
         reduce_only=reduce_only,
+    )
+
+
+def _binance_reduce_only(item: dict[str, Any]) -> bool:
+    return bool(item.get("reduceOnly")) or (
+        str(item.get("positionSide") or "").upper() == "SHORT"
+        and str(item.get("side") or "").upper() == "BUY"
     )
 
 
