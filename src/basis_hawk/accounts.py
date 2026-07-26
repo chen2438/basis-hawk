@@ -1666,11 +1666,13 @@ class BitgetAccountClient(PrivateAccountClient):
     async def snapshot(self) -> AccountSnapshot:
         generation = await self._detect_account_generation()
         if generation == "uta":
-            settings, assets_payload = await _gather(
+            settings, assets_payload, info_payload = await _gather(
                 self._settings(refresh=True),
                 self._get("/api/v3/account/assets"),
+                self._get("/api/v3/account/info"),
             )
             assets = _bitget_result(assets_payload, "UTA account assets")
+            info = _bitget_result(info_payload, "UTA account info")
             asset_items = assets.get("assets") or []
             usdt = next(
                 (
@@ -1697,9 +1699,12 @@ class BitgetAccountClient(PrivateAccountClient):
                     f"{settings.get('assetMode', 'unknown')}"
                 ),
                 position_mode=_bitget_position_mode(settings.get("holdMode")),
-                trade_permission=None,
+                trade_permission=_bitget_trade_permission(
+                    info,
+                    generation="uta",
+                ),
             )
-        spot, perp = await _gather(
+        spot, perp, info_payload = await _gather(
             self._get("/api/v2/spot/account/assets", coin="USDT"),
             self._get(
                 "/api/v2/mix/account/account",
@@ -1707,9 +1712,11 @@ class BitgetAccountClient(PrivateAccountClient):
                 productType="USDT-FUTURES",
                 marginCoin="USDT",
             ),
+            self._get("/api/v2/spot/account/info"),
         )
         _bitget_success(spot)
         _bitget_success(perp)
+        info = _bitget_result(info_payload, "Classic account info")
         spot_usdt = (spot.get("data") or [{}])[0]
         contract = perp.get("data") or {}
         return AccountSnapshot(
@@ -1731,7 +1738,10 @@ class BitgetAccountClient(PrivateAccountClient):
                 if contract.get("posMode") == "one_way_mode"
                 else PositionMode.UNKNOWN
             ),
-            trade_permission=None,
+            trade_permission=_bitget_trade_permission(
+                info,
+                generation="classic",
+            ),
         )
 
     async def trading_state(self) -> RemoteTradingState:
@@ -2457,6 +2467,15 @@ class GateAccountClient(PrivateAccountClient):
             self._get("/api/v4/spot/accounts", currency="USDT"),
             self._get("/api/v4/futures/usdt/accounts"),
         )
+        try:
+            keys = await self._get("/api/v4/account/main_keys")
+        except PrivateRequestError:
+            trade_permission = None
+        else:
+            trade_permission = _gate_trade_permission(
+                keys,
+                self.secrets.api_key,
+            )
         spot_usdt = next(
             (item for item in spot if item.get("currency") == "USDT"),
             {},
@@ -2479,7 +2498,7 @@ class GateAccountClient(PrivateAccountClient):
                 if perp.get("in_dual_mode") is True
                 else PositionMode.ONE_WAY
             ),
-            trade_permission=None,
+            trade_permission=trade_permission,
         )
 
     async def user_id(self) -> str:
@@ -2962,10 +2981,16 @@ class MexcAccountClient(PrivateAccountClient):
                 if mode.get("data") == 2
                 else PositionMode.UNKNOWN
             ),
-            # MEXC's spot response exposes canTrade, but the contract account
-            # endpoints used here do not expose an equivalent permission.
-            # Do not imply that both legs are executable.
-            trade_permission=None,
+            # The spot response explicitly reports canTrade. MEXC documents
+            # the successfully queried contract position-mode endpoint as
+            # requiring Trading permission, so both legs are confirmed here.
+            trade_permission=(
+                True
+                if spot.get("canTrade") is True
+                else False
+                if spot.get("canTrade") is False
+                else None
+            ),
         )
 
     async def trading_state(self) -> RemoteTradingState:
@@ -3556,6 +3581,84 @@ def _bitget_uta_configuration_matches(
     return (
         str(configuration.get("marginMode") or "").lower() == "isolated"
         and leverage_matches
+    )
+
+
+def _bitget_trade_permission(
+    info: dict[str, Any],
+    *,
+    generation: Literal["classic", "uta"],
+) -> bool | None:
+    if generation == "uta":
+        permission_type = str(info.get("permType") or "").lower()
+        permissions = {
+            str(item).lower()
+            for item in (info.get("permissions") or [])
+            if item
+        }
+        if not permission_type or not permissions:
+            return None
+        return (
+            permission_type == "read-and-write"
+            and {"uta_trade", "uta_mgt"}.issubset(permissions)
+        )
+    authorities = {
+        str(item).lower()
+        for item in (info.get("authorities") or [])
+        if item
+    }
+    if not authorities:
+        return None
+    return {"stow", "coow", "cpow"}.issubset(authorities)
+
+
+def _gate_trade_permission(
+    payload: Any,
+    api_key: str,
+) -> bool | None:
+    if not isinstance(payload, list):
+        return None
+    matching = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        key = item.get("key")
+        if not isinstance(key, str):
+            continue
+        if key == api_key or _masked_key_matches(key, api_key):
+            matching.append(item)
+    if len(matching) != 1:
+        return None
+    current = matching[0]
+    if int(current.get("state") or 0) != 1:
+        return False
+    if current.get("currency_pairs"):
+        # A global ready flag cannot prove that every scanner symbol is in a
+        # per-key pair whitelist. Keep it unknown until pair-scoped capability
+        # checks are modeled.
+        return None
+    permissions = {
+        str(item.get("name") or "").lower(): item.get("read_only")
+        for item in (current.get("perms") or [])
+        if isinstance(item, dict)
+    }
+    if not permissions:
+        return None
+    return (
+        permissions.get("spot") is False
+        and permissions.get("futures") is False
+    )
+
+
+def _masked_key_matches(masked: str, value: str) -> bool:
+    if "*" not in masked:
+        return False
+    prefix, _, remainder = masked.partition("*")
+    suffix = remainder.lstrip("*")
+    return (
+        bool(prefix or suffix)
+        and value.startswith(prefix)
+        and value.endswith(suffix)
     )
 
 

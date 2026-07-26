@@ -49,6 +49,11 @@ async def test_bitget_uta_snapshot_detects_and_caches_account_generation() -> No
         paths.append(request.url.path)
         if request.url.path.endswith("/settings"):
             data: object = _settings(hold_mode="one_way_mode")
+        elif request.url.path.endswith("/info"):
+            data = {
+                "permType": "read-and-write",
+                "permissions": ["uta_trade", "uta_mgt"],
+            }
         else:
             data = {
                 "usdtEquity": "18",
@@ -77,6 +82,7 @@ async def test_bitget_uta_snapshot_detects_and_caches_account_generation() -> No
     assert first.shared_balance is True
     assert first.account_mode == "uta:unified:advanced:multi_assets"
     assert first.position_mode == PositionMode.ONE_WAY
+    assert first.trade_permission is True
     assert second == first.model_copy(update={"observed_at": second.observed_at})
     assert paths.count("/api/v3/account/settings") == 3
     assert not any(path.startswith("/api/v2/") for path in paths)

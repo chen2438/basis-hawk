@@ -14,6 +14,8 @@ from basis_hawk.accounts import (
     PositionMode,
     PrivateRequestError,
     UnsupportedEnvironmentError,
+    _bitget_trade_permission,
+    _gate_trade_permission,
     _hmac_base64,
     _hmac_hex,
 )
@@ -33,6 +35,61 @@ def _query_without_signature(request: httpx.Request) -> str:
         if key != "signature"
     ]
     return urlencode(sorted(values))
+
+
+def test_bitget_permission_requires_both_trade_and_management_writes() -> None:
+    assert _bitget_trade_permission(
+        {
+            "permType": "read-and-write",
+            "permissions": ["uta_trade", "uta_mgt"],
+        },
+        generation="uta",
+    ) is True
+    assert _bitget_trade_permission(
+        {
+            "permType": "read-and-write",
+            "permissions": ["uta_trade"],
+        },
+        generation="uta",
+    ) is False
+    assert _bitget_trade_permission(
+        {"authorities": ["stow", "coow", "cpow"]},
+        generation="classic",
+    ) is True
+    assert _bitget_trade_permission(
+        {"authorities": ["stor", "coor", "cpor"]},
+        generation="classic",
+    ) is False
+
+
+def test_gate_permission_requires_unique_unrestricted_writable_key() -> None:
+    writable = {
+        "state": 1,
+        "key": "test-api-*****",
+        "currency_pairs": [],
+        "perms": [
+            {"name": "spot", "read_only": False},
+            {"name": "futures", "read_only": False},
+        ],
+    }
+    assert _gate_trade_permission([writable], SECRETS.api_key) is True
+    assert _gate_trade_permission(
+        [
+            {
+                **writable,
+                "perms": [
+                    {"name": "spot", "read_only": False},
+                    {"name": "futures", "read_only": True},
+                ],
+            }
+        ],
+        SECRETS.api_key,
+    ) is False
+    assert _gate_trade_permission(
+        [{**writable, "currency_pairs": ["BTC_USDT"]}],
+        SECRETS.api_key,
+    ) is None
+    assert _gate_trade_permission([], SECRETS.api_key) is None
 
 
 async def test_binance_account_snapshot_and_signature() -> None:
@@ -253,6 +310,16 @@ async def test_bitget_account_snapshot_and_signature() -> None:
                     "data": [{"coin": "USDT", "available": "14"}],
                 },
             )
+        if request.url.path.endswith("/spot/account/info"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": "00000",
+                    "data": {
+                        "authorities": ["stor", "stow", "coow", "cpow"]
+                    },
+                },
+            )
         return httpx.Response(
             200,
             json={
@@ -281,6 +348,7 @@ async def test_bitget_account_snapshot_and_signature() -> None:
     assert snapshot.spot_usdt_available == 14
     assert snapshot.perp_usdt_available == 15
     assert snapshot.position_mode == PositionMode.ONE_WAY
+    assert snapshot.trade_permission is True
     await http.aclose()
 
 
@@ -297,6 +365,21 @@ async def test_gate_account_snapshot_and_signature() -> None:
             return httpx.Response(
                 200,
                 json=[{"currency": "USDT", "available": "21"}],
+            )
+        if request.url.path.endswith("/account/main_keys"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "state": 1,
+                        "key": "test-api-*****",
+                        "currency_pairs": [],
+                        "perms": [
+                            {"name": "spot", "read_only": False},
+                            {"name": "futures", "read_only": False},
+                        ],
+                    }
+                ],
             )
         return httpx.Response(
             200,
@@ -323,6 +406,7 @@ async def test_gate_account_snapshot_and_signature() -> None:
     assert snapshot.spot_usdt_available == 21
     assert snapshot.perp_usdt_equity == 23
     assert snapshot.position_mode == PositionMode.ONE_WAY
+    assert snapshot.trade_permission is True
     assert await client.user_id() == "20011"
     await http.aclose()
 
@@ -381,6 +465,7 @@ async def test_mexc_account_snapshot_and_signature() -> None:
     assert snapshot.spot_usdt_available == 4
     assert snapshot.perp_usdt_available == 5
     assert snapshot.position_mode == PositionMode.ONE_WAY
+    assert snapshot.trade_permission is True
     await spot.aclose()
     await perp.aclose()
 

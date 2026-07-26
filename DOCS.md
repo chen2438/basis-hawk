@@ -7,8 +7,9 @@
 - 已完成：计划固化；PostgreSQL/Alembic、Compose/Caddy、管理员密码+TOTP、Cookie/CSRF 会话和
   AES-GCM 凭据加密与掩码配置 API；Binance、OKX、MEXC、Bybit、Bitget、Gate 六所公共行情适配。
 - 已完成：六所私有 REST 签名、USDT 余额、账户类型和可读取持仓模式的只读能力探测。
-- 已完成：OKX 从账户配置 `perm`、Bybit 从当前 API Key 信息只读确证现货与合约交易权限；只读或缺少
-  任一腿权限明确阻断，字段缺失保持未知而不猜测。
+- 已完成：六所双腿交易权限安全确证。OKX/Bybit/Bitget 从当前账号或 Key 权限字段确认；Gate 从主账号
+  Key 清单唯一匹配当前 Key 并要求无限定交易对的 spot/futures 读写权限；MEXC 组合现货 `canTrade`
+  与官方标明需要 Trading 权限的合约持仓模式查询。只读、缺权限或停用明确阻断，字段缺失保持未知。
 - 已完成：独立 worker、PostgreSQL 单执行器锁、账户快照持久化及默认阻断的启动对账骨架。
 - 已完成：六所现货/永续挂单与 USDT 永续仓位的统一只读 REST 对账模型。
 - 已完成：远端挂单/仓位快照持久化、完整性标记及 worker 本地关联阻断。

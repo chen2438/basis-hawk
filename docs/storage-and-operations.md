@@ -40,6 +40,12 @@ Key 掩码，私有适配器在进程内按需解密，不能把解密结果缓�
 OKX 账户快照读取当前 Key 的 `perm`，只有包含 `trade` 才确认可交易；Bybit 额外调用当前 Key 信息，
 要求 `readOnly=0`、现货含 `SpotTrade` 且合约含 `Order`。明确只读或缺任一权限写为 `false`，响应
 缺字段则写为 `unknown`，不能把成功读取余额等同于具有双腿写权限。
+Bitget UTA 读取无需额外权限的当前账号信息，要求 Key 为读写且同时有 `uta_trade`、`uta_mgt`；
+Classic 要求 authorities 同时含 `stow`、`coow`、`cpow`。Gate 查询主账号 Key 清单，以当前完整 Key
+或官方脱敏前缀唯一匹配，要求状态正常、未设置交易对白名单，并且 `spot`、`futures` 的 `read_only`
+均为 false；接口不可用、匹配不唯一或白名单无法在账号级证明覆盖全部扫描标的时保持未知。MEXC 现货
+必须明确 `canTrade=true`，同时合约 `position_mode` 查询成功；官方将后者标记为需要 Trading 权限，
+因此可作为不会下单的合约写权限探测。任一字段缺失都不按成功猜测。
 worker 定期写入 `account_snapshots`、`remote_open_order_snapshots`、
 `remote_position_snapshots` 和各账户最新 `account_reconciliation` 状态；全局
 `execution_control` 在对账开始时进入 `reconciling`。余额、权益、模式、挂单与仓位已接入持久化，
