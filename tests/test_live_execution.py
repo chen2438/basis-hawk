@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from basis_hawk.accounts import (
@@ -25,7 +25,7 @@ from basis_hawk.models import (
     Quality,
     ScannerSettings,
 )
-from basis_hawk.storage import Database, PairedPositionRow
+from basis_hawk.storage import Database, PairedPositionRow, TradeIntentRow
 from basis_hawk.trading import TradeLedger
 
 
@@ -254,6 +254,62 @@ async def test_live_executor_persists_both_submissions_before_parallel_orders() 
         ("ORDER-USDT-SWAP", 2, PositionMode.ONE_WAY)
     ]
     assert client.closed is True
+    await database.close()
+
+
+async def test_live_executor_expires_stale_open_without_remote_calls() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials, intent_id = await _planned_live_intent(database)
+    async with database.sessions() as session:
+        intent = await session.get(TradeIntentRow, intent_id)
+        assert intent is not None
+        intent.market_observed_at = datetime.now(UTC) - timedelta(minutes=1)
+        await session.commit()
+    await database.set_execution_control(state="ready", reason="test")
+    client = FakeLiveAccountClient(database)
+
+    result = await LiveExecutionService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    ).run_once()
+
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    assert result.examined == 1
+    assert result.submitted == 0
+    assert stored[0].status == "failed"
+    assert client.placed == []
+    await database.close()
+
+
+async def test_live_executor_expires_stale_close_and_reopens_position() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials, intent_id, position_id = await _planned_live_close(database)
+    async with database.sessions() as session:
+        intent = await session.get(TradeIntentRow, intent_id)
+        assert intent is not None
+        intent.market_observed_at = datetime.now(UTC) - timedelta(minutes=1)
+        await session.commit()
+    await database.set_execution_control(state="ready", reason="test")
+    client = FakeLiveAccountClient(database)
+
+    result = await LiveExecutionService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    ).run_once()
+
+    stored = await database.trade_intent(intent_id)
+    position = await database.paired_position(position_id)
+    assert stored is not None and position is not None
+    assert result.submitted == 0
+    assert stored[0].status == "failed"
+    assert position.status == "open"
+    assert position.closing_intent_id is None
+    assert client.placed == []
     await database.close()
 
 

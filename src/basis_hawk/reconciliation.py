@@ -14,6 +14,7 @@ from basis_hawk.accounts import (
     RemotePosition,
     create_account_client,
 )
+from basis_hawk.automation import AutomaticTradingService
 from basis_hawk.credentials import (
     CredentialService,
     ExchangeEnvironment,
@@ -50,6 +51,7 @@ class ReconciliationService:
         ] = create_account_client,
         paper_executor: PaperExecutionService | None = None,
         live_executor: LiveExecutionService | None = None,
+        automatic_trader: AutomaticTradingService | None = None,
         event_debounce_seconds: float = 0.25,
     ) -> None:
         if event_debounce_seconds < 0:
@@ -62,6 +64,9 @@ class ReconciliationService:
             database,
             credentials,
             account_client_factory=account_client_factory,
+        )
+        self.automatic_trader = automatic_trader or AutomaticTradingService(
+            database
         )
         self.event_debounce_seconds = event_debounce_seconds
         self._reconciliation_requested = asyncio.Event()
@@ -309,6 +314,10 @@ class ReconciliationService:
                     "order, fill, and position matching is required before execution"
                 ),
             )
+        if final_pause_reason is None and all_accounts_ready:
+            automatic_result = await self.automatic_trader.run_once()
+            if automatic_result.created:
+                self.request_reconciliation()
         return ReconciliationResult(
             accounts_checked=len(summaries),
             accounts_blocked=blocked,

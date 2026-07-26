@@ -2,11 +2,18 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from basis_hawk.automation import (
+    AutomaticTradingService,
     AutomationPosition,
     AutoStrategyConfig,
     evaluate_automatic_strategy,
 )
-from basis_hawk.models import Exchange, Opportunity, Quality
+from basis_hawk.models import (
+    Exchange,
+    InstrumentPair,
+    Opportunity,
+    Quality,
+)
+from basis_hawk.storage import Database
 
 
 def _config(**changes: object) -> AutoStrategyConfig:
@@ -263,3 +270,59 @@ def test_low_liquidation_buffer_has_highest_close_priority() -> None:
     assert evaluation.decision.reason == (
         "liquidation buffer is below the configured minimum"
     )
+
+
+async def test_automatic_service_plans_once_across_worker_restart() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    now = datetime.now(UTC)
+    config = _config(enabled_exchanges={Exchange.BINANCE})
+    strategy = await database.create_strategy_version(
+        environment="live",
+        payload=config.model_dump(mode="json"),
+        actor="test",
+    )
+    await database.set_automation_control(
+        state="enabled",
+        active_strategy_id=strategy.id,
+        reason="test",
+        actor="test",
+    )
+    await database.set_execution_control(state="ready", reason="test")
+    await database.save_latest_opportunities(
+        [_opportunity(observed_at=now)]
+    )
+    await database.replace_instruments(
+        "binance",
+        [
+            InstrumentPair(
+                exchange=Exchange.BINANCE,
+                base_asset="ORDER",
+                spot_symbol="ORDERUSDT",
+                perp_symbol="ORDERUSDT",
+                spot_price_increment=Decimal("0.01"),
+                spot_quantity_increment=Decimal("0.01"),
+                spot_min_quantity=Decimal("0.01"),
+                spot_min_notional=Decimal("5"),
+                perp_price_increment=Decimal("0.01"),
+                perp_quantity_increment=Decimal("0.01"),
+                perp_min_quantity=Decimal("0.01"),
+                perp_min_notional=Decimal("5"),
+                perp_contract_size=Decimal("1"),
+            )
+        ],
+    )
+
+    first = await AutomaticTradingService(database).run_once()
+    repeated = await AutomaticTradingService(database).run_once()
+
+    assert first.created is True
+    assert first.action == "open"
+    assert first.intent_id is not None
+    assert repeated.created is False
+    assert await database.active_open_intent_keys(
+        environment="live"
+    ) == {"binance:ORDER"}
+    recoverable = await database.recoverable_trade_intents()
+    assert [item.id for item in recoverable] == [first.intent_id]
+    await database.close()

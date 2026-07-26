@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
+from basis_hawk.credentials import ExchangeEnvironment
 from basis_hawk.models import Exchange, Opportunity, Quality
+from basis_hawk.storage import Database
+from basis_hawk.trading import (
+    IdempotencyConflict,
+    TradeLedger,
+    TradeValidationError,
+)
 
 
 class AutoStrategyConfig(BaseModel):
@@ -104,12 +113,23 @@ class AutomaticEvaluation(BaseModel):
     opening_block_reason: str | None = None
 
 
+class AutomaticTradingResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    evaluated: bool
+    created: bool
+    intent_id: str | None = None
+    action: Literal["open", "close"] | None = None
+    reason: str
+
+
 def evaluate_automatic_strategy(
     *,
     config: AutoStrategyConfig,
     opportunities: list[Opportunity],
     positions: list[AutomationPosition],
     daily_realized_pnl: Decimal,
+    blocked_open_keys: set[str] | None = None,
     now: datetime | None = None,
 ) -> AutomaticEvaluation:
     observed_now = _utc(now or datetime.now(UTC))
@@ -119,6 +139,7 @@ def evaluate_automatic_strategy(
         for item in opportunities
         if item.exchange.value in enabled
     }
+    blocked_keys = blocked_open_keys or set()
     scoped_positions = [
         item
         for item in positions
@@ -251,6 +272,7 @@ def evaluate_automatic_strategy(
     for opportunity in opportunities:
         if (
             opportunity.exchange not in config.enabled_exchanges
+            or opportunity.key in blocked_keys
             or opportunity.key in active_keys
             or not _tradable_quote(opportunity, observed_now)
             or opportunity.apr_24h is None
@@ -305,6 +327,201 @@ def evaluate_automatic_strategy(
             reason="highest-ranked opportunity satisfies every opening rule",
         )
     )
+
+
+class AutomaticTradingService:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        ledger: TradeLedger | None = None,
+    ) -> None:
+        self.database = database
+        self.ledger = ledger or TradeLedger(database)
+
+    async def run_once(self) -> AutomaticTradingResult:
+        control = await self.database.automation_control()
+        if control.state != "enabled" or control.active_strategy_id is None:
+            return AutomaticTradingResult(
+                evaluated=False,
+                created=False,
+                reason="automatic trading is not enabled",
+            )
+        execution = await self.database.execution_control()
+        if execution is None or execution.state != "ready":
+            return AutomaticTradingResult(
+                evaluated=False,
+                created=False,
+                reason="account execution is not ready",
+            )
+        strategy = await self.database.strategy_version(
+            control.active_strategy_id
+        )
+        if strategy is None:
+            return AutomaticTradingResult(
+                evaluated=False,
+                created=False,
+                reason="active strategy version was not found",
+            )
+        config = AutoStrategyConfig.model_validate(
+            json.loads(strategy.payload)
+        )
+        now = datetime.now(UTC)
+        exchanges = {item.value for item in config.enabled_exchanges}
+        opportunities = await self.database.latest_opportunities(
+            exchanges=exchanges
+        )
+        pair_by_key = {
+            item.key: item
+            for item in await self.database.instrument_pairs(
+                exchanges=exchanges
+            )
+        }
+        rows = await self.database.list_paired_positions()
+        liquidation_buffers = (
+            await self.database.position_liquidation_buffers(
+                environment=config.environment,
+                exchanges=exchanges,
+            )
+        )
+        positions = [
+            AutomationPosition(
+                id=item.id,
+                exchange=Exchange(item.exchange),
+                environment=item.environment,
+                base_asset=item.base_asset,
+                quantity=item.quantity,
+                spot_entry_price=item.spot_entry_price,
+                perp_entry_price=item.perp_entry_price,
+                remaining_opening_fees_usdt=(
+                    item.remaining_opening_fees_usdt
+                ),
+                status=item.status,
+                opened_at=item.opened_at,
+                closed_at=item.closed_at,
+                liquidation_buffer=liquidation_buffers.get(item.id),
+            )
+            for item in rows
+        ]
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        daily_pnl = await self.database.daily_realized_pnl(
+            environment=config.environment,
+            exchanges=exchanges,
+            since=day_start,
+        )
+        evaluation = evaluate_automatic_strategy(
+            config=config,
+            opportunities=opportunities,
+            positions=positions,
+            daily_realized_pnl=daily_pnl,
+            blocked_open_keys=await self.database.active_open_intent_keys(
+                environment=config.environment
+            ),
+            now=now,
+        )
+        if evaluation.decision is None:
+            if evaluation.opening_block_reason == (
+                "daily realized loss limit was reached"
+            ):
+                await self.database.set_automation_control(
+                    state="paused",
+                    active_strategy_id=strategy.id,
+                    reason=evaluation.opening_block_reason,
+                    actor="system",
+                )
+                await self.database.append_audit(
+                    "automation.daily_loss_paused",
+                    actor="system",
+                    details={
+                        "strategy_id": strategy.id,
+                        "daily_realized_pnl": format(daily_pnl, "f"),
+                    },
+                )
+            return AutomaticTradingResult(
+                evaluated=True,
+                created=False,
+                reason=(
+                    evaluation.opening_block_reason
+                    or "no automatic action is required"
+                ),
+            )
+        decision = evaluation.decision
+        pair = pair_by_key.get(decision.opportunity.key)
+        if pair is None or not pair.trading_rules_complete:
+            return AutomaticTradingResult(
+                evaluated=True,
+                created=False,
+                action=decision.action,
+                reason="current instrument trading rules are incomplete",
+            )
+        idempotency_key = uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            ":".join(
+                (
+                    "basis-hawk",
+                    strategy.id,
+                    decision.action,
+                    decision.position_id or decision.opportunity.key,
+                    decision.opportunity.observed_at.isoformat(),
+                )
+            ),
+        )
+        settings = await self.database.load_settings()
+        environment = ExchangeEnvironment(config.environment)
+        try:
+            if decision.action == "open":
+                intent, created = await self.ledger.plan_live_open(
+                    opportunity=decision.opportunity,
+                    pair=pair,
+                    notional_usdt=config.notional_per_trade,
+                    idempotency_key=idempotency_key,
+                    settings=settings,
+                    environment=environment,
+                    leverage=config.leverage,
+                    maximum_slippage=config.normal_max_slippage,
+                    now=now,
+                )
+            else:
+                if decision.position_id is None:
+                    raise RuntimeError(
+                        "automatic close decision has no paired position"
+                    )
+                intent, created = await self.ledger.plan_live_close(
+                    position_id=decision.position_id,
+                    opportunity=decision.opportunity,
+                    pair=pair,
+                    idempotency_key=idempotency_key,
+                    settings=settings,
+                    environment=environment,
+                    maximum_slippage=config.normal_max_slippage,
+                    now=now,
+                )
+        except (IdempotencyConflict, TradeValidationError) as exc:
+            return AutomaticTradingResult(
+                evaluated=True,
+                created=False,
+                action=decision.action,
+                reason=str(exc),
+            )
+        if created:
+            await self.database.append_audit(
+                f"automation.{decision.action}_planned",
+                actor="system",
+                details={
+                    "strategy_id": strategy.id,
+                    "intent_id": intent.id,
+                    "exchange": decision.opportunity.exchange.value,
+                    "base_asset": decision.opportunity.base_asset,
+                    "reason": decision.reason,
+                },
+            )
+        return AutomaticTradingResult(
+            evaluated=True,
+            created=created,
+            intent_id=intent.id,
+            action=decision.action,
+            reason=decision.reason,
+        )
 
 
 def _opening_portfolio_block(

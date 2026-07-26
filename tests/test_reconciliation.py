@@ -17,6 +17,7 @@ from basis_hawk.accounts import (
     RemotePosition,
     RemoteTradingState,
 )
+from basis_hawk.automation import AutomaticTradingResult
 from basis_hawk.credentials import (
     CredentialService,
     ExchangeEnvironment,
@@ -267,10 +268,26 @@ async def test_reconciliation_enters_ready_only_with_fresh_private_stream() -> N
         positions_subscribed=True,
     )
     client = EmptyFakeAccountClient()
+
+    class FakeAutomaticTrader:
+        calls = 0
+
+        async def run_once(self) -> AutomaticTradingResult:
+            self.calls += 1
+            return AutomaticTradingResult(
+                evaluated=True,
+                created=True,
+                intent_id=str(uuid.uuid4()),
+                action="open",
+                reason="test",
+            )
+
+    automatic_trader = FakeAutomaticTrader()
     reconciler = ReconciliationService(
         database,
         credentials,
         account_client_factory=lambda exchange, secrets, environment: client,
+        automatic_trader=automatic_trader,  # type: ignore[arg-type]
     )
 
     result = await reconciler.run_once()
@@ -286,6 +303,8 @@ async def test_reconciliation_enters_ready_only_with_fresh_private_stream() -> N
     assert states[0].status == "ready"
     assert states[0].reason == "account reconciliation passed"
     assert states[0].private_stream_ready is True
+    assert automatic_trader.calls == 1
+    assert reconciler._reconciliation_requested.is_set()
     await database.close()
 
 

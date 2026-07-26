@@ -1507,6 +1507,45 @@ class Database:
             await session.commit()
             return intent, legs, True
 
+    async def expire_planned_trade_intent(
+        self,
+        *,
+        intent_id: str,
+    ) -> bool:
+        async with self.sessions() as session:
+            intent = await session.scalar(
+                select(TradeIntentRow)
+                .where(TradeIntentRow.id == intent_id)
+                .with_for_update()
+            )
+            if (
+                intent is None
+                or intent.environment not in {"sandbox", "live"}
+                or intent.status != "planned"
+            ):
+                return False
+            now = datetime.now(UTC)
+            if intent.action == "close" and intent.paired_position_id is not None:
+                position = await session.scalar(
+                    select(PairedPositionRow)
+                    .where(
+                        PairedPositionRow.id == intent.paired_position_id
+                    )
+                    .with_for_update()
+                )
+                if (
+                    position is not None
+                    and position.status == "closing"
+                    and position.closing_intent_id == intent.id
+                ):
+                    position.status = "open"
+                    position.closing_intent_id = None
+            intent.status = "failed"
+            intent.version += 1
+            intent.updated_at = now
+            await session.commit()
+            return True
+
     async def record_order_submission(
         self,
         *,
@@ -2495,6 +2534,100 @@ class Database:
                 await session.scalars(statement.order_by(PairedPositionRow.opened_at.desc()))
             )
 
+    async def active_open_intent_keys(
+        self,
+        *,
+        environment: str,
+    ) -> set[str]:
+        async with self.sessions() as session:
+            rows = await session.execute(
+                select(
+                    TradeIntentRow.exchange,
+                    TradeIntentRow.base_asset,
+                ).where(
+                    TradeIntentRow.environment == environment,
+                    TradeIntentRow.action == "open",
+                    TradeIntentRow.status.in_(
+                        {
+                            "planned",
+                            "executing",
+                            "compensating",
+                            "manual_review",
+                        }
+                    ),
+                )
+            )
+            return {
+                f"{exchange}:{base_asset}"
+                for exchange, base_asset in rows
+            }
+
+    async def position_liquidation_buffers(
+        self,
+        *,
+        environment: str,
+        exchanges: set[str],
+    ) -> dict[str, Decimal | None]:
+        if not exchanges:
+            return {}
+        async with self.sessions() as session:
+            rows = await session.execute(
+                select(
+                    PairedPositionRow.id,
+                    RemotePositionSnapshotRow.mark_price,
+                    RemotePositionSnapshotRow.liquidation_price,
+                )
+                .join(
+                    TradeIntentRow,
+                    PairedPositionRow.opening_intent_id
+                    == TradeIntentRow.id,
+                )
+                .join(
+                    OrderLegRow,
+                    (OrderLegRow.trade_intent_id == TradeIntentRow.id)
+                    & (OrderLegRow.leg == "perp"),
+                )
+                .join(
+                    AccountReconciliationRow,
+                    (
+                        AccountReconciliationRow.exchange
+                        == PairedPositionRow.exchange
+                    )
+                    & (
+                        AccountReconciliationRow.environment
+                        == PairedPositionRow.environment
+                    ),
+                )
+                .join(
+                    RemotePositionSnapshotRow,
+                    (
+                        RemotePositionSnapshotRow.account_snapshot_id
+                        == AccountReconciliationRow.snapshot_id
+                    )
+                    & (
+                        RemotePositionSnapshotRow.symbol
+                        == OrderLegRow.symbol
+                    ),
+                )
+                .where(
+                    PairedPositionRow.environment == environment,
+                    PairedPositionRow.exchange.in_(exchanges),
+                    PairedPositionRow.status.in_({"open", "closing"}),
+                )
+            )
+            values: dict[str, Decimal | None] = {}
+            for position_id, mark_price, liquidation_price in rows:
+                if (
+                    mark_price <= 0
+                    or liquidation_price is None
+                    or liquidation_price <= 0
+                ):
+                    values[position_id] = None
+                else:
+                    values[position_id] = (
+                        liquidation_price - mark_price
+                    ) / mark_price
+            return values
     async def paired_perp_exposures(
         self,
         *,

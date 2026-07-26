@@ -71,6 +71,16 @@ class LiveExecutionService:
         examined = 0
         for item in candidates:
             examined += 1
+            now = datetime.now(UTC)
+            market_observed_at = _utc(item.market_observed_at)
+            if (
+                market_observed_at > now + timedelta(seconds=5)
+                or now - market_observed_at > timedelta(seconds=15)
+            ):
+                await self.database.expire_planned_trade_intent(
+                    intent_id=item.id
+                )
+                continue
             try:
                 did_submit, uncertain_legs = await self._execute(item)
             except Exception:
@@ -307,3 +317,7 @@ class LiveExecutionService:
 
 def _decimal_equal(left: Decimal, right: Decimal) -> bool:
     return abs(left - right) <= Decimal("0.000000000000001")
+
+
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
