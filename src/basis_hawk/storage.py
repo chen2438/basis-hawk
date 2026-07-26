@@ -4,6 +4,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -147,6 +148,77 @@ class AuditEventRow(Base):
     event_type: Mapped[str] = mapped_column(String(100), index=True)
     actor: Mapped[str] = mapped_column(String(100))
     details: Mapped[str] = mapped_column(Text)
+
+
+class NotificationOutboxRow(Base):
+    __tablename__ = "notification_outbox"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    dedupe_key: Mapped[str] = mapped_column(String(200))
+    event_type: Mapped[str] = mapped_column(String(100), index=True)
+    severity: Mapped[str] = mapped_column(String(20))
+    channel: Mapped[str] = mapped_column(String(20))
+    subject: Mapped[str] = mapped_column(String(200))
+    body: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    __table_args__ = (
+        UniqueConstraint(
+            "dedupe_key",
+            "channel",
+            name="uq_notification_outbox_dedupe_channel",
+        ),
+        CheckConstraint(
+            "severity IN ('info', 'warning', 'critical')",
+            name="ck_notification_outbox_severity",
+        ),
+        CheckConstraint(
+            "channel IN ('telegram', 'email')",
+            name="ck_notification_outbox_channel",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'sending', 'retry', 'sent', 'dead')",
+            name="ck_notification_outbox_status",
+        ),
+        CheckConstraint(
+            "attempts >= 0",
+            name="ck_notification_outbox_attempts",
+        ),
+        Index(
+            "ix_notification_outbox_claim",
+            "status",
+            "next_attempt_at",
+            "created_at",
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class NotificationOutboxItem:
+    id: str
+    dedupe_key: str
+    event_type: str
+    severity: str
+    channel: str
+    subject: str
+    body: str
+    status: str
+    attempts: int
+    next_attempt_at: datetime
+    last_error_code: str | None
+    created_at: datetime
+    updated_at: datetime
+    sent_at: datetime | None
 
 
 class AccountSnapshotRow(Base):
@@ -579,6 +651,25 @@ def _compensation_client_order_id(intent: TradeIntentRow) -> str:
     if intent.exchange == "gate":
         return f"t-bhc-{token}"
     return f"bh-c-{token}"
+
+
+def _notification_item(row: NotificationOutboxRow) -> NotificationOutboxItem:
+    return NotificationOutboxItem(
+        id=row.id,
+        dedupe_key=row.dedupe_key,
+        event_type=row.event_type,
+        severity=row.severity,
+        channel=row.channel,
+        subject=row.subject,
+        body=row.body,
+        status=row.status,
+        attempts=row.attempts,
+        next_attempt_at=_utc(row.next_attempt_at),
+        last_error_code=row.last_error_code,
+        created_at=_utc(row.created_at),
+        updated_at=_utc(row.updated_at),
+        sent_at=_utc(row.sent_at) if row.sent_at is not None else None,
+    )
 
 
 def _live_compensation_leg(
@@ -3252,6 +3343,189 @@ class Database:
                 )
             )
             await session.commit()
+
+    async def enqueue_notification(
+        self,
+        *,
+        dedupe_key: str,
+        event_type: str,
+        severity: str,
+        channels: set[str],
+        subject: str,
+        body: str,
+        now: datetime | None = None,
+    ) -> list[NotificationOutboxItem]:
+        if not dedupe_key or len(dedupe_key) > 200:
+            raise ValueError("notification dedupe key must contain 1-200 characters")
+        if not event_type or len(event_type) > 100:
+            raise ValueError("notification event type must contain 1-100 characters")
+        if severity not in {"info", "warning", "critical"}:
+            raise ValueError("unsupported notification severity")
+        if not channels or not channels <= {"telegram", "email"}:
+            raise ValueError("unsupported notification channel")
+        if not subject or len(subject) > 200:
+            raise ValueError("notification subject must contain 1-200 characters")
+        if not body:
+            raise ValueError("notification body is required")
+        created_at = now or datetime.now(UTC)
+        async with self.sessions() as session:
+            for channel in sorted(channels):
+                try:
+                    async with session.begin_nested():
+                        session.add(
+                            NotificationOutboxRow(
+                                id=str(uuid.uuid4()),
+                                dedupe_key=dedupe_key,
+                                event_type=event_type,
+                                severity=severity,
+                                channel=channel,
+                                subject=subject,
+                                body=body,
+                                status="pending",
+                                attempts=0,
+                                next_attempt_at=created_at,
+                                created_at=created_at,
+                                updated_at=created_at,
+                            )
+                        )
+                        await session.flush()
+                except IntegrityError:
+                    pass
+            await session.commit()
+            rows = list(
+                await session.scalars(
+                    select(NotificationOutboxRow)
+                    .where(
+                        NotificationOutboxRow.dedupe_key == dedupe_key,
+                        NotificationOutboxRow.channel.in_(channels),
+                    )
+                    .order_by(NotificationOutboxRow.channel)
+                )
+            )
+            return [_notification_item(row) for row in rows]
+
+    async def claim_notifications(
+        self,
+        *,
+        limit: int = 20,
+        now: datetime | None = None,
+        stale_after: timedelta = timedelta(minutes=5),
+    ) -> list[NotificationOutboxItem]:
+        if limit < 1 or limit > 100:
+            raise ValueError("notification claim limit must be between 1 and 100")
+        claimed_at = now or datetime.now(UTC)
+        stale_before = claimed_at - stale_after
+        async with self.sessions() as session:
+            statement = (
+                select(NotificationOutboxRow)
+                .where(
+                    (
+                        NotificationOutboxRow.status.in_({"pending", "retry"})
+                        & (NotificationOutboxRow.next_attempt_at <= claimed_at)
+                    )
+                    | (
+                        (NotificationOutboxRow.status == "sending")
+                        & (NotificationOutboxRow.updated_at <= stale_before)
+                    )
+                )
+                .order_by(
+                    NotificationOutboxRow.next_attempt_at,
+                    NotificationOutboxRow.created_at,
+                )
+                .limit(limit)
+            )
+            if self.engine.url.get_backend_name() == "postgresql":
+                statement = statement.with_for_update(skip_locked=True)
+            rows = list(await session.scalars(statement))
+            for row in rows:
+                row.status = "sending"
+                row.attempts += 1
+                row.updated_at = claimed_at
+                row.last_error_code = None
+            await session.commit()
+            return [_notification_item(row) for row in rows]
+
+    async def mark_notification_sent(
+        self,
+        notification_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        sent_at = now or datetime.now(UTC)
+        async with self.sessions() as session:
+            result = await session.execute(
+                update(NotificationOutboxRow)
+                .where(
+                    NotificationOutboxRow.id == notification_id,
+                    NotificationOutboxRow.status == "sending",
+                )
+                .values(
+                    status="sent",
+                    updated_at=sent_at,
+                    sent_at=sent_at,
+                    last_error_code=None,
+                )
+            )
+            await session.commit()
+            return bool(result.rowcount)
+
+    async def mark_notification_failed(
+        self,
+        notification_id: str,
+        *,
+        error_code: str,
+        now: datetime | None = None,
+        max_attempts: int = 8,
+    ) -> NotificationOutboxItem | None:
+        if max_attempts < 1:
+            raise ValueError("notification max attempts must be positive")
+        if (
+            not error_code
+            or len(error_code) > 80
+            or any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
+                for character in error_code
+            )
+        ):
+            raise ValueError("notification error code must be a safe lowercase identifier")
+        failed_at = now or datetime.now(UTC)
+        async with self.sessions() as session:
+            statement = select(NotificationOutboxRow).where(
+                NotificationOutboxRow.id == notification_id
+            )
+            if self.engine.url.get_backend_name() == "postgresql":
+                statement = statement.with_for_update()
+            row = await session.scalar(statement)
+            if row is None or row.status != "sending":
+                return None
+            if row.attempts >= max_attempts:
+                row.status = "dead"
+                row.next_attempt_at = failed_at
+            else:
+                delay_seconds = min(30 * (2 ** (row.attempts - 1)), 3600)
+                row.status = "retry"
+                row.next_attempt_at = failed_at + timedelta(seconds=delay_seconds)
+            row.last_error_code = error_code
+            row.updated_at = failed_at
+            await session.commit()
+            return _notification_item(row)
+
+    async def notification_outbox(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[NotificationOutboxItem]:
+        if limit < 1 or limit > 500:
+            raise ValueError("notification list limit must be between 1 and 500")
+        async with self.sessions() as session:
+            rows = list(
+                await session.scalars(
+                    select(NotificationOutboxRow)
+                    .order_by(NotificationOutboxRow.created_at.desc())
+                    .limit(limit)
+                )
+            )
+            return [_notification_item(row) for row in rows]
 
     async def save_exchange_credential(
         self,

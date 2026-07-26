@@ -140,6 +140,12 @@ MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
 本次分摊的开仓费、实际平仓/补偿费、净盈亏和实现时间。`closing_intent_id` 唯一约束使 worker 在
 结算后崩溃并重试时不会重复计入；仓位上的 `realized_pnl_usdt` 继续提供全生命周期累计值，自动每日
 止损则按实现事件、环境、目标交易所及 UTC 日界求和，部分平仓可以准确归属到实际发生日期。
+`notification_outbox` 为每个事件和目标通道保存独立投递记录；`(dedupe_key, channel)` 唯一约束阻止
+重启或重复业务事件产生重复通知。worker 只认领到期的 pending/retry 记录；PostgreSQL 使用
+`FOR UPDATE SKIP LOCKED`，已认领但进程崩溃的 sending 记录在 5 分钟后可回收。失败按 30 秒起步、
+最高 1 小时的指数退避重试，默认第 8 次失败进入 dead。数据库仅保存预定义的小写错误码，禁止存储
+可能包含 Bot token、SMTP 凭据、请求 URL 或远端响应正文的异常字符串。邮件和 Telegram 互不阻塞，
+通知失败也不得回滚或阻塞交易状态机。
 真实意图额外固化 1–10 倍请求杠杆，旧记录迁移为安全默认值 1；
 `order_legs` 同一意图固定一条现货腿和一条永续腿，并在提交交易所前生成唯一客户端订单 ID；每条腿还
 保存严格为正的 `base_multiplier`，使交易所原生数量及成交量可以无歧义换算成基础币。已有纸面订单腿
