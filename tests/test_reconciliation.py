@@ -23,9 +23,14 @@ from basis_hawk.credentials import (
 )
 from basis_hawk.crypto import SecretCipher
 from basis_hawk.models import Exchange
-from basis_hawk.reconciliation import ReconciliationService
+from basis_hawk.reconciliation import (
+    ReconciliationService,
+    _open_order_reasons,
+    _position_reasons,
+)
 from basis_hawk.storage import (
     Database,
+    OrderLegRow,
     RemoteOpenOrderSnapshotRow,
     RemotePositionSnapshotRow,
 )
@@ -123,6 +128,66 @@ class FakeAccountClient:
 
     async def close(self) -> None:
         self.closed = True
+
+
+def test_remote_open_orders_and_positions_are_matched_exactly() -> None:
+    now = datetime(2026, 7, 26, 18, 0, tzinfo=UTC)
+    leg = OrderLegRow(
+        id=str(uuid.uuid4()),
+        trade_intent_id=str(uuid.uuid4()),
+        leg="perp",
+        market="perp",
+        symbol="ORDER-USDT-SWAP",
+        side="sell",
+        client_order_id="bh-local-perp",
+        exchange_order_id="remote-perp",
+        status="acknowledged",
+        quantity=Decimal("2"),
+        base_multiplier=Decimal("10"),
+        limit_price=Decimal("0.051"),
+        filled_quantity=Decimal("0"),
+        reduce_only=False,
+        created_at=now,
+        updated_at=now,
+    )
+    order = RemoteOrder(
+        exchange_order_id="remote-perp",
+        client_order_id="bh-local-perp",
+        market="perp",
+        symbol="ORDER-USDT-SWAP",
+        side="sell",
+        status="live",
+        price=Decimal("0.051"),
+        original_quantity=Decimal("2"),
+        filled_quantity=Decimal("0"),
+        reduce_only=False,
+    )
+    position = RemotePosition(
+        symbol="ORDER-USDT-SWAP",
+        side="short",
+        quantity=Decimal("2"),
+        entry_price=Decimal("0.051"),
+        mark_price=Decimal("0.05"),
+        liquidation_price=Decimal("0.09"),
+        leverage=Decimal("3"),
+        isolated=True,
+    )
+
+    assert _open_order_reasons([order], [leg]) == [
+        "locally linked IOC orders are still open"
+    ]
+    assert _open_order_reasons(
+        [order.model_copy(update={"original_quantity": Decimal("3")})],
+        [leg],
+    ) == ["remote open order conflicts with its local order leg"]
+    assert _position_reasons(
+        [position],
+        [("ORDER-USDT-SWAP", Decimal("2"), 3)],
+    ) == []
+    assert _position_reasons(
+        [position.model_copy(update={"isolated": False})],
+        [("ORDER-USDT-SWAP", Decimal("2"), 3)],
+    ) == ["remote short position conflicts with the local pair"]
 
 
 async def _credentials(database: Database) -> CredentialService:

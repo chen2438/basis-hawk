@@ -1803,6 +1803,46 @@ class Database:
                 await session.scalars(statement.order_by(PairedPositionRow.opened_at.desc()))
             )
 
+    async def paired_perp_exposures(
+        self,
+        *,
+        exchange: str,
+        environment: str,
+    ) -> list[tuple[str, Decimal, int]]:
+        async with self.sessions() as session:
+            rows = list(
+                await session.execute(
+                    select(
+                        PairedPositionRow,
+                        OrderLegRow,
+                        TradeIntentRow,
+                    )
+                    .join(
+                        TradeIntentRow,
+                        PairedPositionRow.opening_intent_id
+                        == TradeIntentRow.id,
+                    )
+                    .join(
+                        OrderLegRow,
+                        OrderLegRow.trade_intent_id == TradeIntentRow.id,
+                    )
+                    .where(
+                        PairedPositionRow.exchange == exchange,
+                        PairedPositionRow.environment == environment,
+                        PairedPositionRow.status.in_({"open", "closing"}),
+                        OrderLegRow.leg == "perp",
+                    )
+                )
+            )
+            return [
+                (
+                    leg.symbol,
+                    position.quantity / leg.base_multiplier,
+                    intent.leverage,
+                )
+                for position, leg, intent in rows
+            ]
+
     async def fills_for_intent(self, intent_id: str) -> list[FillRow]:
         async with self.sessions() as session:
             return list(

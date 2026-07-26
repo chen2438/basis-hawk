@@ -136,6 +136,10 @@ async def test_live_settlement_opens_position_from_equal_base_fills() -> None:
     assert settled[1].opening_fees_usdt.quantize(
         Decimal("0.0001")
     ) == Decimal("0.0025")
+    assert await database.paired_perp_exposures(
+        exchange="okx",
+        environment="live",
+    ) == [("ORDER-USDT-SWAP", Decimal("2"), 2)]
     assert repeated is not None
     assert repeated[2] is False
     await database.close()

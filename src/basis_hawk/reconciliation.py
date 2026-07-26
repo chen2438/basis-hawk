@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from datetime import timedelta
+from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict
 
 from basis_hawk.accounts import (
     PositionMode,
     PrivateAccountClient,
+    RemoteOrder,
+    RemotePosition,
     create_account_client,
 )
 from basis_hawk.credentials import (
@@ -194,10 +197,22 @@ class ReconciliationService:
                     reasons.append(
                         trading_state.incomplete_reason or "remote trading state is incomplete"
                     )
-                if trading_state.open_orders:
-                    reasons.append("remote open orders require local intent matching")
-                if trading_state.positions:
-                    reasons.append("remote positions require local pair matching")
+                reasons.extend(
+                    _open_order_reasons(
+                        trading_state.open_orders,
+                        local_legs,
+                    )
+                )
+                expected_positions = await self.database.paired_perp_exposures(
+                    exchange=summary.exchange.value,
+                    environment=summary.environment.value,
+                )
+                reasons.extend(
+                    _position_reasons(
+                        trading_state.positions,
+                        expected_positions,
+                    )
+                )
                 if snapshot.position_mode == PositionMode.UNKNOWN:
                     reasons.append("position mode is unknown")
                 if snapshot.trade_permission is not True:
@@ -270,3 +285,100 @@ class ReconciliationService:
                     "another Basis Hawk execution worker holds the account lock"
                 )
             return await self.run_once()
+
+
+def _open_order_reasons(
+    remote_orders: list[RemoteOrder],
+    local_legs: list[OrderLegRow],
+) -> list[str]:
+    by_exchange_id = {
+        item.exchange_order_id: item
+        for item in local_legs
+        if item.exchange_order_id is not None
+    }
+    by_client_id = {item.client_order_id: item for item in local_legs}
+    active = {"submitted", "acknowledged", "partially_filled", "unknown"}
+    reasons: list[str] = []
+    matched = 0
+    for order in remote_orders:
+        exchange_match = by_exchange_id.get(order.exchange_order_id)
+        client_match = (
+            by_client_id.get(order.client_order_id)
+            if order.client_order_id is not None
+            else None
+        )
+        if (
+            exchange_match is not None
+            and client_match is not None
+            and exchange_match.id != client_match.id
+        ):
+            reasons.append("remote open order identifiers match different local legs")
+            continue
+        leg = exchange_match or client_match
+        if leg is None:
+            reasons.append("remote open order has no matching local intent")
+            continue
+        if (
+            leg.status not in active
+            or order.market != leg.market
+            or order.symbol != leg.symbol
+            or order.side != leg.side
+            or not _decimal_equal(order.original_quantity, leg.quantity)
+            or order.reduce_only != leg.reduce_only
+        ):
+            reasons.append("remote open order conflicts with its local order leg")
+            continue
+        matched += 1
+    if matched:
+        reasons.append("locally linked IOC orders are still open")
+    return reasons
+
+
+def _position_reasons(
+    remote_positions: list[RemotePosition],
+    expected_positions: list[tuple[str, Decimal, int]],
+) -> list[str]:
+    expected: dict[str, tuple[Decimal, int]] = {}
+    reasons: list[str] = []
+    for symbol, quantity, leverage in expected_positions:
+        previous = expected.get(symbol)
+        if previous is not None and previous[1] != leverage:
+            reasons.append("local paired positions use conflicting leverage")
+            continue
+        expected[symbol] = (
+            (previous[0] if previous is not None else Decimal("0")) + quantity,
+            leverage,
+        )
+    remote: dict[str, tuple[Decimal, Decimal, bool | None]] = {}
+    for item in remote_positions:
+        if item.side != "short":
+            reasons.append("remote position is not a strategy short position")
+            continue
+        previous = remote.get(item.symbol)
+        if previous is not None and previous[1] != item.leverage:
+            reasons.append("remote short positions use conflicting leverage")
+            continue
+        remote[item.symbol] = (
+            (previous[0] if previous is not None else Decimal("0"))
+            + item.quantity,
+            item.leverage,
+            item.isolated if previous is None else previous[2] and item.isolated,
+        )
+    for symbol, (quantity, leverage) in expected.items():
+        actual = remote.pop(symbol, None)
+        if actual is None:
+            reasons.append("local paired position is missing from the exchange")
+            continue
+        if (
+            not _decimal_equal(actual[0], quantity)
+            or actual[1] != Decimal(leverage)
+            or actual[2] is not True
+        ):
+            reasons.append("remote short position conflicts with the local pair")
+    if remote:
+        reasons.append("remote position has no matching local pair")
+    return reasons
+
+
+def _decimal_equal(left: Decimal, right: Decimal) -> bool:
+    return abs(left - right) <= Decimal("0.000000000000001")
