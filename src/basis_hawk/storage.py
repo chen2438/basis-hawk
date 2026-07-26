@@ -248,6 +248,74 @@ class DailyNotificationSummary:
     unhealthy_account_count: int
 
 
+class InternalTransferRow(Base):
+    __tablename__ = "internal_transfers"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(36), unique=True)
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    exchange: Mapped[str] = mapped_column(String(20), index=True)
+    environment: Mapped[str] = mapped_column(String(20))
+    asset: Mapped[str] = mapped_column(String(20))
+    direction: Mapped[str] = mapped_column(String(30))
+    amount: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    exchange_transfer_id: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+    source_balance_before: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    target_balance_before: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    expected_target_balance: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    submitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "asset = 'USDT'",
+            name="ck_internal_transfer_usdt_only",
+        ),
+        CheckConstraint(
+            "direction IN ('spot_to_perp', 'perp_to_spot')",
+            name="ck_internal_transfer_direction",
+        ),
+        CheckConstraint(
+            "amount > 0",
+            name="ck_internal_transfer_amount_positive",
+        ),
+        CheckConstraint(
+            "status IN "
+            "('planned', 'submitted', 'pending', 'completed', 'failed', "
+            "'manual_review')",
+            name="ck_internal_transfer_status",
+        ),
+        Index(
+            "ix_internal_transfer_daily_limit",
+            "created_at",
+            "status",
+        ),
+    )
+
+
 class AccountSnapshotRow(Base):
     __tablename__ = "account_snapshots"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -3724,6 +3792,133 @@ class Database:
                 failed_trade_count=int(failed_count or 0),
                 active_position_count=int(active_count or 0),
                 unhealthy_account_count=int(unhealthy_count or 0),
+            )
+
+    async def plan_internal_transfer(
+        self,
+        *,
+        transfer_id: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+        exchange: str,
+        environment: str,
+        direction: str,
+        amount: Decimal,
+        per_request_limit: Decimal,
+        daily_limit: Decimal,
+        actor: str,
+        now: datetime | None = None,
+    ) -> tuple[InternalTransferRow, bool]:
+        if direction not in {"spot_to_perp", "perp_to_spot"}:
+            raise ValueError("unsupported internal transfer direction")
+        if environment not in {"sandbox", "live"}:
+            raise ValueError("internal transfer environment must be sandbox or live")
+        if amount <= 0:
+            raise ValueError("internal transfer amount must be positive")
+        if per_request_limit <= 0 or daily_limit <= 0:
+            raise ValueError("internal transfers are disabled by zero limits")
+        if amount > per_request_limit:
+            raise ValueError("internal transfer exceeds the per-request limit")
+        if per_request_limit > daily_limit:
+            raise ValueError("per-request transfer limit cannot exceed daily limit")
+        observed_at = now or datetime.now(UTC)
+        day_start = observed_at.replace(hour=0, minute=0, second=0, microsecond=0)
+        async with self.sessions() as session:
+            existing = await session.scalar(
+                select(InternalTransferRow).where(
+                    InternalTransferRow.idempotency_key == idempotency_key
+                )
+            )
+            if existing is not None:
+                if existing.request_fingerprint != request_fingerprint:
+                    raise ValueError(
+                        "internal transfer idempotency key conflicts with another request"
+                    )
+                return existing, False
+            control = await session.scalar(
+                select(ExecutionControlRow)
+                .where(ExecutionControlRow.id == 1)
+                .with_for_update()
+            )
+            if control is None:
+                control = ExecutionControlRow(
+                    id=1,
+                    state="blocked",
+                    reason="execution worker has not completed startup reconciliation",
+                    updated_at=observed_at,
+                )
+                session.add(control)
+                await session.flush()
+            used = await session.scalar(
+                select(
+                    func.coalesce(func.sum(InternalTransferRow.amount), 0)
+                ).where(
+                    InternalTransferRow.created_at >= day_start,
+                    InternalTransferRow.created_at < day_start
+                    + timedelta(days=1),
+                    InternalTransferRow.status.not_in({"failed"}),
+                )
+            )
+            if Decimal(used or 0) + amount > daily_limit:
+                raise ValueError("internal transfer exceeds the UTC daily limit")
+            row = InternalTransferRow(
+                id=transfer_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+                exchange=exchange,
+                environment=environment,
+                asset="USDT",
+                direction=direction,
+                amount=amount,
+                status="planned",
+                created_at=observed_at,
+                updated_at=observed_at,
+            )
+            session.add(row)
+            if control.state != "paused":
+                control.state = "paused"
+                control.reason = (
+                    "internal account transfer requires balance confirmation"
+                )
+                control.updated_at = observed_at
+            session.add(
+                AuditEventRow(
+                    id=str(uuid.uuid4()),
+                    occurred_at=observed_at,
+                    event_type="transfer.planned",
+                    actor=actor,
+                    details=json.dumps(
+                        {
+                            "transfer_id": transfer_id,
+                            "exchange": exchange,
+                            "environment": environment,
+                            "asset": "USDT",
+                            "direction": direction,
+                            "amount": format(amount, "f"),
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            )
+            await session.commit()
+            await session.refresh(row)
+            return row, True
+
+    async def list_internal_transfers(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[InternalTransferRow]:
+        if limit < 1 or limit > 500:
+            raise ValueError("internal transfer list limit must be between 1 and 500")
+        async with self.sessions() as session:
+            return list(
+                await session.scalars(
+                    select(InternalTransferRow)
+                    .order_by(InternalTransferRow.created_at.desc())
+                    .limit(limit)
+                )
             )
 
     async def save_exchange_credential(

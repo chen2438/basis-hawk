@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
@@ -30,6 +31,14 @@ class AppConfig(BaseSettings):
     smtp_from: str | None = None
     smtp_to: str | None = None
     notification_batch_size: int = Field(default=20, ge=1, le=100)
+    transfer_per_request_limit_usdt: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+    )
+    transfer_daily_limit_usdt: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+    )
 
 
 @lru_cache
