@@ -64,7 +64,12 @@ OKX 使用单条生产或模拟盘私有 WebSocket，按官方
 `positions(ANY)` 和 `account`。普通订单频道包含成交更新；专用 `fills` 频道仅向特定 VIP 等级开放，
 因此不能把它作为普通账户的就绪前提。三个通用频道全部确认后才登记订单、成交和仓位订阅就绪；空闲时
 使用 OKX 要求的文本 `ping`/`pong`，频道连接数错误或任一通用错误均触发断线阻断。常驻 worker 已装配
-OKX；Bybit、Bitget、Gate 和 MEXC 尚未由连接工厂创建私有流。
+OKX。
+Bybit 使用生产或测试网 V5 私有 WebSocket，以 `GET/realtime + expires` 的 HMAC-SHA256 签名认证；
+认证成功后一次订阅全品类 `order`、`execution`、`position` 和 `wallet`。订单、独立成交及仓位主题
+分别满足三类健康条件，钱包主题提供账户余额变化；整个订阅请求明确成功后才登记就绪。空闲连接发送
+Bybit 应用层 JSON `ping` 并等待读循环收到 `pong`，任一失败响应或连接错误都会触发断线阻断。常驻
+worker 已装配 Bybit；Bitget、Gate 和 MEXC 仍保持私有流阻断。
 每轮对账对每个账户独立汇总阻断原因；只有全部已配置账户都没有原因且没有请求失败，才把账户状态写为
 `ready`。写入全局 `ready` 前会再次检查每个账户的私有流心跳，避免把本轮处理中已经陈旧的连接放行。
 任一账户为 `blocked`/`error` 或已有补偿失败等安全暂停时，全局状态不会进入 `ready`。

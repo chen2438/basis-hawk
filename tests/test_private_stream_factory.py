@@ -19,6 +19,7 @@ async def test_factory_builds_implemented_private_stream_connections() -> None:
     for exchange, passphrase in (
         (Exchange.BINANCE, None),
         (Exchange.OKX, "test-passphrase"),
+        (Exchange.BYBIT, None),
     ):
         await credentials.save(
             exchange=exchange,
@@ -39,6 +40,7 @@ async def test_factory_builds_implemented_private_stream_connections() -> None:
 
     assert [item.exchange for item in connections] == [
         Exchange.BINANCE,
+        Exchange.BYBIT,
         Exchange.OKX,
     ]
     assert all(

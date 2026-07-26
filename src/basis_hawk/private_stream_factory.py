@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from basis_hawk.binance_private_stream import BinancePrivateStreamConnection
+from basis_hawk.bybit_private_stream import BybitPrivateStreamConnection
 from basis_hawk.credentials import CredentialService
 from basis_hawk.models import Exchange
 from basis_hawk.okx_private_stream import OkxPrivateStreamConnection
@@ -28,6 +29,14 @@ async def create_private_stream_connections(
         elif summary.exchange == Exchange.OKX:
             connections.append(
                 OkxPrivateStreamConnection(
+                    secrets,
+                    summary.environment,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
+        elif summary.exchange == Exchange.BYBIT:
+            connections.append(
+                BybitPrivateStreamConnection(
                     secrets,
                     summary.environment,
                     timeout_seconds=timeout_seconds,
