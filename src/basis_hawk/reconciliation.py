@@ -19,6 +19,7 @@ from basis_hawk.credentials import (
     ExchangeEnvironment,
     ExchangeSecrets,
 )
+from basis_hawk.live_execution import LiveExecutionService
 from basis_hawk.models import Exchange
 from basis_hawk.storage import Database, OrderLegRow
 from basis_hawk.trading import PaperExecutionService
@@ -48,6 +49,7 @@ class ReconciliationService:
             PrivateAccountClient,
         ] = create_account_client,
         paper_executor: PaperExecutionService | None = None,
+        live_executor: LiveExecutionService | None = None,
         event_debounce_seconds: float = 0.25,
     ) -> None:
         if event_debounce_seconds < 0:
@@ -56,6 +58,11 @@ class ReconciliationService:
         self.credentials = credentials
         self.account_client_factory = account_client_factory
         self.paper_executor = paper_executor or PaperExecutionService(database)
+        self.live_executor = live_executor or LiveExecutionService(
+            database,
+            credentials,
+            account_client_factory=account_client_factory,
+        )
         self.event_debounce_seconds = event_debounce_seconds
         self._reconciliation_requested = asyncio.Event()
 
@@ -64,6 +71,7 @@ class ReconciliationService:
 
     async def run_once(self) -> ReconciliationResult:
         await self.paper_executor.run_once()
+        await self.live_executor.run_once()
         control = await self.database.execution_control()
         safety_pause_reason = (
             control.reason if control is not None and control.state == "paused" else None

@@ -716,6 +716,32 @@ async def test_private_event_wakes_serial_reconciliation_loop() -> None:
     await database.close()
 
 
+async def test_reconciliation_loop_invokes_live_executor() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials = CredentialService(
+        database,
+        SecretCipher(SecretCipher.generate_key()),
+    )
+
+    class FakeLiveExecutor:
+        calls = 0
+
+        async def run_once(self) -> None:
+            self.calls += 1
+
+    live_executor = FakeLiveExecutor()
+    result = await ReconciliationService(
+        database,
+        credentials,
+        live_executor=live_executor,  # type: ignore[arg-type]
+    ).run_once()
+
+    assert live_executor.calls == 1
+    assert result.execution_state == "blocked"
+    await database.close()
+
+
 async def test_reconciliation_does_not_clear_a_safety_pause() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()
