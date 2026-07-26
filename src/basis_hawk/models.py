@@ -39,10 +39,36 @@ class InstrumentPair(DecimalModel):
     spot_symbol: str
     perp_symbol: str
     funding_interval_hours: Decimal = Decimal("8")
+    spot_price_increment: Decimal = Field(default=Decimal("0"), ge=0)
+    spot_quantity_increment: Decimal = Field(default=Decimal("0"), ge=0)
+    spot_min_quantity: Decimal = Field(default=Decimal("0"), ge=0)
+    spot_min_notional: Decimal = Field(default=Decimal("0"), ge=0)
+    perp_price_increment: Decimal = Field(default=Decimal("0"), ge=0)
+    perp_quantity_increment: Decimal = Field(default=Decimal("0"), ge=0)
+    perp_min_quantity: Decimal = Field(default=Decimal("0"), ge=0)
+    perp_min_notional: Decimal = Field(default=Decimal("0"), ge=0)
+    perp_contract_size: Decimal = Field(default=Decimal("0"), ge=0)
 
     @property
     def key(self) -> str:
         return f"{self.exchange.value}:{self.base_asset}"
+
+    @property
+    def trading_rules_complete(self) -> bool:
+        return all(
+            value > 0
+            for value in (
+                self.spot_price_increment,
+                self.spot_quantity_increment,
+                self.perp_price_increment,
+                self.perp_quantity_increment,
+                self.perp_contract_size,
+            )
+        )
+
+    @property
+    def perp_base_quantity_increment(self) -> Decimal:
+        return self.perp_quantity_increment * self.perp_contract_size
 
 
 class MarketQuote(DecimalModel):

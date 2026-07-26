@@ -51,6 +51,15 @@ class InstrumentRow(Base):
     spot_symbol: Mapped[str] = mapped_column(String(80))
     perp_symbol: Mapped[str] = mapped_column(String(80))
     interval_hours: Mapped[str] = mapped_column(String(32))
+    spot_price_increment: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    spot_quantity_increment: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    spot_min_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    spot_min_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    perp_price_increment: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    perp_quantity_increment: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    perp_min_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    perp_min_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    perp_contract_size: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -1726,6 +1735,15 @@ class Database:
                     spot_symbol=pair.spot_symbol,
                     perp_symbol=pair.perp_symbol,
                     interval_hours=str(pair.funding_interval_hours),
+                    spot_price_increment=pair.spot_price_increment,
+                    spot_quantity_increment=pair.spot_quantity_increment,
+                    spot_min_quantity=pair.spot_min_quantity,
+                    spot_min_notional=pair.spot_min_notional,
+                    perp_price_increment=pair.perp_price_increment,
+                    perp_quantity_increment=pair.perp_quantity_increment,
+                    perp_min_quantity=pair.perp_min_quantity,
+                    perp_min_notional=pair.perp_min_notional,
+                    perp_contract_size=pair.perp_contract_size,
                     updated_at=now,
                 )
                 for pair in pairs

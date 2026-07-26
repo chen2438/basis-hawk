@@ -1,10 +1,12 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from sqlalchemy import select
+
 from basis_hawk.exchanges.base import ExchangeAdapter
 from basis_hawk.models import Exchange, FundingObservation, InstrumentPair, MarketQuote
 from basis_hawk.service import ScannerService
-from basis_hawk.storage import Database
+from basis_hawk.storage import Database, InstrumentRow
 
 
 class FakeAdapter(ExchangeAdapter):
@@ -17,6 +19,15 @@ class FakeAdapter(ExchangeAdapter):
                 base_asset="BTC",
                 spot_symbol="BTCUSDT",
                 perp_symbol="BTCUSDT",
+                spot_price_increment=Decimal("0.01"),
+                spot_quantity_increment=Decimal("0.00001"),
+                spot_min_quantity=Decimal("0.0001"),
+                spot_min_notional=Decimal("5"),
+                perp_price_increment=Decimal("0.1"),
+                perp_quantity_increment=Decimal("0.001"),
+                perp_min_quantity=Decimal("0.001"),
+                perp_min_notional=Decimal("5"),
+                perp_contract_size=Decimal("1"),
             )
         ]
 
@@ -81,4 +92,9 @@ async def test_refreshes_and_recalculates() -> None:
     result = service.list_opportunities()[0]
     assert result.base_asset == "BTC"
     assert result.net_return is not None
+    async with database.sessions() as session:
+        instrument = await session.scalar(select(InstrumentRow))
+        assert instrument is not None
+        assert instrument.spot_quantity_increment == Decimal("0.00001")
+        assert instrument.perp_contract_size == Decimal("1")
     await database.close()

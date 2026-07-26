@@ -20,7 +20,7 @@ class OkxAdapter(ExchangeAdapter):
             self.http.get("/api/v5/public/instruments", instType="SWAP"),
         )
         spots = {
-            item["baseCcy"]: item["instId"]
+            item["baseCcy"]: item
             for item in spot.get("data", [])
             if item.get("state") == "live" and item.get("quoteCcy") == "USDT"
         }
@@ -37,8 +37,30 @@ class OkxAdapter(ExchangeAdapter):
             InstrumentPair(
                 exchange=Exchange.OKX,
                 base_asset=base,
-                spot_symbol=spots[base],
+                spot_symbol=spots[base]["instId"],
                 perp_symbol=perps[base]["instId"],
+                spot_price_increment=Decimal(
+                    str(spots[base].get("tickSz") or "0")
+                ),
+                spot_quantity_increment=Decimal(
+                    str(spots[base].get("lotSz") or "0")
+                ),
+                spot_min_quantity=Decimal(
+                    str(spots[base].get("minSz") or "0")
+                ),
+                perp_price_increment=Decimal(
+                    str(perps[base].get("tickSz") or "0")
+                ),
+                perp_quantity_increment=Decimal(
+                    str(perps[base].get("lotSz") or "0")
+                ),
+                perp_min_quantity=Decimal(
+                    str(perps[base].get("minSz") or "0")
+                ),
+                perp_contract_size=Decimal(
+                    str(perps[base].get("ctVal") or "0")
+                )
+                * Decimal(str(perps[base].get("ctMult") or "1")),
             )
             for base in sorted(spots.keys() & perps.keys())
         ]
@@ -68,9 +90,11 @@ class OkxAdapter(ExchangeAdapter):
                     spot_ask=Decimal(s["askPx"]),
                     spot_ask_qty=Decimal(s["askSz"]),
                     perp_bid=Decimal(p["bidPx"]),
-                    perp_bid_qty=Decimal(p["bidSz"]),
+                    perp_bid_qty=Decimal(p["bidSz"])
+                    * pair.perp_contract_size,
                     perp_ask=Decimal(p["askPx"]),
-                    perp_ask_qty=Decimal(p["askSz"]),
+                    perp_ask_qty=Decimal(p["askSz"])
+                    * pair.perp_contract_size,
                     spot_quote_volume_24h=Decimal(s["volCcy24h"]),
                     perp_quote_volume_24h=Decimal(p["volCcy24h"]) * last,
                 )

@@ -18,6 +18,18 @@ def handler(request: httpx.Request) -> httpx.Response:
                         "baseAsset": "BTC",
                         "quoteAsset": "USDT",
                         "status": "TRADING",
+                        "filters": [
+                            {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                            {
+                                "filterType": "LOT_SIZE",
+                                "stepSize": "0.00001",
+                                "minQty": "0.0001",
+                            },
+                            {
+                                "filterType": "NOTIONAL",
+                                "minNotional": "5",
+                            },
+                        ],
                     }
                 ]
             },
@@ -34,6 +46,18 @@ def handler(request: httpx.Request) -> httpx.Response:
                         "marginAsset": "USDT",
                         "contractType": "PERPETUAL",
                         "status": "TRADING",
+                        "filters": [
+                            {"filterType": "PRICE_FILTER", "tickSize": "0.1"},
+                            {
+                                "filterType": "LOT_SIZE",
+                                "stepSize": "0.001",
+                                "minQty": "0.001",
+                            },
+                            {
+                                "filterType": "MIN_NOTIONAL",
+                                "notional": "5",
+                            },
+                        ],
                     }
                 ]
             },
@@ -96,6 +120,9 @@ async def test_binance_normalizes_public_responses() -> None:
         pairs[0], start=datetime.now(UTC) - timedelta(days=1), end=datetime.now(UTC)
     )
     assert pairs[0].base_asset == "BTC"
+    assert pairs[0].trading_rules_complete is True
+    assert str(pairs[0].spot_quantity_increment) == "0.00001"
+    assert str(pairs[0].perp_base_quantity_increment) == "0.001"
     assert str(quotes[0].spot_ask) == "100"
     assert str(current[0].interval_hours) == "4"
     assert history[0].settled is True

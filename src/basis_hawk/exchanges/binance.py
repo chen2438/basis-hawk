@@ -4,7 +4,12 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from basis_hawk.exchanges.base import ExchangeAdapter, PublicClient, as_list
+from basis_hawk.exchanges.base import (
+    ExchangeAdapter,
+    PublicClient,
+    as_list,
+    filter_decimal,
+)
 from basis_hawk.models import Exchange, FundingObservation, InstrumentPair, MarketQuote
 
 
@@ -20,7 +25,7 @@ class BinanceAdapter(ExchangeAdapter):
             self.spot.get("/api/v3/exchangeInfo"), self.perp.get("/fapi/v1/exchangeInfo")
         )
         spots = {
-            item["baseAsset"]: item["symbol"]
+            item["baseAsset"]: item
             for item in spot_payload.get("symbols", [])
             if item.get("status") == "TRADING" and item.get("quoteAsset") == "USDT"
         }
@@ -36,8 +41,36 @@ class BinanceAdapter(ExchangeAdapter):
             InstrumentPair(
                 exchange=Exchange.BINANCE,
                 base_asset=base,
-                spot_symbol=spots[base],
+                spot_symbol=spots[base]["symbol"],
                 perp_symbol=perps[base]["symbol"],
+                spot_price_increment=filter_decimal(
+                    spots[base], "PRICE_FILTER", "tickSize"
+                ),
+                spot_quantity_increment=filter_decimal(
+                    spots[base], "LOT_SIZE", "stepSize"
+                ),
+                spot_min_quantity=filter_decimal(
+                    spots[base], "LOT_SIZE", "minQty"
+                ),
+                spot_min_notional=(
+                    filter_decimal(spots[base], "NOTIONAL", "minNotional")
+                    or filter_decimal(
+                        spots[base], "MIN_NOTIONAL", "minNotional"
+                    )
+                ),
+                perp_price_increment=filter_decimal(
+                    perps[base], "PRICE_FILTER", "tickSize"
+                ),
+                perp_quantity_increment=filter_decimal(
+                    perps[base], "LOT_SIZE", "stepSize"
+                ),
+                perp_min_quantity=filter_decimal(
+                    perps[base], "LOT_SIZE", "minQty"
+                ),
+                perp_min_notional=filter_decimal(
+                    perps[base], "MIN_NOTIONAL", "notional"
+                ),
+                perp_contract_size=Decimal("1"),
             )
             for base in sorted(spots.keys() & perps.keys())
         ]

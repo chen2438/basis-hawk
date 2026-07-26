@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from time import monotonic
 from typing import Any
 
@@ -76,3 +77,35 @@ def as_list(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, dict):
         return [payload]
     return []
+
+
+def filter_decimal(
+    item: dict[str, Any],
+    filter_type: str,
+    field: str,
+) -> Decimal:
+    filter_item = next(
+        (
+            value
+            for value in item.get("filters", [])
+            if value.get("filterType") == filter_type
+        ),
+        {},
+    )
+    return decimal_or_zero(filter_item.get(field))
+
+
+def decimal_or_zero(value: object) -> Decimal:
+    try:
+        result = Decimal(str(value or "0"))
+        return result if result >= 0 else Decimal("0")
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("0")
+
+
+def decimal_increment(places: object) -> Decimal:
+    try:
+        value = int(str(places))
+        return Decimal("1").scaleb(-value) if value >= 0 else Decimal("0")
+    except (TypeError, ValueError):
+        return Decimal("0")

@@ -18,6 +18,10 @@ def handler(request: httpx.Request) -> httpx.Response:
                     "quote": "USDT",
                     "trade_status": "tradable",
                     "type": "normal",
+                    "precision": 2,
+                    "amount_precision": 6,
+                    "min_base_amount": "0.0001",
+                    "min_quote_amount": "5",
                 }
             ],
         )
@@ -34,6 +38,8 @@ def handler(request: httpx.Request) -> httpx.Response:
                     "quanto_multiplier": "0.001",
                     "funding_interval": 14400,
                     "funding_next_apply": 1785110400,
+                    "order_price_round": "0.1",
+                    "order_size_min": 1,
                 }
             ],
         )
@@ -98,6 +104,9 @@ async def test_gate_normalizes_public_responses() -> None:
     )
     assert pairs[0].base_asset == "BTC"
     assert str(pairs[0].funding_interval_hours) == "4"
+    assert pairs[0].trading_rules_complete is True
+    assert str(pairs[0].spot_price_increment) == "0.01"
+    assert str(pairs[0].perp_base_quantity_increment) == "0.001"
     assert str(quotes[0].perp_bid_qty) == "3.000"
     assert str(quotes[0].perp_quote_volume_24h) == "3000000"
     assert str(current[0].interval_hours) == "4"

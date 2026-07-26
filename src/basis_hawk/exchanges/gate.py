@@ -5,7 +5,12 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from basis_hawk.exchanges.base import ExchangeAdapter, PublicClient, as_list
+from basis_hawk.exchanges.base import (
+    ExchangeAdapter,
+    PublicClient,
+    as_list,
+    decimal_increment,
+)
 from basis_hawk.models import Exchange, FundingObservation, InstrumentPair, MarketQuote
 
 
@@ -26,7 +31,7 @@ class GateAdapter(ExchangeAdapter):
             self.http.get("/futures/usdt/contracts"),
         )
         spots = {
-            str(item["base"]): str(item["id"])
+            str(item["base"]): item
             for item in as_list(spot_payload)
             if item.get("quote") == "USDT"
             and item.get("trade_status") == "tradable"
@@ -49,12 +54,34 @@ class GateAdapter(ExchangeAdapter):
             InstrumentPair(
                 exchange=Exchange.GATE,
                 base_asset=base,
-                spot_symbol=spots[base],
+                spot_symbol=str(spots[base]["id"]),
                 perp_symbol=str(perps[base]["name"]),
                 funding_interval_hours=Decimal(
                     str(perps[base].get("funding_interval") or 28_800)
                 )
                 / Decimal("3600"),
+                spot_price_increment=decimal_increment(
+                    spots[base].get("precision")
+                ),
+                spot_quantity_increment=decimal_increment(
+                    spots[base].get("amount_precision")
+                ),
+                spot_min_quantity=Decimal(
+                    str(spots[base].get("min_base_amount") or "0")
+                ),
+                spot_min_notional=Decimal(
+                    str(spots[base].get("min_quote_amount") or "0")
+                ),
+                perp_price_increment=Decimal(
+                    str(perps[base].get("order_price_round") or "0")
+                ),
+                perp_quantity_increment=Decimal("1"),
+                perp_min_quantity=Decimal(
+                    str(perps[base].get("order_size_min") or "0")
+                ),
+                perp_contract_size=Decimal(
+                    str(perps[base].get("quanto_multiplier") or "0")
+                ),
             )
             for base in sorted(spots.keys() & perps.keys())
         ]

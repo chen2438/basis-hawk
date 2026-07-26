@@ -1,0 +1,113 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from math import gcd
+
+from basis_hawk.models import InstrumentPair
+
+
+class OrderSizingError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class PairedOrderSize:
+    base_quantity: Decimal
+    spot_quantity: Decimal
+    perp_quantity: Decimal
+    common_base_increment: Decimal
+    spot_notional: Decimal
+    perp_notional: Decimal
+
+
+def protective_limit_price(
+    *,
+    reference_price: Decimal,
+    maximum_slippage: Decimal,
+    side: str,
+    price_increment: Decimal,
+) -> Decimal:
+    if reference_price <= 0 or price_increment <= 0:
+        raise OrderSizingError("reference price and increment must be positive")
+    if maximum_slippage < 0 or maximum_slippage >= 1:
+        raise OrderSizingError("maximum slippage must be between zero and one")
+    if side == "buy":
+        boundary = reference_price * (Decimal("1") + maximum_slippage)
+        rounding = ROUND_FLOOR
+    elif side == "sell":
+        boundary = reference_price * (Decimal("1") - maximum_slippage)
+        rounding = ROUND_CEILING
+    else:
+        raise OrderSizingError("order side must be buy or sell")
+    increments = (boundary / price_increment).to_integral_value(rounding=rounding)
+    result = increments * price_increment
+    if result <= 0:
+        raise OrderSizingError("protective limit price is not positive")
+    return result
+
+
+def size_paired_order(
+    pair: InstrumentPair,
+    *,
+    requested_notional: Decimal,
+    spot_price: Decimal,
+    perp_price: Decimal,
+) -> PairedOrderSize:
+    if not pair.trading_rules_complete:
+        raise OrderSizingError("instrument trading rules are incomplete")
+    if requested_notional <= 0 or spot_price <= 0 or perp_price <= 0:
+        raise OrderSizingError("notional and prices must be positive")
+
+    common_increment = _decimal_lcm(
+        pair.spot_quantity_increment,
+        pair.perp_base_quantity_increment,
+    )
+    target_base_quantity = requested_notional / spot_price
+    increments = (target_base_quantity / common_increment).to_integral_value(
+        rounding=ROUND_FLOOR
+    )
+    base_quantity = increments * common_increment
+    if base_quantity <= 0:
+        raise OrderSizingError("requested notional is below the common quantity step")
+
+    spot_quantity = base_quantity
+    perp_quantity = base_quantity / pair.perp_contract_size
+    if spot_quantity < pair.spot_min_quantity:
+        raise OrderSizingError("spot quantity is below the exchange minimum")
+    if perp_quantity < pair.perp_min_quantity:
+        raise OrderSizingError("perpetual quantity is below the exchange minimum")
+    if not _is_multiple(spot_quantity, pair.spot_quantity_increment):
+        raise OrderSizingError("spot quantity is not aligned to its increment")
+    if not _is_multiple(perp_quantity, pair.perp_quantity_increment):
+        raise OrderSizingError("perpetual quantity is not aligned to its increment")
+
+    spot_notional = spot_quantity * spot_price
+    perp_notional = base_quantity * perp_price
+    if pair.spot_min_notional > 0 and spot_notional < pair.spot_min_notional:
+        raise OrderSizingError("spot notional is below the exchange minimum")
+    if pair.perp_min_notional > 0 and perp_notional < pair.perp_min_notional:
+        raise OrderSizingError("perpetual notional is below the exchange minimum")
+    return PairedOrderSize(
+        base_quantity=base_quantity,
+        spot_quantity=spot_quantity,
+        perp_quantity=perp_quantity,
+        common_base_increment=common_increment,
+        spot_notional=spot_notional,
+        perp_notional=perp_notional,
+    )
+
+
+def _decimal_lcm(left: Decimal, right: Decimal) -> Decimal:
+    if left <= 0 or right <= 0:
+        raise OrderSizingError("quantity increments must be positive")
+    scale = max(-left.as_tuple().exponent, -right.as_tuple().exponent, 0)
+    factor = 10**scale
+    left_units = int(left * factor)
+    right_units = int(right * factor)
+    units = abs(left_units * right_units) // gcd(left_units, right_units)
+    return Decimal(units) / Decimal(factor)
+
+
+def _is_multiple(value: Decimal, increment: Decimal) -> bool:
+    return value % increment == 0

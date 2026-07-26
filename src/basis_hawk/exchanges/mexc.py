@@ -4,7 +4,12 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from basis_hawk.exchanges.base import ExchangeAdapter, PublicClient, as_list
+from basis_hawk.exchanges.base import (
+    ExchangeAdapter,
+    PublicClient,
+    as_list,
+    filter_decimal,
+)
 from basis_hawk.models import Exchange, FundingObservation, InstrumentPair, MarketQuote
 
 
@@ -22,7 +27,7 @@ class MexcAdapter(ExchangeAdapter):
             self.spot.get("/api/v3/exchangeInfo"), self.perp.get("/api/v1/contract/detail")
         )
         spots = {
-            item["baseAsset"]: item["symbol"]
+            item["baseAsset"]: item
             for item in spot.get("symbols", [])
             if str(item.get("status")) in {"1", "ENABLED", "TRADING"}
             and item.get("quoteAsset") == "USDT"
@@ -38,9 +43,33 @@ class MexcAdapter(ExchangeAdapter):
             InstrumentPair(
                 exchange=Exchange.MEXC,
                 base_asset=base,
-                spot_symbol=spots[base],
+                spot_symbol=spots[base]["symbol"],
                 perp_symbol=perps[base]["symbol"],
                 funding_interval_hours=Decimal(str(perps[base].get("fundingRateCycle") or 8)),
+                spot_price_increment=filter_decimal(
+                    spots[base], "PRICE_FILTER", "tickSize"
+                ),
+                spot_quantity_increment=filter_decimal(
+                    spots[base], "LOT_SIZE", "stepSize"
+                ),
+                spot_min_quantity=filter_decimal(
+                    spots[base], "LOT_SIZE", "minQty"
+                ),
+                spot_min_notional=filter_decimal(
+                    spots[base], "MIN_NOTIONAL", "minNotional"
+                ),
+                perp_price_increment=Decimal(
+                    str(perps[base].get("priceUnit") or "0")
+                ),
+                perp_quantity_increment=Decimal(
+                    str(perps[base].get("volUnit") or "0")
+                ),
+                perp_min_quantity=Decimal(
+                    str(perps[base].get("minVol") or "0")
+                ),
+                perp_contract_size=Decimal(
+                    str(perps[base].get("contractSize") or "0")
+                ),
             )
             for base in sorted(spots.keys() & perps.keys())
         ]

@@ -19,6 +19,10 @@ def handler(request: httpx.Request) -> httpx.Response:
                         "baseCoin": "BTC",
                         "quoteCoin": "USDT",
                         "status": "online",
+                        "minTradeAmount": "0.0001",
+                        "pricePrecision": "2",
+                        "quantityPrecision": "6",
+                        "minTradeUSDT": "5",
                     }
                 ],
             },
@@ -36,6 +40,11 @@ def handler(request: httpx.Request) -> httpx.Response:
                         "symbolStatus": "normal",
                         "symbolType": "perpetual",
                         "fundInterval": "4",
+                        "minTradeNum": "0.001",
+                        "priceEndStep": "5",
+                        "pricePlace": "2",
+                        "sizeMultiplier": "0.001",
+                        "minTradeUSDT": "5",
                     }
                 ],
             },
@@ -125,6 +134,9 @@ async def test_bitget_normalizes_public_responses() -> None:
     )
     assert pairs[0].base_asset == "BTC"
     assert str(pairs[0].funding_interval_hours) == "4"
+    assert pairs[0].trading_rules_complete is True
+    assert str(pairs[0].spot_quantity_increment) == "0.000001"
+    assert str(pairs[0].perp_price_increment) == "0.05"
     assert str(quotes[0].spot_ask) == "100"
     assert str(quotes[0].perp_quote_volume_24h) == "3000000"
     assert str(current[0].interval_hours) == "4"

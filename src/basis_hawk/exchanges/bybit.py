@@ -31,7 +31,7 @@ class BybitAdapter(ExchangeAdapter):
     async def instruments(self) -> list[InstrumentPair]:
         spot, linear = await asyncio.gather(self._instruments("spot"), self._instruments("linear"))
         spots = {
-            str(item["baseCoin"]): str(item["symbol"])
+            str(item["baseCoin"]): item
             for item in spot
             if item.get("status") == "Trading" and item.get("quoteCoin") == "USDT"
         }
@@ -48,10 +48,63 @@ class BybitAdapter(ExchangeAdapter):
             InstrumentPair(
                 exchange=Exchange.BYBIT,
                 base_asset=base,
-                spot_symbol=spots[base],
+                spot_symbol=str(spots[base]["symbol"]),
                 perp_symbol=str(perps[base]["symbol"]),
                 funding_interval_hours=Decimal(str(perps[base].get("fundingInterval", 480)))
                 / Decimal("60"),
+                spot_price_increment=Decimal(
+                    str((spots[base].get("priceFilter") or {}).get("tickSize") or "0")
+                ),
+                spot_quantity_increment=Decimal(
+                    str(
+                        (spots[base].get("lotSizeFilter") or {}).get(
+                            "basePrecision"
+                        )
+                        or "0"
+                    )
+                ),
+                spot_min_quantity=Decimal(
+                    str(
+                        (spots[base].get("lotSizeFilter") or {}).get(
+                            "minOrderQty"
+                        )
+                        or "0"
+                    )
+                ),
+                spot_min_notional=Decimal(
+                    str(
+                        (spots[base].get("lotSizeFilter") or {}).get(
+                            "minOrderAmt"
+                        )
+                        or "0"
+                    )
+                ),
+                perp_price_increment=Decimal(
+                    str((perps[base].get("priceFilter") or {}).get("tickSize") or "0")
+                ),
+                perp_quantity_increment=Decimal(
+                    str(
+                        (perps[base].get("lotSizeFilter") or {}).get("qtyStep")
+                        or "0"
+                    )
+                ),
+                perp_min_quantity=Decimal(
+                    str(
+                        (perps[base].get("lotSizeFilter") or {}).get(
+                            "minOrderQty"
+                        )
+                        or "0"
+                    )
+                ),
+                perp_min_notional=Decimal(
+                    str(
+                        (perps[base].get("lotSizeFilter") or {}).get(
+                            "minNotionalValue"
+                        )
+                        or "0"
+                    )
+                ),
+                perp_contract_size=Decimal("1"),
             )
             for base in sorted(spots.keys() & perps.keys())
         ]
