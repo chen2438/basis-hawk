@@ -70,6 +70,11 @@ worker 定期写入 `account_snapshots`、`remote_open_order_snapshots`、
 `executing` 后才允许并行调用交易所。两条 ACK 分别核对市场、标的和客户端 ID 后持久化；网络异常、
 响应不匹配或 ACK 落库失败均把对应腿置为 `unknown` 并原子暂停全局执行。进程在事务提交后的任意位置
 崩溃，都只能通过客户端订单 ID 查单恢复，执行器不会再次提交 `executing` 意图。
+REST 成交对账完整且两条主腿都进入 `filled`、`canceled` 或 `failed` 终态后，worker 才尝试结算真实开仓。
+两腿原生成交量分别乘以 `base_multiplier`；基础币数量相等且非零时，使用真实加权均价创建
+`paired_positions`。USDT 费用直接计价，基础币费用按该笔成交价折算；其他折扣币费用当前无法可靠估值，
+因此与任一数量失衡一起进入 `manual_review` 并全局暂停。两腿均为零成交时意图安全失败且不创建仓位。
+新产生的暂停会在本轮对账结束时重新读取并保留，不能被通用 `blocked` 状态覆盖。
 平仓意图通过 `paired_position_id` 关联原仓位，计划事务用行锁把仓位置为 `closing`；该状态及
 `closing_intent_id` 阻止同一仓位并发创建两个平仓意图。完整平仓写入累计平仓费用、已实现净盈亏和
 `closed_at`。

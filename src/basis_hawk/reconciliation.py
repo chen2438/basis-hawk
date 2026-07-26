@@ -17,7 +17,7 @@ from basis_hawk.credentials import (
     ExchangeSecrets,
 )
 from basis_hawk.models import Exchange
-from basis_hawk.storage import Database
+from basis_hawk.storage import Database, OrderLegRow
 from basis_hawk.trading import PaperExecutionService
 
 
@@ -165,6 +165,31 @@ class ReconciliationService:
                             batch.incomplete_reason
                             or "remote order fills are incomplete"
                         )
+                if (
+                    order_reconciliation_complete
+                    and fill_reconciliation_complete
+                ):
+                    legs_by_intent: dict[str, list[OrderLegRow]] = {}
+                    for leg in local_legs:
+                        legs_by_intent.setdefault(
+                            leg.trade_intent_id,
+                            [],
+                        ).append(leg)
+                    recoverable = await self.database.recoverable_trade_intents()
+                    for intent in recoverable:
+                        intent_legs = legs_by_intent.get(intent.id, [])
+                        if (
+                            intent.exchange == summary.exchange.value
+                            and intent.environment == summary.environment.value
+                            and intent.action == "open"
+                            and intent.status == "executing"
+                            and len(intent_legs) == 2
+                            and {leg.leg for leg in intent_legs}
+                            == {"spot", "perp"}
+                        ):
+                            await self.database.settle_live_open(
+                                intent_id=intent.id
+                            )
                 if not trading_state.complete:
                     reasons.append(
                         trading_state.incomplete_reason or "remote trading state is incomplete"
@@ -207,7 +232,13 @@ class ReconciliationService:
                     except Exception:
                         pass
 
-        if safety_pause_reason is None:
+        final_control = await self.database.execution_control()
+        final_pause_reason = (
+            final_control.reason
+            if final_control is not None and final_control.state == "paused"
+            else safety_pause_reason
+        )
+        if final_pause_reason is None:
             await self.database.set_execution_control(
                 state="blocked",
                 reason=(
@@ -219,7 +250,7 @@ class ReconciliationService:
             accounts_checked=len(summaries),
             accounts_blocked=blocked,
             accounts_failed=failed,
-            execution_state="paused" if safety_pause_reason else "blocked",
+            execution_state="paused" if final_pause_reason else "blocked",
         )
 
     async def run_forever(self, *, interval_seconds: float = 60) -> None:

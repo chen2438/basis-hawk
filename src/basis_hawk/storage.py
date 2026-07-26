@@ -29,6 +29,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
+    AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
@@ -376,6 +377,21 @@ def _utc(value: datetime) -> datetime:
 
 def _numeric_equal(left: Decimal, right: Decimal) -> bool:
     return abs(left - right) <= Decimal("0.000000000000001")
+
+
+def _live_fees_usdt(fills: list[FillRow], base_asset: str) -> Decimal:
+    total = Decimal("0")
+    for item in fills:
+        if item.fee_amount == 0:
+            continue
+        asset = item.fee_asset.upper()
+        if asset in {"USDT", "USD"}:
+            total += item.fee_amount
+        elif asset == base_asset.upper():
+            total += item.fee_amount * item.price
+        else:
+            raise ValueError("live fill fee asset cannot be valued in USDT")
+    return total
 
 
 class Database:
@@ -1061,6 +1077,129 @@ class Database:
                 control.reason = reason
                 control.updated_at = now
             await session.commit()
+
+    async def settle_live_open(
+        self,
+        *,
+        intent_id: str,
+    ) -> tuple[TradeIntentRow, PairedPositionRow | None, bool] | None:
+        async with self.sessions() as session:
+            intent = await session.scalar(
+                select(TradeIntentRow)
+                .where(TradeIntentRow.id == intent_id)
+                .with_for_update()
+            )
+            if intent is None:
+                return None
+            position = await session.scalar(
+                select(PairedPositionRow).where(
+                    PairedPositionRow.opening_intent_id == intent.id
+                )
+            )
+            if position is not None:
+                return intent, position, False
+            if (
+                intent.environment not in {"sandbox", "live"}
+                or intent.action != "open"
+                or intent.status != "executing"
+            ):
+                return intent, None, False
+            legs = list(
+                await session.scalars(
+                    select(OrderLegRow)
+                    .where(OrderLegRow.trade_intent_id == intent.id)
+                    .order_by(OrderLegRow.leg)
+                    .with_for_update()
+                )
+            )
+            primary = {item.leg: item for item in legs if item.leg in {"spot", "perp"}}
+            if set(primary) != {"spot", "perp"} or len(legs) != 2:
+                raise ValueError("live intent must contain exactly two primary legs")
+            terminal = {"filled", "canceled", "failed"}
+            if any(item.status not in terminal for item in primary.values()):
+                return intent, None, False
+            spot_base = (
+                primary["spot"].filled_quantity
+                * primary["spot"].base_multiplier
+            )
+            perp_base = (
+                primary["perp"].filled_quantity
+                * primary["perp"].base_multiplier
+            )
+            common_base = min(spot_base, perp_base)
+            now = datetime.now(UTC)
+            changed = True
+            if spot_base == 0 and perp_base == 0:
+                intent.status = "failed"
+            elif (
+                not _numeric_equal(spot_base, perp_base)
+                or primary["spot"].average_price is None
+                or primary["perp"].average_price is None
+            ):
+                intent.status = "manual_review"
+                await self._pause_live_settlement(session, now)
+            else:
+                fill_rows = list(
+                    await session.scalars(
+                        select(FillRow)
+                        .join(
+                            OrderLegRow,
+                            FillRow.order_leg_id == OrderLegRow.id,
+                        )
+                        .where(OrderLegRow.trade_intent_id == intent.id)
+                    )
+                )
+                try:
+                    fees = _live_fees_usdt(fill_rows, intent.base_asset)
+                except ValueError:
+                    intent.status = "manual_review"
+                    await self._pause_live_settlement(session, now)
+                else:
+                    position = PairedPositionRow(
+                        id=str(uuid.uuid4()),
+                        opening_intent_id=intent.id,
+                        exchange=intent.exchange,
+                        environment=intent.environment,
+                        base_asset=intent.base_asset,
+                        initial_quantity=common_base,
+                        quantity=common_base,
+                        spot_entry_price=primary["spot"].average_price,
+                        perp_entry_price=primary["perp"].average_price,
+                        opening_fees_usdt=fees,
+                        remaining_opening_fees_usdt=fees,
+                        status="open",
+                        opened_at=now,
+                    )
+                    session.add(position)
+                    intent.status = "hedged"
+            intent.version += 1
+            intent.updated_at = now
+            await session.commit()
+            return intent, position, changed
+
+    @staticmethod
+    async def _pause_live_settlement(
+        session: AsyncSession,
+        now: datetime,
+    ) -> None:
+        control = await session.get(ExecutionControlRow, 1)
+        reason = (
+            "live paired fills are imbalanced or cannot be valued; "
+            "manual exposure review is required"
+        )
+        if control is None:
+            session.add(
+                ExecutionControlRow(
+                    id=1,
+                    state="paused",
+                    reason=reason,
+                    updated_at=now,
+                )
+            )
+        else:
+            control.state = "paused"
+            control.reason = reason
+            control.updated_at = now
 
     async def execute_paper_open(
         self,
