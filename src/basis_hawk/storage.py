@@ -501,6 +501,44 @@ class PairedPositionRow(Base):
     )
 
 
+class PnlRealizationRow(Base):
+    __tablename__ = "pnl_realizations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    paired_position_id: Mapped[str] = mapped_column(
+        ForeignKey("paired_positions.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    closing_intent_id: Mapped[str] = mapped_column(
+        ForeignKey("trade_intents.id", ondelete="RESTRICT"),
+        unique=True,
+    )
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    gross_pnl_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    opening_fee_allocated_usdt: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18)
+    )
+    closing_fees_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    net_pnl_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    realized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "quantity >= 0",
+            name="ck_pnl_realization_quantity_nonnegative",
+        ),
+        CheckConstraint(
+            "opening_fee_allocated_usdt >= 0",
+            name="ck_pnl_realization_opening_fee_nonnegative",
+        ),
+        CheckConstraint(
+            "closing_fees_usdt >= 0",
+            name="ck_pnl_realization_closing_fees_nonnegative",
+        ),
+    )
+
+
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
@@ -1749,16 +1787,36 @@ class Database:
                             - primary["perp"].average_price
                         )
                     ) * spot_base
+                    net_pnl = (
+                        gross_pnl
+                        - opening_fee_allocation
+                        - closing_fees
+                    )
                     position.closing_fees_usdt = (
                         position.closing_fees_usdt or Decimal("0")
                     ) + closing_fees
                     position.realized_pnl_usdt = (
                         position.realized_pnl_usdt or Decimal("0")
-                    ) + gross_pnl - opening_fee_allocation - closing_fees
+                    ) + net_pnl
                     position.remaining_opening_fees_usdt -= (
                         opening_fee_allocation
                     )
                     position.quantity -= spot_base
+                    session.add(
+                        PnlRealizationRow(
+                            id=str(uuid.uuid4()),
+                            paired_position_id=position.id,
+                            closing_intent_id=intent.id,
+                            quantity=spot_base,
+                            gross_pnl_usdt=gross_pnl,
+                            opening_fee_allocated_usdt=(
+                                opening_fee_allocation
+                            ),
+                            closing_fees_usdt=closing_fees,
+                            net_pnl_usdt=net_pnl,
+                            realized_at=now,
+                        )
+                    )
                     intent.status = "closed"
                     if _numeric_equal(position.quantity, Decimal("0")):
                         position.quantity = Decimal("0")
@@ -2202,13 +2260,15 @@ class Database:
                 intent.version += 1
                 intent.updated_at = now
             else:
-                self._apply_paper_close_outcome(
-                    intent=intent,
-                    position=position,
-                    spot_leg=by_leg["spot"],
-                    perp_leg=by_leg["perp"],
-                    compensation_fee=Decimal("0"),
-                    now=now,
+                session.add(
+                    self._apply_paper_close_outcome(
+                        intent=intent,
+                        position=position,
+                        spot_leg=by_leg["spot"],
+                        perp_leg=by_leg["perp"],
+                        compensation_fee=Decimal("0"),
+                        now=now,
+                    )
                 )
             session.add_all(fills)
             await session.commit()
@@ -2316,13 +2376,15 @@ class Database:
                     occurred_at=now,
                 )
             )
-            self._apply_paper_close_outcome(
-                intent=intent,
-                position=position,
-                spot_leg=spot_leg,
-                perp_leg=perp_leg,
-                compensation_fee=compensation_fee,
-                now=now,
+            session.add(
+                self._apply_paper_close_outcome(
+                    intent=intent,
+                    position=position,
+                    spot_leg=spot_leg,
+                    perp_leg=perp_leg,
+                    compensation_fee=compensation_fee,
+                    now=now,
+                )
             )
             await session.commit()
             await session.refresh(intent)
@@ -2338,7 +2400,7 @@ class Database:
         perp_leg: OrderLegRow,
         compensation_fee: Decimal,
         now: datetime,
-    ) -> None:
+    ) -> PnlRealizationRow:
         common_quantity = min(
             spot_leg.filled_quantity,
             perp_leg.filled_quantity,
@@ -2367,14 +2429,13 @@ class Database:
             (spot_leg.limit_price - position.spot_entry_price)
             + (position.perp_entry_price - perp_leg.limit_price)
         ) * common_quantity
+        net_pnl = gross_pnl - opening_fee_allocation - attempt_fees
         position.closing_fees_usdt = (
             (position.closing_fees_usdt or Decimal("0")) + attempt_fees
         )
         position.realized_pnl_usdt = (
             (position.realized_pnl_usdt or Decimal("0"))
-            + gross_pnl
-            - opening_fee_allocation
-            - attempt_fees
+            + net_pnl
         )
         position.remaining_opening_fees_usdt -= opening_fee_allocation
         position.quantity -= common_quantity
@@ -2388,6 +2449,42 @@ class Database:
             intent.status = "closed" if common_quantity > 0 else "failed"
         intent.version += 1
         intent.updated_at = now
+        return PnlRealizationRow(
+            id=str(uuid.uuid4()),
+            paired_position_id=position.id,
+            closing_intent_id=intent.id,
+            quantity=common_quantity,
+            gross_pnl_usdt=gross_pnl,
+            opening_fee_allocated_usdt=opening_fee_allocation,
+            closing_fees_usdt=attempt_fees,
+            net_pnl_usdt=net_pnl,
+            realized_at=now,
+        )
+
+    async def daily_realized_pnl(
+        self,
+        *,
+        environment: str,
+        exchanges: set[str],
+        since: datetime,
+    ) -> Decimal:
+        if not exchanges:
+            return Decimal("0")
+        async with self.sessions() as session:
+            value = await session.scalar(
+                select(func.coalesce(func.sum(PnlRealizationRow.net_pnl_usdt), 0))
+                .join(
+                    PairedPositionRow,
+                    PnlRealizationRow.paired_position_id
+                    == PairedPositionRow.id,
+                )
+                .where(
+                    PairedPositionRow.environment == environment,
+                    PairedPositionRow.exchange.in_(exchanges),
+                    PnlRealizationRow.realized_at >= _utc(since),
+                )
+            )
+            return Decimal(value or 0)
 
     async def list_paired_positions(self, *, status: str | None = None) -> list[PairedPositionRow]:
         async with self.sessions() as session:

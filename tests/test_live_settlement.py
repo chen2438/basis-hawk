@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from basis_hawk.accounts import RemoteFill
@@ -307,6 +307,18 @@ async def test_live_settlement_closes_position_from_equal_base_fills() -> None:
         Decimal("0.000001")
     ) == Decimal("0.026000")
     assert repeated is not None and repeated[2] is False
+    assert (
+        await database.daily_realized_pnl(
+            environment="live",
+            exchanges={"okx"},
+            since=now - timedelta(minutes=1),
+        )
+    ).quantize(Decimal("0.000001")) == Decimal("0.026000")
+    assert await database.daily_realized_pnl(
+        environment="paper",
+        exchanges={"okx"},
+        since=now - timedelta(minutes=1),
+    ) == Decimal("0")
     assert await database.paired_perp_exposures(
         exchange="okx",
         environment="live",

@@ -550,6 +550,18 @@ async def test_partial_paper_close_compensates_and_allows_remaining_close() -> N
     assert closed.realized_pnl_usdt.quantize(
         Decimal("0.001")
     ) == Decimal("-4.399")
+    assert (
+        await database.daily_realized_pnl(
+            environment="paper",
+            exchanges={"binance"},
+            since=datetime.now(UTC) - timedelta(minutes=1),
+        )
+    ).quantize(Decimal("0.001")) == Decimal("-4.399")
+    assert await database.daily_realized_pnl(
+        environment="paper",
+        exchanges=set(),
+        since=datetime.now(UTC) - timedelta(minutes=1),
+    ) == Decimal("0")
     await database.close()
 
 
