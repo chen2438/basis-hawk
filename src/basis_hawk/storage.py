@@ -155,7 +155,49 @@ class AccountReconciliationRow(Base):
         ForeignKey("account_snapshots.id", ondelete="SET NULL"),
         nullable=True,
     )
+    trading_state_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    open_order_count: Mapped[int] = mapped_column(Integer, default=0)
+    position_count: Mapped[int] = mapped_column(Integer, default=0)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class RemoteOpenOrderSnapshotRow(Base):
+    __tablename__ = "remote_open_order_snapshots"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    account_snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("account_snapshots.id", ondelete="CASCADE"),
+        index=True,
+    )
+    exchange_order_id: Mapped[str] = mapped_column(String(100))
+    client_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    market: Mapped[str] = mapped_column(String(20))
+    symbol: Mapped[str] = mapped_column(String(100))
+    side: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(50))
+    price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    original_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    filled_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    reduce_only: Mapped[bool] = mapped_column(Boolean)
+
+
+class RemotePositionSnapshotRow(Base):
+    __tablename__ = "remote_position_snapshots"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    account_snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("account_snapshots.id", ondelete="CASCADE"),
+        index=True,
+    )
+    symbol: Mapped[str] = mapped_column(String(100))
+    side: Mapped[str] = mapped_column(String(20))
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    mark_price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    liquidation_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    leverage: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    isolated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 class ExecutionControlRow(Base):
@@ -217,6 +259,7 @@ class Database:
         status: str,
         reason: str,
         snapshot: Any | None = None,
+        trading_state: Any | None = None,
     ) -> None:
         async with self.sessions() as session:
             snapshot_id: str | None = None
@@ -239,6 +282,46 @@ class Database:
                         trade_permission=snapshot.trade_permission,
                     )
                 )
+                if trading_state is not None:
+                    session.add_all(
+                        RemoteOpenOrderSnapshotRow(
+                            id=str(uuid.uuid4()),
+                            account_snapshot_id=snapshot_id,
+                            exchange_order_id=item.exchange_order_id,
+                            client_order_id=item.client_order_id,
+                            market=item.market,
+                            symbol=item.symbol,
+                            side=item.side,
+                            status=item.status,
+                            price=item.price,
+                            original_quantity=item.original_quantity,
+                            filled_quantity=item.filled_quantity,
+                            reduce_only=item.reduce_only,
+                        )
+                        for item in trading_state.open_orders
+                    )
+                    session.add_all(
+                        RemotePositionSnapshotRow(
+                            id=str(uuid.uuid4()),
+                            account_snapshot_id=snapshot_id,
+                            symbol=item.symbol,
+                            side=item.side,
+                            quantity=item.quantity,
+                            entry_price=item.entry_price,
+                            mark_price=item.mark_price,
+                            liquidation_price=item.liquidation_price,
+                            leverage=item.leverage,
+                            isolated=item.isolated,
+                        )
+                        for item in trading_state.positions
+                    )
+            state_complete = bool(trading_state and trading_state.complete)
+            open_order_count = (
+                len(trading_state.open_orders) if trading_state is not None else 0
+            )
+            position_count = (
+                len(trading_state.positions) if trading_state is not None else 0
+            )
             row = await session.get(
                 AccountReconciliationRow,
                 {"exchange": exchange, "environment": environment},
@@ -250,6 +333,9 @@ class Database:
                     status=status,
                     reason=reason,
                     snapshot_id=snapshot_id,
+                    trading_state_complete=state_complete,
+                    open_order_count=open_order_count,
+                    position_count=position_count,
                     checked_at=checked_at,
                 )
                 session.add(row)
@@ -257,6 +343,9 @@ class Database:
                 row.status = status
                 row.reason = reason
                 row.snapshot_id = snapshot_id
+                row.trading_state_complete = state_complete
+                row.open_order_count = open_order_count
+                row.position_count = position_count
                 row.checked_at = checked_at
             await session.commit()
 

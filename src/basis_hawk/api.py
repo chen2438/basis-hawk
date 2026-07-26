@@ -282,6 +282,9 @@ def create_app(
                     "environment": item.environment,
                     "status": item.status,
                     "reason": item.reason,
+                    "trading_state_complete": item.trading_state_complete,
+                    "open_order_count": item.open_order_count,
+                    "position_count": item.position_count,
                     "checked_at": item.checked_at.isoformat(),
                 }
                 for item in reconciliations

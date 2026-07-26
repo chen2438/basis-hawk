@@ -81,10 +81,22 @@ class ReconciliationService:
                     secrets,
                     summary.environment,
                 )
-                snapshot = await client.snapshot()
+                snapshot, trading_state = await asyncio.gather(
+                    client.snapshot(),
+                    client.trading_state(),
+                )
                 reasons = [
-                    "open orders, fills, and positions have not been reconciled yet"
+                    "fills and private event streams have not been reconciled yet"
                 ]
+                if not trading_state.complete:
+                    reasons.append(
+                        trading_state.incomplete_reason
+                        or "remote trading state is incomplete"
+                    )
+                if trading_state.open_orders:
+                    reasons.append("remote open orders require local intent matching")
+                if trading_state.positions:
+                    reasons.append("remote positions require local pair matching")
                 if snapshot.position_mode == PositionMode.UNKNOWN:
                     reasons.append("position mode is unknown")
                 if snapshot.trade_permission is not True:
@@ -95,6 +107,7 @@ class ReconciliationService:
                     status="blocked",
                     reason="; ".join(reasons),
                     snapshot=snapshot,
+                    trading_state=trading_state,
                 )
                 blocked += 1
             except Exception:
