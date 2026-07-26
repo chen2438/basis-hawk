@@ -20,7 +20,10 @@ from basis_hawk.credentials import (
     ExchangeEnvironment,
     ExchangeSecrets,
 )
-from basis_hawk.live_execution import LiveExecutionService
+from basis_hawk.live_execution import (
+    LiveCompensationService,
+    LiveExecutionService,
+)
 from basis_hawk.models import Exchange
 from basis_hawk.storage import Database, OrderLegRow
 from basis_hawk.trading import PaperExecutionService
@@ -51,6 +54,7 @@ class ReconciliationService:
         ] = create_account_client,
         paper_executor: PaperExecutionService | None = None,
         live_executor: LiveExecutionService | None = None,
+        live_compensator: LiveCompensationService | None = None,
         automatic_trader: AutomaticTradingService | None = None,
         event_debounce_seconds: float = 0.25,
     ) -> None:
@@ -65,6 +69,14 @@ class ReconciliationService:
             credentials,
             account_client_factory=account_client_factory,
         )
+        self.live_compensator = (
+            live_compensator
+            or LiveCompensationService(
+                database,
+                credentials,
+                account_client_factory=account_client_factory,
+            )
+        )
         self.automatic_trader = automatic_trader or AutomaticTradingService(
             database
         )
@@ -77,6 +89,7 @@ class ReconciliationService:
     async def run_once(self) -> ReconciliationResult:
         await self.paper_executor.run_once()
         await self.live_executor.run_once()
+        await self.live_compensator.run_once()
         control = await self.database.execution_control()
         safety_pause_reason = (
             control.reason if control is not None and control.state == "paused" else None
@@ -233,10 +246,22 @@ class ReconciliationService:
                         if (
                             intent.exchange == summary.exchange.value
                             and intent.environment == summary.environment.value
-                            and intent.status == "executing"
-                            and len(intent_legs) == 2
+                            and intent.status
+                            in {"executing", "compensating"}
                             and {leg.leg for leg in intent_legs}
-                            == {"spot", "perp"}
+                            in (
+                                {"spot", "perp"},
+                                {
+                                    "spot",
+                                    "perp",
+                                    "spot_compensation",
+                                },
+                                {
+                                    "spot",
+                                    "perp",
+                                    "perp_compensation",
+                                },
+                            )
                         ):
                             if intent.action == "open":
                                 await self.database.settle_live_open(
@@ -306,6 +331,9 @@ class ReconciliationService:
                     except Exception:
                         pass
 
+        compensation_result = await self.live_compensator.run_once()
+        if compensation_result.submitted or compensation_result.uncertain:
+            self.request_reconciliation()
         final_control = await self.database.execution_control()
         final_pause_reason = (
             final_control.reason

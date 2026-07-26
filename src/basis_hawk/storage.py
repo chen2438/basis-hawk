@@ -572,6 +572,68 @@ def _live_fees_usdt(fills: list[FillRow], base_asset: str) -> Decimal:
     return total
 
 
+def _compensation_client_order_id(intent: TradeIntentRow) -> str:
+    token = intent.id.replace("-", "")[:20]
+    if intent.exchange == "okx":
+        return f"bhc{token}"
+    if intent.exchange == "gate":
+        return f"t-bhc-{token}"
+    return f"bh-c-{token}"
+
+
+def _live_compensation_leg(
+    *,
+    intent: TradeIntentRow,
+    excess_leg: OrderLegRow,
+    excess_base: Decimal,
+    now: datetime,
+) -> OrderLegRow:
+    if excess_base <= 0:
+        raise ValueError("live compensation quantity must be positive")
+    if excess_leg.base_multiplier <= 0:
+        raise ValueError("live compensation multiplier must be positive")
+    side = "buy" if excess_leg.side == "sell" else "sell"
+    reduce_only = (
+        excess_leg.market == "perp"
+        and side == "buy"
+        and intent.action == "open"
+    )
+    return OrderLegRow(
+        id=str(uuid.uuid4()),
+        trade_intent_id=intent.id,
+        leg=f"{excess_leg.leg}_compensation",
+        market=excess_leg.market,
+        symbol=excess_leg.symbol,
+        side=side,
+        client_order_id=_compensation_client_order_id(intent),
+        status="created",
+        quantity=excess_base / excess_leg.base_multiplier,
+        base_multiplier=excess_leg.base_multiplier,
+        limit_price=excess_leg.limit_price,
+        filled_quantity=Decimal("0"),
+        reduce_only=reduce_only,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _compensation_pnl(
+    *,
+    primary: OrderLegRow,
+    compensation: OrderLegRow,
+    base_quantity: Decimal,
+) -> Decimal:
+    if primary.average_price is None or compensation.average_price is None:
+        raise ValueError("live compensation prices are incomplete")
+    if primary.side == "buy":
+        return (
+            compensation.average_price - primary.average_price
+        ) * base_quantity
+    return (
+        primary.average_price - compensation.average_price
+    ) * base_quantity
+
+
 class Database:
     def __init__(self, url: str) -> None:
         self.engine: AsyncEngine = create_async_engine(url)
@@ -1532,6 +1594,75 @@ class Database:
             await session.commit()
             return intent, legs, True
 
+    async def prepare_live_compensation(
+        self,
+        *,
+        intent_id: str,
+        limit_price: Decimal,
+    ) -> tuple[TradeIntentRow, OrderLegRow, bool] | None:
+        if limit_price <= 0:
+            raise ValueError("live compensation limit price must be positive")
+        async with self.sessions() as session:
+            intent = await session.scalar(
+                select(TradeIntentRow)
+                .where(TradeIntentRow.id == intent_id)
+                .with_for_update()
+            )
+            if intent is None:
+                return None
+            legs = list(
+                await session.scalars(
+                    select(OrderLegRow)
+                    .where(OrderLegRow.trade_intent_id == intent.id)
+                    .with_for_update()
+                )
+            )
+            compensations = [
+                item for item in legs if item.leg.endswith("_compensation")
+            ]
+            if len(compensations) != 1:
+                raise ValueError(
+                    "compensating intent must contain one protection leg"
+                )
+            compensation = compensations[0]
+            if intent.status != "compensating":
+                return intent, compensation, False
+            if compensation.status != "created":
+                return intent, compensation, False
+            control = await session.get(ExecutionControlRow, 1)
+            if control is None or control.state != "paused":
+                return intent, compensation, False
+            compensation.limit_price = limit_price
+            compensation.status = "submitted"
+            now = datetime.now(UTC)
+            compensation.updated_at = now
+            session.add(
+                AuditEventRow(
+                    id=str(uuid.uuid4()),
+                    occurred_at=now,
+                    event_type="trade.compensation_submitted",
+                    actor="system",
+                    details=json.dumps(
+                        {
+                            "intent_id": intent.id,
+                            "order_leg_id": compensation.id,
+                            "market": compensation.market,
+                            "side": compensation.side,
+                            "quantity": format(
+                                compensation.quantity,
+                                "f",
+                            ),
+                            "limit_price": format(limit_price, "f"),
+                            "reduce_only": compensation.reduce_only,
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            )
+            await session.commit()
+            return intent, compensation, True
+
     async def expire_planned_trade_intent(
         self,
         *,
@@ -1665,7 +1796,7 @@ class Database:
             if (
                 intent.environment not in {"sandbox", "live"}
                 or intent.action != "open"
-                or intent.status != "executing"
+                or intent.status not in {"executing", "compensating"}
             ):
                 return intent, None, False
             legs = list(
@@ -1677,8 +1808,17 @@ class Database:
                 )
             )
             primary = {item.leg: item for item in legs if item.leg in {"spot", "perp"}}
-            if set(primary) != {"spot", "perp"} or len(legs) != 2:
-                raise ValueError("live intent must contain exactly two primary legs")
+            compensations = [
+                item for item in legs if item.leg.endswith("_compensation")
+            ]
+            if (
+                set(primary) != {"spot", "perp"}
+                or len(compensations) > 1
+                or len(legs) != 2 + len(compensations)
+            ):
+                raise ValueError(
+                    "live intent contains an invalid compensation layout"
+                )
             terminal = {"filled", "canceled", "failed"}
             if any(item.status not in terminal for item in primary.values()):
                 return intent, None, False
@@ -1695,9 +1835,130 @@ class Database:
             changed = True
             if spot_base == 0 and perp_base == 0:
                 intent.status = "failed"
+            elif not _numeric_equal(spot_base, perp_base):
+                excess_leg = (
+                    primary["spot"]
+                    if spot_base > perp_base
+                    else primary["perp"]
+                )
+                excess_base = abs(spot_base - perp_base)
+                if intent.status == "executing" and not compensations:
+                    compensation = _live_compensation_leg(
+                        intent=intent,
+                        excess_leg=excess_leg,
+                        excess_base=excess_base,
+                        now=now,
+                    )
+                    session.add(compensation)
+                    session.add(
+                        AuditEventRow(
+                            id=str(uuid.uuid4()),
+                            occurred_at=now,
+                            event_type="trade.compensation_required",
+                            actor="system",
+                            details=json.dumps(
+                                {
+                                    "intent_id": intent.id,
+                                    "order_leg_id": compensation.id,
+                                    "action": intent.action,
+                                    "market": compensation.market,
+                                    "side": compensation.side,
+                                    "base_quantity": format(
+                                        excess_base,
+                                        "f",
+                                    ),
+                                },
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ),
+                        )
+                    )
+                    intent.status = "compensating"
+                    await self._pause_live_settlement(session, now)
+                    intent.version += 1
+                    intent.updated_at = now
+                    await session.commit()
+                    return intent, None, True
+                compensation = (
+                    compensations[0] if len(compensations) == 1 else None
+                )
+                if (
+                    compensation is not None
+                    and compensation.status
+                    not in {"filled", "canceled", "failed"}
+                ):
+                    return intent, None, False
+                compensated_base = (
+                    compensation.filled_quantity
+                    * compensation.base_multiplier
+                    if compensation is not None
+                    else Decimal("0")
+                )
+                if (
+                    compensation is None
+                    or not _numeric_equal(compensated_base, excess_base)
+                    or compensation.average_price is None
+                ):
+                    intent.status = "manual_review"
+                    await self._pause_live_settlement(session, now)
+                else:
+                    fill_rows = list(
+                        await session.scalars(
+                            select(FillRow)
+                            .join(
+                                OrderLegRow,
+                                FillRow.order_leg_id == OrderLegRow.id,
+                            )
+                            .where(OrderLegRow.trade_intent_id == intent.id)
+                        )
+                    )
+                    try:
+                        fees = _live_fees_usdt(
+                            fill_rows,
+                            intent.base_asset,
+                        )
+                        compensation_profit = _compensation_pnl(
+                            primary=excess_leg,
+                            compensation=compensation,
+                            base_quantity=excess_base,
+                        )
+                    except ValueError:
+                        intent.status = "manual_review"
+                        await self._pause_live_settlement(session, now)
+                    else:
+                        if common_base == 0:
+                            intent.status = "failed"
+                        elif (
+                            primary["spot"].average_price is None
+                            or primary["perp"].average_price is None
+                        ):
+                            intent.status = "manual_review"
+                            await self._pause_live_settlement(session, now)
+                        else:
+                            opening_cost = fees - compensation_profit
+                            position = PairedPositionRow(
+                                id=str(uuid.uuid4()),
+                                opening_intent_id=intent.id,
+                                exchange=intent.exchange,
+                                environment=intent.environment,
+                                base_asset=intent.base_asset,
+                                initial_quantity=common_base,
+                                quantity=common_base,
+                                spot_entry_price=primary[
+                                    "spot"
+                                ].average_price,
+                                perp_entry_price=primary[
+                                    "perp"
+                                ].average_price,
+                                opening_fees_usdt=opening_cost,
+                                remaining_opening_fees_usdt=opening_cost,
+                                status="open",
+                                opened_at=now,
+                            )
+                            session.add(position)
+                            intent.status = "hedged"
             elif (
-                not _numeric_equal(spot_base, perp_base)
-                or primary["spot"].average_price is None
+                primary["spot"].average_price is None
                 or primary["perp"].average_price is None
             ):
                 intent.status = "manual_review"
@@ -1768,7 +2029,7 @@ class Database:
             if (
                 intent.environment not in {"sandbox", "live"}
                 or intent.action != "close"
-                or intent.status != "executing"
+                or intent.status not in {"executing", "compensating"}
                 or position.status != "closing"
                 or position.closing_intent_id != intent.id
             ):
@@ -1786,8 +2047,17 @@ class Database:
                 for item in legs
                 if item.leg in {"spot", "perp"}
             }
-            if set(primary) != {"spot", "perp"} or len(legs) != 2:
-                raise ValueError("live intent must contain exactly two primary legs")
+            compensations = [
+                item for item in legs if item.leg.endswith("_compensation")
+            ]
+            if (
+                set(primary) != {"spot", "perp"}
+                or len(compensations) > 1
+                or len(legs) != 2 + len(compensations)
+            ):
+                raise ValueError(
+                    "live intent contains an invalid compensation layout"
+                )
             terminal = {"filled", "canceled", "failed"}
             if any(item.status not in terminal for item in primary.values()):
                 return intent, position, False
@@ -1804,9 +2074,180 @@ class Database:
                 intent.status = "failed"
                 position.status = "open"
                 position.closing_intent_id = None
+            elif not _numeric_equal(spot_base, perp_base):
+                common_base = min(spot_base, perp_base)
+                excess_leg = (
+                    primary["spot"]
+                    if spot_base > perp_base
+                    else primary["perp"]
+                )
+                excess_base = abs(spot_base - perp_base)
+                if intent.status == "executing" and not compensations:
+                    compensation = _live_compensation_leg(
+                        intent=intent,
+                        excess_leg=excess_leg,
+                        excess_base=excess_base,
+                        now=now,
+                    )
+                    session.add(compensation)
+                    session.add(
+                        AuditEventRow(
+                            id=str(uuid.uuid4()),
+                            occurred_at=now,
+                            event_type="trade.compensation_required",
+                            actor="system",
+                            details=json.dumps(
+                                {
+                                    "intent_id": intent.id,
+                                    "order_leg_id": compensation.id,
+                                    "action": intent.action,
+                                    "market": compensation.market,
+                                    "side": compensation.side,
+                                    "base_quantity": format(
+                                        excess_base,
+                                        "f",
+                                    ),
+                                },
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ),
+                        )
+                    )
+                    intent.status = "compensating"
+                    await self._pause_live_settlement(session, now)
+                    intent.version += 1
+                    intent.updated_at = now
+                    await session.commit()
+                    return intent, position, True
+                compensation = (
+                    compensations[0] if len(compensations) == 1 else None
+                )
+                if (
+                    compensation is not None
+                    and compensation.status
+                    not in {"filled", "canceled", "failed"}
+                ):
+                    return intent, position, False
+                compensated_base = (
+                    compensation.filled_quantity
+                    * compensation.base_multiplier
+                    if compensation is not None
+                    else Decimal("0")
+                )
+                if (
+                    common_base > position.quantity
+                    or compensation is None
+                    or not _numeric_equal(compensated_base, excess_base)
+                    or compensation.average_price is None
+                ):
+                    intent.status = "manual_review"
+                    await self._pause_live_settlement(session, now)
+                else:
+                    fill_rows = list(
+                        await session.scalars(
+                            select(FillRow)
+                            .join(
+                                OrderLegRow,
+                                FillRow.order_leg_id == OrderLegRow.id,
+                            )
+                            .where(OrderLegRow.trade_intent_id == intent.id)
+                        )
+                    )
+                    try:
+                        closing_fees = _live_fees_usdt(
+                            fill_rows,
+                            intent.base_asset,
+                        )
+                        compensation_profit = _compensation_pnl(
+                            primary=excess_leg,
+                            compensation=compensation,
+                            base_quantity=excess_base,
+                        )
+                    except ValueError:
+                        intent.status = "manual_review"
+                        await self._pause_live_settlement(session, now)
+                    else:
+                        opening_fee_allocation = (
+                            Decimal("0")
+                            if common_base == 0
+                            else (
+                                position.remaining_opening_fees_usdt
+                                if _numeric_equal(
+                                    common_base,
+                                    position.quantity,
+                                )
+                                else (
+                                    position.remaining_opening_fees_usdt
+                                    * common_base
+                                    / position.quantity
+                                )
+                            )
+                        )
+                        common_gross_pnl = (
+                            Decimal("0")
+                            if common_base == 0
+                            else (
+                                (
+                                    primary["spot"].average_price
+                                    - position.spot_entry_price
+                                )
+                                + (
+                                    position.perp_entry_price
+                                    - primary["perp"].average_price
+                                )
+                            )
+                            * common_base
+                        )
+                        gross_pnl = (
+                            common_gross_pnl + compensation_profit
+                        )
+                        net_pnl = (
+                            gross_pnl
+                            - opening_fee_allocation
+                            - closing_fees
+                        )
+                        position.closing_fees_usdt = (
+                            position.closing_fees_usdt
+                            or Decimal("0")
+                        ) + closing_fees
+                        position.realized_pnl_usdt = (
+                            position.realized_pnl_usdt
+                            or Decimal("0")
+                        ) + net_pnl
+                        position.remaining_opening_fees_usdt -= (
+                            opening_fee_allocation
+                        )
+                        position.quantity -= common_base
+                        session.add(
+                            PnlRealizationRow(
+                                id=str(uuid.uuid4()),
+                                paired_position_id=position.id,
+                                closing_intent_id=intent.id,
+                                quantity=common_base,
+                                gross_pnl_usdt=gross_pnl,
+                                opening_fee_allocated_usdt=(
+                                    opening_fee_allocation
+                                ),
+                                closing_fees_usdt=closing_fees,
+                                net_pnl_usdt=net_pnl,
+                                realized_at=now,
+                            )
+                        )
+                        intent.status = (
+                            "closed" if common_base > 0 else "failed"
+                        )
+                        if _numeric_equal(
+                            position.quantity,
+                            Decimal("0"),
+                        ):
+                            position.quantity = Decimal("0")
+                            position.status = "closed"
+                            position.closed_at = now
+                        else:
+                            position.status = "open"
+                            position.closing_intent_id = None
             elif (
-                not _numeric_equal(spot_base, perp_base)
-                or spot_base > position.quantity
+                spot_base > position.quantity
                 or primary["spot"].average_price is None
                 or primary["perp"].average_price is None
             ):

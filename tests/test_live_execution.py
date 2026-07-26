@@ -8,6 +8,7 @@ from basis_hawk.accounts import (
     OrderSubmission,
     PerpConfiguration,
     PositionMode,
+    RemoteFill,
     RemotePosition,
     RemoteTradingState,
 )
@@ -17,7 +18,10 @@ from basis_hawk.credentials import (
     ExchangeSecrets,
 )
 from basis_hawk.crypto import SecretCipher
-from basis_hawk.live_execution import LiveExecutionService
+from basis_hawk.live_execution import (
+    LiveCompensationService,
+    LiveExecutionService,
+)
 from basis_hawk.models import (
     Exchange,
     InstrumentPair,
@@ -491,4 +495,110 @@ async def test_live_executor_marks_uncertain_leg_pauses_and_never_resubmits() ->
     assert control is not None
     assert control.state == "paused"
     assert "client-order-ID reconciliation" in control.reason
+    await database.close()
+
+
+async def test_live_compensation_submits_once_with_fresh_protective_price() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials, intent_id = await _planned_live_intent(database)
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    primary = {item.leg: item for item in stored[1]}
+    now = datetime.now(UTC)
+    async with database.sessions() as session:
+        intent = await session.get(TradeIntentRow, intent_id)
+        assert intent is not None
+        intent.status = "executing"
+        for item in primary.values():
+            leg = await session.get(type(item), item.id)
+            assert leg is not None
+            leg.status = "canceled"
+        await session.commit()
+    await database.persist_remote_fills(
+        order_leg_id=primary["spot"].id,
+        fills=[
+            RemoteFill(
+                exchange_trade_id="primary-spot",
+                exchange_order_id="primary-spot-order",
+                client_order_id=primary["spot"].client_order_id,
+                market="spot",
+                symbol=primary["spot"].symbol,
+                side="buy",
+                quantity=primary["spot"].quantity,
+                price=Decimal("0.05"),
+                fee_amount=Decimal("0"),
+                fee_asset="",
+                liquidity="taker",
+                occurred_at=now,
+            )
+        ],
+    )
+    await database.persist_remote_fills(
+        order_leg_id=primary["perp"].id,
+        fills=[
+            RemoteFill(
+                exchange_trade_id="primary-perp",
+                exchange_order_id="primary-perp-order",
+                client_order_id=primary["perp"].client_order_id,
+                market="perp",
+                symbol=primary["perp"].symbol,
+                side="sell",
+                quantity=primary["perp"].quantity / Decimal("2"),
+                price=Decimal("0.051"),
+                fee_amount=Decimal("0"),
+                fee_asset="",
+                liquidity="taker",
+                occurred_at=now,
+            )
+        ],
+    )
+    first_settlement = await database.settle_live_open(
+        intent_id=intent_id
+    )
+    assert first_settlement is not None
+    assert first_settlement[0].status == "compensating"
+    await database.save_latest_opportunities([_opportunity()])
+    await database.replace_instruments("okx", [_pair()])
+
+    class FakeCompensationClient(FakeLiveAccountClient):
+        async def place_limit_ioc(
+            self,
+            order: LimitIocOrder,
+        ) -> OrderSubmission:
+            self.placed.append(order)
+            return OrderSubmission(
+                market=order.market,
+                symbol=order.symbol,
+                client_order_id=order.client_order_id,
+                exchange_order_id="remote-compensation",
+            )
+
+    client = FakeCompensationClient(database)
+    service = LiveCompensationService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    )
+
+    first = await service.run_once()
+    repeated = await LiveCompensationService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    ).run_once()
+
+    assert first.submitted == 1
+    assert first.uncertain == 0
+    assert repeated.submitted == 0
+    assert len(client.placed) == 1
+    assert client.placed[0].market == "spot"
+    assert client.placed[0].side == "sell"
+    assert client.placed[0].limit_price < _opportunity().spot_bid
+    current = await database.trade_intent(intent_id)
+    assert current is not None
+    compensation = next(
+        item for item in current[1] if item.leg == "spot_compensation"
+    )
+    assert compensation.status == "acknowledged"
     await database.close()

@@ -412,9 +412,17 @@ async def test_live_close_settlement_pauses_on_imbalanced_fills() -> None:
     settled = await database.settle_live_close(intent_id=intent_id)
 
     assert settled is not None and settled[1] is not None
-    assert settled[0].status == "manual_review"
+    assert settled[0].status == "compensating"
     assert settled[1].id == position_id
     assert settled[1].status == "closing"
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    compensation = next(
+        item for item in stored[1] if item.leg == "spot_compensation"
+    )
+    assert compensation.side == "buy"
+    assert compensation.quantity == Decimal("20")
+    assert compensation.reduce_only is False
     control = await database.execution_control()
     assert control is not None and control.state == "paused"
     await database.close()
@@ -467,8 +475,16 @@ async def test_live_settlement_pauses_on_imbalanced_terminal_fills() -> None:
     settled = await database.settle_live_open(intent_id=intent_id)
 
     assert settled is not None
-    assert settled[0].status == "manual_review"
+    assert settled[0].status == "compensating"
     assert settled[1] is None
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    compensation = next(
+        item for item in stored[1] if item.leg == "spot_compensation"
+    )
+    assert compensation.side == "sell"
+    assert compensation.quantity == Decimal("10")
+    assert compensation.reduce_only is False
     control = await database.execution_control()
     assert control is not None
     assert control.state == "paused"
@@ -487,4 +503,196 @@ async def test_live_settlement_fails_when_both_terminal_legs_have_zero_fills() -
     assert settled[0].status == "failed"
     assert settled[1] is None
     assert (await database.list_paired_positions()) == []
+    await database.close()
+
+
+async def test_live_open_compensation_settles_common_position_and_cost() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    intent_id, legs, now = await _live_intent(
+        database,
+        terminal_status="canceled",
+    )
+    await database.persist_remote_fills(
+        order_leg_id=legs["spot"],
+        fills=[
+            RemoteFill(
+                exchange_trade_id="open-spot-imbalanced",
+                exchange_order_id="remote-spot",
+                client_order_id=None,
+                market="spot",
+                symbol="ORDER-USDT",
+                side="buy",
+                quantity=Decimal("20"),
+                price=Decimal("0.049"),
+                fee_amount=Decimal("0"),
+                fee_asset="",
+                liquidity="taker",
+                occurred_at=now,
+            )
+        ],
+    )
+    await database.persist_remote_fills(
+        order_leg_id=legs["perp"],
+        fills=[
+            RemoteFill(
+                exchange_trade_id="open-perp-common",
+                exchange_order_id="remote-perp",
+                client_order_id=None,
+                market="perp",
+                symbol="ORDER-USDT-SWAP",
+                side="sell",
+                quantity=Decimal("1"),
+                price=Decimal("0.051"),
+                fee_amount=Decimal("0"),
+                fee_asset="",
+                liquidity="taker",
+                occurred_at=now,
+            )
+        ],
+    )
+    first = await database.settle_live_open(intent_id=intent_id)
+    assert first is not None and first[0].status == "compensating"
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    compensation = next(
+        item for item in stored[1] if item.leg == "spot_compensation"
+    )
+    await database.persist_remote_fills(
+        order_leg_id=compensation.id,
+        fills=[
+            RemoteFill(
+                exchange_trade_id="open-spot-compensation",
+                exchange_order_id="remote-compensation",
+                client_order_id=compensation.client_order_id,
+                market="spot",
+                symbol="ORDER-USDT",
+                side="sell",
+                quantity=Decimal("10"),
+                price=Decimal("0.048"),
+                fee_amount=Decimal("0"),
+                fee_asset="",
+                liquidity="taker",
+                occurred_at=now,
+            )
+        ],
+    )
+
+    settled = await database.settle_live_open(intent_id=intent_id)
+
+    assert settled is not None and settled[1] is not None
+    assert settled[0].status == "hedged"
+    assert settled[1].quantity == Decimal("10")
+    assert settled[1].opening_fees_usdt.quantize(
+        Decimal("0.001")
+    ) == Decimal("0.010")
+    repeated = await database.settle_live_open(intent_id=intent_id)
+    assert repeated is not None and repeated[2] is False
+    await database.close()
+
+
+async def test_live_close_compensation_realizes_round_trip_loss() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    intent_id, position_id, legs, now = await _live_close_intent(database)
+    await database.persist_remote_fills(
+        order_leg_id=legs["spot"],
+        fills=[
+            RemoteFill(
+                exchange_trade_id="close-spot-only",
+                exchange_order_id="close-spot",
+                client_order_id=None,
+                market="spot",
+                symbol="ORDER-USDT",
+                side="sell",
+                quantity=Decimal("20"),
+                price=Decimal("0.05"),
+                fee_amount=Decimal("0"),
+                fee_asset="",
+                liquidity="taker",
+                occurred_at=now,
+            )
+        ],
+    )
+    first = await database.settle_live_close(intent_id=intent_id)
+    assert first is not None and first[0].status == "compensating"
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    compensation = next(
+        item for item in stored[1] if item.leg == "spot_compensation"
+    )
+    await database.persist_remote_fills(
+        order_leg_id=compensation.id,
+        fills=[
+            RemoteFill(
+                exchange_trade_id="close-spot-compensation",
+                exchange_order_id="remote-close-compensation",
+                client_order_id=compensation.client_order_id,
+                market="spot",
+                symbol="ORDER-USDT",
+                side="buy",
+                quantity=Decimal("20"),
+                price=Decimal("0.051"),
+                fee_amount=Decimal("0"),
+                fee_asset="",
+                liquidity="taker",
+                occurred_at=now,
+            )
+        ],
+    )
+
+    settled = await database.settle_live_close(intent_id=intent_id)
+
+    assert settled is not None and settled[1] is not None
+    assert settled[0].status == "failed"
+    assert settled[1].id == position_id
+    assert settled[1].status == "open"
+    assert settled[1].quantity == Decimal("20")
+    assert settled[1].realized_pnl_usdt.quantize(
+        Decimal("0.001")
+    ) == Decimal("-0.020")
+    await database.close()
+
+
+async def test_unfilled_live_compensation_requires_manual_review() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    intent_id, _, legs, now = await _live_close_intent(database)
+    await database.persist_remote_fills(
+        order_leg_id=legs["spot"],
+        fills=[
+            RemoteFill(
+                exchange_trade_id="unfilled-comp-primary",
+                exchange_order_id="close-spot",
+                client_order_id=None,
+                market="spot",
+                symbol="ORDER-USDT",
+                side="sell",
+                quantity=Decimal("20"),
+                price=Decimal("0.05"),
+                fee_amount=Decimal("0"),
+                fee_asset="",
+                liquidity="taker",
+                occurred_at=now,
+            )
+        ],
+    )
+    await database.settle_live_close(intent_id=intent_id)
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    compensation = next(
+        item for item in stored[1] if item.leg == "spot_compensation"
+    )
+    async with database.sessions() as session:
+        row = await session.get(type(compensation), compensation.id)
+        assert row is not None
+        row.status = "canceled"
+        await session.commit()
+
+    settled = await database.settle_live_close(intent_id=intent_id)
+
+    assert settled is not None
+    assert settled[0].status == "manual_review"
+    assert settled[1] is not None
+    assert settled[1].status == "closing"
     await database.close()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -22,6 +23,7 @@ from basis_hawk.credentials import (
 )
 from basis_hawk.models import Exchange
 from basis_hawk.storage import Database, OrderLegRow, TradeIntentRow
+from basis_hawk.trading import protective_limit_price
 
 
 class LiveExecutionResult(BaseModel):
@@ -31,6 +33,15 @@ class LiveExecutionResult(BaseModel):
     submitted: int
     uncertain: int
     preflight_failed: int
+
+
+class LiveCompensationResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    examined: int
+    submitted: int
+    uncertain: int
+    failed: int
 
 
 class LiveExecutionService:
@@ -144,14 +155,19 @@ class LiveExecutionService:
             if intent.action == "open":
                 if remote_state.positions:
                     raise RuntimeError("remote account has an existing position")
-                self._validate_balance(snapshot, intent, primary)
+                LiveCompensationService._validate_balance(
+                    snapshot,
+                    intent,
+                    primary,
+                )
                 await client.configure_perp(
                     symbol=primary["perp"].symbol,
                     leverage=intent.leverage,
                     position_mode=snapshot.position_mode,
                 )
             else:
-                await self._validate_close_state(
+                await LiveCompensationService._validate_close_state(
+                    self,
                     intent,
                     primary,
                     remote_state.positions,
@@ -208,6 +224,229 @@ class LiveExecutionService:
             return True, uncertain
         finally:
             await client.close()
+
+
+class LiveCompensationService:
+    def __init__(
+        self,
+        database: Database,
+        credentials: CredentialService,
+        *,
+        account_client_factory: Callable[
+            [Exchange, ExchangeSecrets, ExchangeEnvironment],
+            PrivateAccountClient,
+        ] = create_account_client,
+    ) -> None:
+        self.database = database
+        self.credentials = credentials
+        self.account_client_factory = account_client_factory
+
+    async def run_once(self) -> LiveCompensationResult:
+        control = await self.database.execution_control()
+        if control is None or control.state != "paused":
+            return LiveCompensationResult(
+                examined=0,
+                submitted=0,
+                uncertain=0,
+                failed=0,
+            )
+        candidates = [
+            item
+            for item in await self.database.recoverable_trade_intents()
+            if item.environment in {"sandbox", "live"}
+            and item.status == "compensating"
+        ]
+        if not candidates:
+            return LiveCompensationResult(
+                examined=0,
+                submitted=0,
+                uncertain=0,
+                failed=0,
+            )
+        intent = candidates[0]
+        try:
+            submitted, uncertain = await self._execute(intent)
+        except Exception:
+            return LiveCompensationResult(
+                examined=1,
+                submitted=0,
+                uncertain=0,
+                failed=1,
+            )
+        return LiveCompensationResult(
+            examined=1,
+            submitted=int(submitted),
+            uncertain=uncertain,
+            failed=0,
+        )
+
+    async def _execute(
+        self,
+        intent: TradeIntentRow,
+    ) -> tuple[bool, int]:
+        current = await self.database.trade_intent(intent.id)
+        if current is None:
+            raise RuntimeError("compensating intent disappeared")
+        compensations = [
+            item
+            for item in current[1]
+            if item.leg.endswith("_compensation")
+        ]
+        if len(compensations) != 1:
+            raise RuntimeError(
+                "compensating intent has no unique protection leg"
+            )
+        compensation = compensations[0]
+        if compensation.status != "created":
+            return False, 0
+        exchange = Exchange(intent.exchange)
+        environment = ExchangeEnvironment(intent.environment)
+        opportunities = await self.database.latest_opportunities(
+            exchanges={intent.exchange}
+        )
+        opportunity = next(
+            (
+                item
+                for item in opportunities
+                if item.base_asset == intent.base_asset
+            ),
+            None,
+        )
+        pairs = await self.database.instrument_pairs(
+            exchanges={intent.exchange}
+        )
+        pair = next(
+            (item for item in pairs if item.base_asset == intent.base_asset),
+            None,
+        )
+        now = datetime.now(UTC)
+        if (
+            opportunity is None
+            or pair is None
+            or not pair.trading_rules_complete
+            or _utc(opportunity.observed_at)
+            < now - timedelta(seconds=15)
+        ):
+            raise RuntimeError(
+                "fresh compensation market and rules are unavailable"
+            )
+        reference_price = {
+            ("spot", "buy"): opportunity.spot_ask,
+            ("spot", "sell"): opportunity.spot_bid,
+            ("perp", "buy"): opportunity.perp_ask,
+            ("perp", "sell"): opportunity.perp_bid,
+        }[(compensation.market, compensation.side)]
+        price_increment = (
+            pair.spot_price_increment
+            if compensation.market == "spot"
+            else pair.perp_price_increment
+        )
+        maximum_slippage = await self._maximum_slippage(
+            environment=intent.environment
+        )
+        limit_price = protective_limit_price(
+            reference_price=reference_price,
+            maximum_slippage=maximum_slippage,
+            side=compensation.side,
+            price_increment=price_increment,
+        )
+        base_quantity = (
+            compensation.quantity * compensation.base_multiplier
+        )
+        capacity = (
+            opportunity.close_top_book_notional
+            if (
+                (compensation.market == "spot"
+                 and compensation.side == "sell")
+                or (
+                    compensation.market == "perp"
+                    and compensation.side == "buy"
+                )
+            )
+            else opportunity.top_book_notional
+        )
+        if base_quantity * reference_price > capacity:
+            raise RuntimeError(
+                "compensation exceeds the current protected top book"
+            )
+        secrets = await self.credentials.load(exchange, environment)
+        if secrets is None:
+            raise RuntimeError("exchange credential is not configured")
+        client = self.account_client_factory(
+            exchange,
+            secrets,
+            environment,
+        )
+        try:
+            snapshot, remote_state = await asyncio.gather(
+                client.snapshot(),
+                client.trading_state(),
+            )
+            if (
+                snapshot.trade_permission is not True
+                or snapshot.position_mode == PositionMode.UNKNOWN
+                or not remote_state.complete
+                or remote_state.open_orders
+            ):
+                raise RuntimeError(
+                    "account is not safe for compensation submission"
+                )
+            prepared = await self.database.prepare_live_compensation(
+                intent_id=intent.id,
+                limit_price=limit_price,
+            )
+            if prepared is None or not prepared[2]:
+                return False, 0
+            leg = prepared[1]
+            try:
+                submission = await client.place_limit_ioc(
+                    LimitIocOrder(
+                        market=leg.market,
+                        symbol=leg.symbol,
+                        side=leg.side,
+                        quantity=leg.quantity,
+                        limit_price=leg.limit_price,
+                        client_order_id=leg.client_order_id,
+                        reduce_only=leg.reduce_only,
+                        position_mode=(
+                            snapshot.position_mode
+                            if leg.market == "perp"
+                            else PositionMode.UNKNOWN
+                        ),
+                    )
+                )
+                await self.database.record_order_submission(
+                    order_leg_id=leg.id,
+                    submission=submission,
+                )
+            except Exception:
+                await self.database.mark_order_submission_unknown(
+                    order_leg_id=leg.id
+                )
+                return True, 1
+            return True, 0
+        finally:
+            await client.close()
+
+    async def _maximum_slippage(self, *, environment: str) -> Decimal:
+        control = await self.database.automation_control()
+        if control.active_strategy_id is None:
+            return Decimal("0.01")
+        strategy = await self.database.strategy_version(
+            control.active_strategy_id
+        )
+        if strategy is None or strategy.environment != environment:
+            return Decimal("0.01")
+        value = json.loads(strategy.payload).get(
+            "emergency_max_slippage",
+            "0.01",
+        )
+        maximum = Decimal(str(value))
+        if maximum <= 0 or maximum > Decimal("0.25"):
+            raise RuntimeError(
+                "configured emergency compensation slippage is invalid"
+            )
+        return maximum
 
     @staticmethod
     def _validate_balance(
