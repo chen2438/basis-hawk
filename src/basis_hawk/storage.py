@@ -1428,6 +1428,116 @@ class Database:
             )
             return row, legs
 
+    async def list_trade_intents(
+        self,
+        *,
+        limit: int,
+        status: str | None = None,
+    ) -> list[tuple[TradeIntentRow, list[OrderLegRow]]]:
+        async with self.sessions() as session:
+            statement = select(TradeIntentRow)
+            if status is not None:
+                statement = statement.where(TradeIntentRow.status == status)
+            intents = list(
+                await session.scalars(
+                    statement.order_by(
+                        TradeIntentRow.created_at.desc(),
+                        TradeIntentRow.id.desc(),
+                    ).limit(limit)
+                )
+            )
+            if not intents:
+                return []
+            intent_ids = [item.id for item in intents]
+            legs = list(
+                await session.scalars(
+                    select(OrderLegRow)
+                    .where(OrderLegRow.trade_intent_id.in_(intent_ids))
+                    .order_by(OrderLegRow.trade_intent_id, OrderLegRow.leg)
+                )
+            )
+            grouped: dict[str, list[OrderLegRow]] = {
+                intent_id: [] for intent_id in intent_ids
+            }
+            for leg in legs:
+                grouped[leg.trade_intent_id].append(leg)
+            return [(intent, grouped[intent.id]) for intent in intents]
+
+    async def list_order_legs(
+        self,
+        *,
+        limit: int,
+        status: str | None = None,
+    ) -> list[tuple[OrderLegRow, TradeIntentRow]]:
+        async with self.sessions() as session:
+            statement = (
+                select(OrderLegRow, TradeIntentRow)
+                .join(
+                    TradeIntentRow,
+                    OrderLegRow.trade_intent_id == TradeIntentRow.id,
+                )
+            )
+            if status is not None:
+                statement = statement.where(OrderLegRow.status == status)
+            return list(
+                (
+                    await session.execute(
+                        statement.order_by(
+                            OrderLegRow.updated_at.desc(),
+                            OrderLegRow.id.desc(),
+                        ).limit(limit)
+                    )
+                ).tuples()
+            )
+
+    async def list_fills(
+        self,
+        *,
+        limit: int,
+    ) -> list[tuple[FillRow, OrderLegRow, TradeIntentRow]]:
+        async with self.sessions() as session:
+            return list(
+                (
+                    await session.execute(
+                        select(FillRow, OrderLegRow, TradeIntentRow)
+                        .join(OrderLegRow, FillRow.order_leg_id == OrderLegRow.id)
+                        .join(
+                            TradeIntentRow,
+                            OrderLegRow.trade_intent_id == TradeIntentRow.id,
+                        )
+                        .order_by(
+                            FillRow.occurred_at.desc(),
+                            FillRow.id.desc(),
+                        )
+                        .limit(limit)
+                    )
+                ).tuples()
+            )
+
+    async def list_pnl_realizations(
+        self,
+        *,
+        limit: int,
+    ) -> list[tuple[PnlRealizationRow, PairedPositionRow]]:
+        async with self.sessions() as session:
+            return list(
+                (
+                    await session.execute(
+                        select(PnlRealizationRow, PairedPositionRow)
+                        .join(
+                            PairedPositionRow,
+                            PnlRealizationRow.paired_position_id
+                            == PairedPositionRow.id,
+                        )
+                        .order_by(
+                            PnlRealizationRow.realized_at.desc(),
+                            PnlRealizationRow.id.desc(),
+                        )
+                        .limit(limit)
+                    )
+                ).tuples()
+            )
+
     async def trade_intent_by_idempotency(
         self, idempotency_key: str
     ) -> tuple[TradeIntentRow, list[OrderLegRow]] | None:
@@ -1651,14 +1761,6 @@ class Database:
             leg.updated_at = datetime.now(UTC)
             await session.commit()
             return order.exchange_order_id
-
-    async def list_trade_intents(self, *, limit: int = 100) -> list[TradeIntentRow]:
-        async with self.sessions() as session:
-            return list(
-                await session.scalars(
-                    select(TradeIntentRow).order_by(TradeIntentRow.created_at.desc()).limit(limit)
-                )
-            )
 
     async def recoverable_trade_intents(self) -> list[TradeIntentRow]:
         terminal = {"closed", "failed"}

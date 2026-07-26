@@ -27,6 +27,7 @@ from basis_hawk.storage import (
     FillRow,
     OrderLegRow,
     PairedPositionRow,
+    PnlRealizationRow,
     TradeIntentRow,
 )
 
@@ -147,6 +148,58 @@ class FillView(BaseModel):
     occurred_at: datetime
 
     @field_serializer("quantity", "price", "fee_amount", when_used="json")
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+
+class OrderHistoryView(OrderLegView):
+    trade_intent_id: str
+    exchange: Exchange
+    environment: str
+    base_asset: str
+    action: str
+    emergency: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class FillHistoryView(FillView):
+    order_leg_id: str
+    trade_intent_id: str
+    exchange: Exchange
+    environment: str
+    base_asset: str
+    action: str
+    leg: str
+    market: str
+    symbol: str
+    side: str
+
+
+class PnlRealizationView(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    paired_position_id: str
+    closing_intent_id: str
+    exchange: Exchange
+    environment: str
+    base_asset: str
+    quantity: Decimal
+    gross_pnl_usdt: Decimal
+    opening_fee_allocated_usdt: Decimal
+    closing_fees_usdt: Decimal
+    net_pnl_usdt: Decimal
+    realized_at: datetime
+
+    @field_serializer(
+        "quantity",
+        "gross_pnl_usdt",
+        "opening_fee_allocated_usdt",
+        "closing_fees_usdt",
+        "net_pnl_usdt",
+        when_used="json",
+    )
     def serialize_decimal(self, value: Decimal) -> str:
         return format(value, "f")
 
@@ -1180,6 +1233,48 @@ class TradeLedger:
         value = await self.database.trade_intent(intent_id)
         return _view(*value) if value is not None else None
 
+    async def intents(
+        self,
+        *,
+        limit: int,
+        status: str | None = None,
+    ) -> list[TradeIntentView]:
+        return [
+            _view(intent, legs)
+            for intent, legs in await self.database.list_trade_intents(
+                limit=limit,
+                status=status,
+            )
+        ]
+
+    async def orders(
+        self,
+        *,
+        limit: int,
+        status: str | None = None,
+    ) -> list[OrderHistoryView]:
+        return [
+            _order_history_view(order, intent)
+            for order, intent in await self.database.list_order_legs(
+                limit=limit,
+                status=status,
+            )
+        ]
+
+    async def fill_history(self, *, limit: int) -> list[FillHistoryView]:
+        return [
+            _fill_history_view(fill, order, intent)
+            for fill, order, intent in await self.database.list_fills(limit=limit)
+        ]
+
+    async def pnl_realizations(self, *, limit: int) -> list[PnlRealizationView]:
+        return [
+            _pnl_realization_view(realization, position)
+            for realization, position in await self.database.list_pnl_realizations(
+                limit=limit
+            )
+        ]
+
     async def positions(self, *, status: str | None = None) -> list[PairedPositionView]:
         return [
             _position_view(item)
@@ -1405,6 +1500,78 @@ def _fill_view(row: FillRow) -> FillView:
         fee_asset=row.fee_asset,
         liquidity=row.liquidity,
         occurred_at=row.occurred_at,
+    )
+
+
+def _order_history_view(
+    row: OrderLegRow,
+    intent: TradeIntentRow,
+) -> OrderHistoryView:
+    return OrderHistoryView(
+        **OrderLegView(
+            id=row.id,
+            leg=row.leg,
+            market=row.market,
+            symbol=row.symbol,
+            side=row.side,
+            client_order_id=row.client_order_id,
+            exchange_order_id=row.exchange_order_id,
+            status=OrderLegStatus(row.status),
+            quantity=row.quantity,
+            base_multiplier=row.base_multiplier,
+            limit_price=row.limit_price,
+            filled_quantity=row.filled_quantity,
+            average_price=row.average_price,
+            reduce_only=row.reduce_only,
+        ).model_dump(),
+        trade_intent_id=intent.id,
+        exchange=Exchange(intent.exchange),
+        environment=intent.environment,
+        base_asset=intent.base_asset,
+        action=intent.action,
+        emergency=intent.emergency,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _fill_history_view(
+    row: FillRow,
+    order: OrderLegRow,
+    intent: TradeIntentRow,
+) -> FillHistoryView:
+    return FillHistoryView(
+        **_fill_view(row).model_dump(),
+        order_leg_id=order.id,
+        trade_intent_id=intent.id,
+        exchange=Exchange(intent.exchange),
+        environment=intent.environment,
+        base_asset=intent.base_asset,
+        action=intent.action,
+        leg=order.leg,
+        market=order.market,
+        symbol=order.symbol,
+        side=order.side,
+    )
+
+
+def _pnl_realization_view(
+    row: PnlRealizationRow,
+    position: PairedPositionRow,
+) -> PnlRealizationView:
+    return PnlRealizationView(
+        id=row.id,
+        paired_position_id=row.paired_position_id,
+        closing_intent_id=row.closing_intent_id,
+        exchange=Exchange(position.exchange),
+        environment=position.environment,
+        base_asset=position.base_asset,
+        quantity=row.quantity,
+        gross_pnl_usdt=row.gross_pnl_usdt,
+        opening_fee_allocated_usdt=row.opening_fee_allocated_usdt,
+        closing_fees_usdt=row.closing_fees_usdt,
+        net_pnl_usdt=row.net_pnl_usdt,
+        realized_at=row.realized_at,
     )
 
 

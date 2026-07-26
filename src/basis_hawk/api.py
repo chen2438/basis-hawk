@@ -1357,6 +1357,58 @@ def create_app(
             "intent": intent.model_dump(mode="json"),
         }
 
+    @app.get("/api/trades/intents")
+    async def trade_intents(
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        status: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "items": [
+                item.model_dump(mode="json")
+                for item in await trade_ledger.intents(
+                    limit=limit,
+                    status=status,
+                )
+            ]
+        }
+
+    @app.get("/api/trades/orders")
+    async def trade_orders(
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        status: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "items": [
+                item.model_dump(mode="json")
+                for item in await trade_ledger.orders(
+                    limit=limit,
+                    status=status,
+                )
+            ]
+        }
+
+    @app.get("/api/trades/fills")
+    async def all_trade_fills(
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> dict[str, object]:
+        return {
+            "items": [
+                item.model_dump(mode="json")
+                for item in await trade_ledger.fill_history(limit=limit)
+            ]
+        }
+
+    @app.get("/api/trades/pnl")
+    async def trade_pnl_realizations(
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> dict[str, object]:
+        return {
+            "items": [
+                item.model_dump(mode="json")
+                for item in await trade_ledger.pnl_realizations(limit=limit)
+            ]
+        }
+
     @app.get("/api/trades/intents/{intent_id}")
     async def trade_intent(intent_id: UUID) -> dict[str, object]:
         intent = await trade_ledger.get(str(intent_id))

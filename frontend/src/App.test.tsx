@@ -17,6 +17,10 @@ describe("Basis Hawk dashboard", () => {
         : url.includes("operations/notifications") ? { items: [] }
         : url.includes("accounts/credentials") ? { items: [] }
         : url.includes("trades/positions") ? { items: [] }
+        : url.includes("trades/intents") ? { items: [] }
+        : url.includes("trades/orders") ? { items: [] }
+        : url.includes("trades/fills") ? { items: [] }
+        : url.includes("trades/pnl") ? { items: [] }
         : url.includes("transfers") ? { items: [] }
         : url.includes("automation") ? { state: "disabled", reason: "disabled", updated_by: "system", updated_at: "2026-07-26T00:00:00Z", active_strategy: null, latest_strategy: null }
         : { universe_size: 500, minimum_quote_volume: "1000000", holding_period_days: 30, retention_days: 30, fee_checked_at: "2026-07-23", fees: { binance: { spot_taker: "0.001", perp_taker: "0.0005" }, okx: { spot_taker: "0.001", perp_taker: "0.0005" }, mexc: { spot_taker: "0.0005", perp_taker: "0.0004" }, bybit: { spot_taker: "0.001", perp_taker: "0.00055" }, bitget: { spot_taker: "0.001", perp_taker: "0.0006" }, gate: { spot_taker: "0.001", perp_taker: "0.00075" } } };
@@ -96,5 +100,17 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByText("通知投递")).toBeTruthy();
     expect(screen.getByText(/敏感键由服务端递归脱敏/)).toBeTruthy();
     expect(screen.getByText(/不返回消息正文或去重键/)).toBeTruthy();
+  });
+
+  it("shows bounded trade intent, order, fill, and pnl ledgers", async () => {
+    render(<App />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "运营控制台" }));
+    await user.click(await screen.findByRole("button", { name: "交易账本" }));
+    expect(screen.getByRole("heading", { name: "交易意图" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "订单腿" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "成交明细" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "已实现盈亏" })).toBeTruthy();
+    expect(screen.getByText(/最近 100 条持久化开平仓请求/)).toBeTruthy();
   });
 });

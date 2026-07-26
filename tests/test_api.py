@@ -189,6 +189,70 @@ async def test_rest_contract_and_settings() -> None:
     await database.close()
 
 
+async def test_global_trade_ledgers_are_bounded_filterable_and_decimal_safe() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    service = ScannerService(database, {})
+    await service.initialize()
+    ledger = TradeLedger(database)
+    opening, _ = await ledger.plan_paper_open(
+        opportunity=opportunity(),
+        notional_usdt=Decimal("100"),
+        idempotency_key=uuid.uuid4(),
+        settings=await database.load_settings(),
+    )
+    executor = PaperExecutionService(database)
+    assert (await executor.run_once()).executed == 1
+    [position] = await ledger.positions(status="open")
+    closing, _ = await ledger.plan_paper_close(
+        position_id=position.id,
+        opportunity=opportunity(),
+        idempotency_key=uuid.uuid4(),
+        settings=await database.load_settings(),
+    )
+    assert (await executor.run_once()).executed == 1
+
+    app = create_app(service, manage_lifecycle=False, auth_required=False)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        intents = await client.get(
+            "/api/trades/intents",
+            params={"status": "closed", "limit": 1},
+        )
+        assert intents.status_code == 200
+        assert [item["id"] for item in intents.json()["items"]] == [closing.id]
+
+        orders = await client.get(
+            "/api/trades/orders",
+            params={"status": "filled", "limit": 10},
+        )
+        assert orders.status_code == 200
+        assert len(orders.json()["items"]) == 4
+        assert {item["trade_intent_id"] for item in orders.json()["items"]} == {
+            opening.id,
+            closing.id,
+        }
+        assert all(isinstance(item["quantity"], str) for item in orders.json()["items"])
+
+        fills = await client.get("/api/trades/fills", params={"limit": 10})
+        assert fills.status_code == 200
+        assert len(fills.json()["items"]) == 4
+        assert all(isinstance(item["price"], str) for item in fills.json()["items"])
+        assert {item["leg"] for item in fills.json()["items"]} == {"spot", "perp"}
+
+        pnl = await client.get("/api/trades/pnl", params={"limit": 10})
+        assert pnl.status_code == 200
+        [realization] = pnl.json()["items"]
+        assert realization["paired_position_id"] == position.id
+        assert realization["closing_intent_id"] == closing.id
+        assert isinstance(realization["net_pnl_usdt"], str)
+
+        too_many = await client.get("/api/trades/orders", params={"limit": 501})
+        assert too_many.status_code == 422
+    await database.close()
+
+
 async def test_live_open_requires_persisted_preview_and_confirmation() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     service = ScannerService(database, {})

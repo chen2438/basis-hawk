@@ -11,10 +11,14 @@ import type {
   InternalTransfer,
   LiveClosePreview,
   LiveOpenPreview,
+  FillHistoryItem,
   NotificationHistoryItem,
   Opportunity,
+  OrderHistoryItem,
   PairedPosition,
+  PnlRealization,
   Settings,
+  TradeIntent,
 } from "./types";
 
 function cookie(name: string): string | null {
@@ -89,6 +93,10 @@ export const api = {
   accountSnapshot: (exchange: Exchange, environment: Environment) =>
     request<AccountSnapshot>(`/api/accounts/${exchange}/${environment}/snapshot`),
   positions: () => request<{ items: PairedPosition[] }>("/api/trades/positions"),
+  tradeIntents: () => request<{ items: TradeIntent[] }>("/api/trades/intents?limit=100"),
+  orders: () => request<{ items: OrderHistoryItem[] }>("/api/trades/orders?limit=100"),
+  fills: () => request<{ items: FillHistoryItem[] }>("/api/trades/fills?limit=100"),
+  pnlRealizations: () => request<{ items: PnlRealization[] }>("/api/trades/pnl?limit=100"),
   transfers: () => request<{ items: InternalTransfer[] }>("/api/transfers"),
   createTransfer: (
     value: {

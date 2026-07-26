@@ -9,12 +9,16 @@ import type {
   Environment,
   Exchange,
   ExecutionStatus,
+  FillHistoryItem,
   InternalTransfer,
   LiveClosePreview,
   LiveOpenPreview,
   NotificationHistoryItem,
   Opportunity,
+  OrderHistoryItem,
   PairedPosition,
+  PnlRealization,
+  TradeIntent,
 } from "./types";
 
 const exchangeNames: Record<Exchange, string> = {
@@ -26,7 +30,7 @@ const exchangeNames: Record<Exchange, string> = {
   gate: "Gate",
 };
 const exchanges = Object.keys(exchangeNames) as Exchange[];
-type Tab = "system" | "accounts" | "trades" | "positions" | "transfers" | "automation" | "history";
+type Tab = "system" | "accounts" | "trades" | "positions" | "ledger" | "transfers" | "automation" | "history";
 
 const time = (value: string | null) =>
   value ? new Date(value).toLocaleString("zh-CN") : "—";
@@ -44,6 +48,10 @@ export function OperationsPanel({
   const [execution, setExecution] = useState<ExecutionStatus | null>(null);
   const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
   const [positions, setPositions] = useState<PairedPosition[]>([]);
+  const [tradeIntents, setTradeIntents] = useState<TradeIntent[]>([]);
+  const [orders, setOrders] = useState<OrderHistoryItem[]>([]);
+  const [fills, setFills] = useState<FillHistoryItem[]>([]);
+  const [pnlRealizations, setPnlRealizations] = useState<PnlRealization[]>([]);
   const [transfers, setTransfers] = useState<InternalTransfer[]>([]);
   const [automation, setAutomation] = useState<AutomationStatus | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
@@ -57,6 +65,10 @@ export function OperationsPanel({
       executionValue,
       credentialValue,
       positionValue,
+      intentValue,
+      orderValue,
+      fillValue,
+      pnlValue,
       transferValue,
       automationValue,
       auditValue,
@@ -66,6 +78,10 @@ export function OperationsPanel({
         api.execution(),
         api.credentials(),
         api.positions(),
+        api.tradeIntents(),
+        api.orders(),
+        api.fills(),
+        api.pnlRealizations(),
         api.transfers(),
         api.automation(),
         api.auditHistory(),
@@ -74,6 +90,10 @@ export function OperationsPanel({
     setExecution(executionValue);
     setCredentials(credentialValue.items);
     setPositions(positionValue.items);
+    setTradeIntents(intentValue.items);
+    setOrders(orderValue.items);
+    setFills(fillValue.items);
+    setPnlRealizations(pnlValue.items);
     setTransfers(transferValue.items);
     setAutomation(automationValue);
     setAuditEvents(auditValue.items);
@@ -113,6 +133,7 @@ export function OperationsPanel({
           ["accounts", "交易所账户"],
           ["trades", "手动交易"],
           ["positions", "配对持仓"],
+          ["ledger", "交易账本"],
           ["transfers", "内部划转"],
           ["automation", "自动策略"],
           ["history", "审计与通知"],
@@ -138,6 +159,12 @@ export function OperationsPanel({
           action={action}
         />}
         {tab === "positions" && <PositionsView positions={positions} />}
+        {tab === "ledger" && <TradeLedgerView
+          intents={tradeIntents}
+          orders={orders}
+          fills={fills}
+          pnlRealizations={pnlRealizations}
+        />}
         {tab === "transfers" && <TransfersView
           transfers={transfers}
           execution={execution}
@@ -449,6 +476,63 @@ function PositionsView({ positions }: { positions: PairedPosition[] }) {
       <td><span className={`status-pill ${item.status}`}>{item.status}</span></td><td>{time(item.opened_at)}</td>
     </tr>)}</tbody>
   </table>{!positions.length && <div className="empty">当前没有配对持仓</div>}</div>;
+}
+
+function TradeLedgerView({
+  intents,
+  orders,
+  fills,
+  pnlRealizations,
+}: {
+  intents: TradeIntent[];
+  orders: OrderHistoryItem[];
+  fills: FillHistoryItem[];
+  pnlRealizations: PnlRealization[];
+}) {
+  return <div className="history-grid trade-ledger">
+    <section>
+      <header><div><h3>交易意图</h3><p>最近 100 条持久化开平仓请求。</p></div><strong>{intents.length}</strong></header>
+      <div className="ops-table-wrap"><table><thead><tr><th>时间</th><th>交易所</th><th>环境</th><th>标的</th><th>动作</th><th>名义额</th><th>状态</th></tr></thead>
+        <tbody>{intents.map((item) => <tr key={item.id}>
+          <td>{time(item.created_at)}</td><td>{exchangeNames[item.exchange]}</td><td>{item.environment}</td>
+          <td>{item.base_asset}</td><td>{item.emergency ? `紧急${item.action}` : item.action}</td>
+          <td>{amount(item.requested_notional)} USDT</td><td><span className={`status-pill ${item.status}`}>{item.status}</span></td>
+        </tr>)}</tbody>
+      </table>{!intents.length && <div className="empty">尚无交易意图</div>}</div>
+    </section>
+    <section>
+      <header><div><h3>订单腿</h3><p>最近 100 条现货、永续及补偿订单状态。</p></div><strong>{orders.length}</strong></header>
+      <div className="ops-table-wrap"><table><thead><tr><th>更新时间</th><th>交易所</th><th>标的</th><th>订单腿</th><th>方向</th><th>数量</th><th>成交</th><th>均价</th><th>状态</th></tr></thead>
+        <tbody>{orders.map((item) => <tr key={item.id}>
+          <td>{time(item.updated_at)}</td><td>{exchangeNames[item.exchange]}</td><td>{item.base_asset}</td>
+          <td>{item.leg} · {item.symbol}</td><td>{item.side}{item.reduce_only ? " · reduce-only" : ""}</td>
+          <td>{amount(item.quantity)}</td><td>{amount(item.filled_quantity)}</td><td>{amount(item.average_price)}</td>
+          <td><span className={`status-pill ${item.status}`}>{item.status}</span></td>
+        </tr>)}</tbody>
+      </table>{!orders.length && <div className="empty">尚无订单记录</div>}</div>
+    </section>
+    <section>
+      <header><div><h3>成交明细</h3><p>最近 100 条按交易所成交 ID 去重的实际或纸面成交。</p></div><strong>{fills.length}</strong></header>
+      <div className="ops-table-wrap"><table><thead><tr><th>时间</th><th>交易所</th><th>标的</th><th>订单腿</th><th>方向</th><th>数量</th><th>价格</th><th>费用</th><th>流动性</th></tr></thead>
+        <tbody>{fills.map((item) => <tr key={item.id}>
+          <td>{time(item.occurred_at)}</td><td>{exchangeNames[item.exchange]}</td><td>{item.base_asset}</td>
+          <td>{item.leg} · {item.symbol}</td><td>{item.side}</td><td>{amount(item.quantity)}</td>
+          <td>{amount(item.price)}</td><td>{amount(item.fee_amount)} {item.fee_asset}</td><td>{item.liquidity}</td>
+        </tr>)}</tbody>
+      </table>{!fills.length && <div className="empty">尚无成交记录</div>}</div>
+    </section>
+    <section>
+      <header><div><h3>已实现盈亏</h3><p>最近 100 条平仓结算；费用与毛盈亏分别可审计。</p></div><strong>{pnlRealizations.length}</strong></header>
+      <div className="ops-table-wrap"><table><thead><tr><th>时间</th><th>交易所</th><th>环境</th><th>标的</th><th>数量</th><th>毛盈亏</th><th>开仓费</th><th>平仓费</th><th>净盈亏</th></tr></thead>
+        <tbody>{pnlRealizations.map((item) => <tr key={item.id}>
+          <td>{time(item.realized_at)}</td><td>{exchangeNames[item.exchange]}</td><td>{item.environment}</td>
+          <td>{item.base_asset}</td><td>{amount(item.quantity)}</td><td>{amount(item.gross_pnl_usdt)}</td>
+          <td>{amount(item.opening_fee_allocated_usdt)}</td><td>{amount(item.closing_fees_usdt)}</td>
+          <td className={Number(item.net_pnl_usdt) >= 0 ? "positive" : "negative"}>{amount(item.net_pnl_usdt)} USDT</td>
+        </tr>)}</tbody>
+      </table>{!pnlRealizations.length && <div className="empty">尚无已实现盈亏</div>}</div>
+    </section>
+  </div>;
 }
 
 function TransfersView({

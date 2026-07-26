@@ -110,6 +110,75 @@ export interface PairedPosition {
   closed_at: string | null;
 }
 
+export interface TradeIntent {
+  id: string;
+  paired_position_id: string | null;
+  exchange: Exchange;
+  environment: string;
+  base_asset: string;
+  action: string;
+  emergency: boolean;
+  status: string;
+  leverage: number;
+  requested_notional: string;
+  base_quantity: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OrderHistoryItem {
+  id: string;
+  trade_intent_id: string;
+  exchange: Exchange;
+  environment: string;
+  base_asset: string;
+  action: string;
+  emergency: boolean;
+  leg: string;
+  market: string;
+  symbol: string;
+  side: string;
+  status: string;
+  quantity: string;
+  filled_quantity: string;
+  average_price: string | null;
+  reduce_only: boolean;
+  updated_at: string;
+}
+
+export interface FillHistoryItem {
+  id: string;
+  trade_intent_id: string;
+  exchange: Exchange;
+  environment: string;
+  base_asset: string;
+  action: string;
+  leg: string;
+  symbol: string;
+  side: string;
+  quantity: string;
+  price: string;
+  fee_amount: string;
+  fee_asset: string;
+  liquidity: string;
+  occurred_at: string;
+}
+
+export interface PnlRealization {
+  id: string;
+  paired_position_id: string;
+  closing_intent_id: string;
+  exchange: Exchange;
+  environment: string;
+  base_asset: string;
+  quantity: string;
+  gross_pnl_usdt: string;
+  opening_fee_allocated_usdt: string;
+  closing_fees_usdt: string;
+  net_pnl_usdt: string;
+  realized_at: string;
+}
+
 export interface InternalTransfer {
   id: string;
   exchange: Exchange;
