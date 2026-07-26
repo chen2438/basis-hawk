@@ -20,6 +20,22 @@ def test_settings_reject_more_than_500_symbols() -> None:
         ScannerSettings(universe_size=501)
 
 
+def test_settings_fill_fee_defaults_for_new_exchanges() -> None:
+    settings = ScannerSettings.model_validate(
+        {
+            "fees": {
+                "binance": {
+                    "spot_taker": "0.002",
+                    "perp_taker": "0.0005",
+                }
+            }
+        }
+    )
+    assert settings.fees[Exchange.BINANCE].spot_taker == Decimal("0.002")
+    assert Exchange.BITGET in settings.fees
+    assert Exchange.GATE in settings.fees
+
+
 async def test_settings_and_funding_round_trip() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()

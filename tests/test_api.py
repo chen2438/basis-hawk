@@ -45,6 +45,8 @@ async def test_rest_contract_and_settings() -> None:
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
+        session = await client.get("/api/auth/session")
+        assert session.json() == {"username": "local"}
         response = await client.get("/api/opportunities", params={"exchange": "binance"})
         assert response.status_code == 200
         assert response.json()["items"][0]["spot_ask"] == "100"

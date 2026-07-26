@@ -1,9 +1,20 @@
 # 行情与计算
 
-每个适配器只访问官方公共 REST API，并输出共同的 `InstrumentPair`、`MarketQuote` 和 `FundingObservation`。只接受状态正常、现货计价为 USDT、永续计价与结算均为 USDT 的线性永续。
+Binance、OKX、MEXC、Bybit、Bitget、Gate 适配器只访问各所官方公共 REST API，并输出共同的
+`InstrumentPair`、`MarketQuote` 和 `FundingObservation`。只接受状态正常、现货计价为 USDT、
+永续计价与结算均为 USDT 的线性永续。Bybit 线性目录必须游标翻页，因为默认页不足以覆盖全部合约。
+Gate 批量现货 ticker 不返回最优档数量，当前公共 REST 扫描将该腿最优档容量记为未知（0）；
+后续交易行情层必须用订单簿 WebSocket 填充容量，未知容量不得用于自动下单。
 
-候选池按 `min(spot_quote_volume_24h, perp_quote_volume_24h)` 降序确定，默认每所最多保留 500 个共同标的。可执行开仓价格是现货 ask 与永续 bid；可执行基差为 `perp_bid / spot_ask - 1`，最优档名义容量取两腿最优档 USDT 名义量的较小值。
+候选池先要求两腿 24 小时 USDT 成交额均达到 `minimum_quote_volume`（默认 1,000,000 USDT），
+再按 `min(spot_quote_volume_24h, perp_quote_volume_24h)` 降序确定，默认每所最多保留 500 个共同标的。
+所以搜索不到某标的并不必然表示交易所没有该交易对；它也可能未通过同所现货/永续交集、交易状态或最低
+两腿成交额筛选。可执行开仓价格是现货 ask 与永续 bid；可执行基差为
+`perp_bid / spot_ask - 1`，最优档名义容量取两腿最优档 USDT 名义量的较小值。
 
 当前资金费年化为 `rate × 24 / interval_hours × 365`。历史窗口年化按窗口内已结算费率之和除以实际覆盖天数再乘 365。30 天预计净收益使用近 7 天日均资金费外推 30 天，再减去两腿开仓和平仓 taker 费用。基差不计入预计净收益。
 
-价格超过 15 秒、资金费超过 10 分钟或任一关键字段缺失时标记为 `stale`；近 7 天历史未覆盖至少 6 天时标记为 `warming`。失效机会不会进入默认 `healthy` 排名。
+每所的历史补充任务与其他交易所并行运行，在单个交易所内部逐个标的调用历史接口，启动后主动回补最近
+约 7.5 天数据，不需要等待软件连续运行 6 天。近 7 天已结算历史尚未覆盖至少 6 天时标记为 `warming`
+（预热中）；价格超过 15 秒、资金费超过 10 分钟或交易所刷新失败时标记为 `stale`（已陈旧）。
+两种状态都不会进入默认 `healthy` 排名。

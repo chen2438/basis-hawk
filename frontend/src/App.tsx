@@ -4,7 +4,8 @@ import { LoginPage } from "./LoginPage";
 import { SettingsPanel } from "./SettingsPanel";
 import type { Exchange, ExchangeStatus, Opportunity, Quality, Settings } from "./types";
 
-const exchangeNames: Record<Exchange, string> = { binance: "Binance", okx: "OKX", mexc: "MEXC", bybit: "Bybit" };
+const exchangeNames: Record<Exchange, string> = { binance: "Binance", okx: "OKX", mexc: "MEXC", bybit: "Bybit", bitget: "Bitget", gate: "Gate" };
+const exchanges = Object.keys(exchangeNames) as Exchange[];
 const qualityNames: Record<Quality, string> = { healthy: "有效", warming: "预热中", stale: "已陈旧" };
 const percent = (value: string | null, digits = 2) => value == null ? "—" : `${(Number(value) * 100).toFixed(digits)}%`;
 const money = (value: string) => Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value));
@@ -117,14 +118,14 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
       <section className="hero">
         <div><p className="eyebrow">LIVE MARKET OVERVIEW</p><h1>资金费机会，一眼看清。</h1><p>同所现货多头 × USDT 永续空头。基差与资金费分开衡量，收益估算透明可核。</p></div>
         <div className="hero-grid">
-          <div className="metric"><span>有效机会</span><strong>{healthy.length}</strong><small>四所共同交易对</small></div>
+          <div className="metric"><span>有效机会</span><strong>{healthy.length}</strong><small>六所共同交易对</small></div>
           <div className="metric accent"><span>最佳 30 天估算</span><strong>{percent(best?.net_return ?? null)}</strong><small>{best ? `${exchangeNames[best.exchange]} · ${best.base_asset}` : "等待历史预热"}</small></div>
           <div className="metric"><span>扫描标的</span><strong>{items.length}</strong><small>5 秒价格刷新</small></div>
         </div>
       </section>
 
       <section className="status-strip">
-        {(["binance", "okx", "mexc", "bybit"] as Exchange[]).map((name) => {
+        {exchanges.map((name) => {
           const status = statuses.find((item) => item.exchange === name);
           return <div className="exchange-status" key={name}><span className={`status-dot ${status?.state ?? "starting"}`} /><div><strong>{exchangeNames[name]}</strong><small>{status ? `${status.instruments} 标的 · ${status.latency_ms ?? "—"}ms` : "正在连接"}</small></div></div>;
         })}

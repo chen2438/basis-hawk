@@ -10,7 +10,14 @@ import uvicorn
 from basis_hawk.auth import AuthService
 from basis_hawk.config import get_config
 from basis_hawk.crypto import SecretCipher
-from basis_hawk.exchanges import BinanceAdapter, BybitAdapter, MexcAdapter, OkxAdapter
+from basis_hawk.exchanges import (
+    BinanceAdapter,
+    BitgetAdapter,
+    BybitAdapter,
+    GateAdapter,
+    MexcAdapter,
+    OkxAdapter,
+)
 from basis_hawk.models import Exchange
 from basis_hawk.storage import Database
 
@@ -25,6 +32,8 @@ async def doctor() -> int:
         Exchange.OKX: OkxAdapter(timeout=config.http_timeout_seconds),
         Exchange.MEXC: MexcAdapter(timeout=config.http_timeout_seconds),
         Exchange.BYBIT: BybitAdapter(timeout=config.http_timeout_seconds),
+        Exchange.BITGET: BitgetAdapter(timeout=config.http_timeout_seconds),
+        Exchange.GATE: GateAdapter(timeout=config.http_timeout_seconds),
     }
     failed = False
     for exchange, adapter in adapters.items():

@@ -9,8 +9,10 @@ from time import monotonic
 from basis_hawk.calculations import build_opportunity
 from basis_hawk.exchanges import (
     BinanceAdapter,
+    BitgetAdapter,
     BybitAdapter,
     ExchangeAdapter,
+    GateAdapter,
     MexcAdapter,
     OkxAdapter,
 )
@@ -35,6 +37,8 @@ def default_adapters(timeout: float = 10) -> dict[Exchange, ExchangeAdapter]:
         Exchange.OKX: OkxAdapter(timeout=timeout),
         Exchange.MEXC: MexcAdapter(timeout=timeout),
         Exchange.BYBIT: BybitAdapter(timeout=timeout),
+        Exchange.BITGET: BitgetAdapter(timeout=timeout),
+        Exchange.GATE: GateAdapter(timeout=timeout),
     }
 
 

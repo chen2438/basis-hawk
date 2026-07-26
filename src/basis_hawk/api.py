@@ -141,10 +141,14 @@ def create_app(
 
     @app.get("/api/auth/session")
     async def auth_session(request: Request) -> dict[str, str]:
+        if not require_auth:
+            return {"username": "local"}
         return {"username": request.state.admin.username}
 
     @app.post("/api/auth/logout")
     async def logout(request: Request) -> Response:
+        if not require_auth:
+            return Response(status_code=204)
         if auth_service is None:
             raise HTTPException(status_code=503, detail="authentication is unavailable")
         await auth_service.logout(

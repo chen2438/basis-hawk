@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { Exchange, Settings } from "./types";
 
-const names: Record<Exchange, string> = { binance: "Binance", okx: "OKX", mexc: "MEXC", bybit: "Bybit" };
+const names: Record<Exchange, string> = { binance: "Binance", okx: "OKX", mexc: "MEXC", bybit: "Bybit", bitget: "Bitget", gate: "Gate" };
 
 export function SettingsPanel({ value, onSave, onClose }: { value: Settings; onSave: (value: Settings) => Promise<void>; onClose: () => void }) {
   const [draft, setDraft] = useState(value);

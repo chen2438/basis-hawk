@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 
 class Exchange(StrEnum):
@@ -12,6 +12,8 @@ class Exchange(StrEnum):
     OKX = "okx"
     MEXC = "mexc"
     BYBIT = "bybit"
+    BITGET = "bitget"
+    GATE = "gate"
 
 
 class Quality(StrEnum):
@@ -76,6 +78,8 @@ DEFAULT_FEES: dict[Exchange, FeeRate] = {
     Exchange.OKX: FeeRate(spot_taker=Decimal("0.001"), perp_taker=Decimal("0.0005")),
     Exchange.MEXC: FeeRate(spot_taker=Decimal("0.0005"), perp_taker=Decimal("0.0004")),
     Exchange.BYBIT: FeeRate(spot_taker=Decimal("0.001"), perp_taker=Decimal("0.00055")),
+    Exchange.BITGET: FeeRate(spot_taker=Decimal("0.001"), perp_taker=Decimal("0.0006")),
+    Exchange.GATE: FeeRate(spot_taker=Decimal("0.001"), perp_taker=Decimal("0.00075")),
 }
 
 
@@ -86,6 +90,19 @@ class ScannerSettings(BaseModel):
     retention_days: int = Field(default=30, ge=1, le=365)
     fees: dict[Exchange, FeeRate] = Field(default_factory=lambda: dict(DEFAULT_FEES))
     fee_checked_at: str = "2026-07-23"
+
+    @model_validator(mode="before")
+    @classmethod
+    def fill_new_exchange_fees(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        return {
+            **value,
+            "fees": {
+                **DEFAULT_FEES,
+                **(value.get("fees") or {}),
+            },
+        }
 
     @field_serializer("minimum_quote_volume", when_used="json")
     def serialize_minimum_volume(self, value: Decimal) -> str:

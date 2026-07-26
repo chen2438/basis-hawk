@@ -1,4 +1,4 @@
-export type Exchange = "binance" | "okx" | "mexc" | "bybit";
+export type Exchange = "binance" | "okx" | "mexc" | "bybit" | "bitget" | "gate";
 export type Quality = "healthy" | "warming" | "stale";
 
 export interface Opportunity {
