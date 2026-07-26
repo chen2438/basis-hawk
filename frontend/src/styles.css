@@ -93,6 +93,8 @@ button, input, select { font: inherit; }
 .button.secondary { background: #fff; }
 .button.secondary:hover { background: #f3f8f7; border-color: #9fbdb8; }
 .button.primary { color: #fff; font-weight: 700; background: var(--accent); border-color: var(--accent); }
+.button.danger { color: #fff; font-weight: 700; background: var(--red); border-color: var(--red); }
+.button.danger.ghost { color: var(--red); background: #fff; }
 .button:disabled { opacity: 0.6; }
 
 main { max-width: 1680px; margin: auto; padding: 32px 34px 20px; }
@@ -275,8 +277,144 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
 .login-card input, .login-card button { width: 100%; margin-top: 7px; }
 .login-card .error-banner { margin: 0; }
 
+.operations-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  padding: 24px;
+  background: rgba(18, 35, 45, 0.56);
+  backdrop-filter: blur(6px);
+}
+.operations-panel {
+  display: grid;
+  grid-template-rows: auto auto auto 1fr;
+  width: min(1460px, 100%);
+  height: 100%;
+  margin: auto;
+  overflow: hidden;
+  background: var(--page);
+  border: 1px solid var(--line-strong);
+  border-radius: 13px;
+  box-shadow: 0 30px 100px rgba(14, 33, 39, 0.35);
+}
+.operations-header {
+  display: flex;
+  padding: 18px 24px;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+  align-items: center;
+  justify-content: space-between;
+}
+.operations-header-actions { display: flex; gap: 14px; align-items: center; }
+.live-badge, .status-pill {
+  display: inline-block;
+  padding: 4px 8px;
+  color: #087766;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  text-transform: uppercase;
+  background: #dff4ee;
+  border-radius: 12px;
+}
+.live-badge.danger, .status-pill.failed, .status-pill.manual_review,
+.status-pill.blocked, .status-pill.error {
+  color: #a13c4c;
+  background: #fbe5e8;
+}
+.status-pill.pending, .status-pill.submitted, .status-pill.planned,
+.status-pill.reconciling, .status-pill.paused {
+  color: #8a6118;
+  background: #fff2ce;
+}
+.operations-tabs {
+  display: flex;
+  gap: 3px;
+  padding: 10px 18px 0;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+}
+.operations-tabs button {
+  padding: 10px 16px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.operations-tabs button.active { color: var(--accent-dark); font-weight: 700; border-color: var(--accent); }
+.operations-panel > .error-banner { margin: 10px 20px 0; }
+.operations-content { padding: 20px; overflow: auto; }
+.loading-note { color: var(--muted); font-size: 11px; }
+.ops-summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr 2fr;
+  margin-bottom: 16px;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.ops-summary > div { padding: 16px 18px; border-right: 1px solid var(--line); }
+.ops-summary > div:last-child { border: 0; }
+.ops-summary span, .ops-summary strong { display: block; }
+.ops-summary span { color: var(--muted); font-size: 10px; }
+.ops-summary strong { margin-top: 6px; color: #243b4e; font-size: 13px; }
+.state-text { text-transform: uppercase; }
+.state-text.ready, .state-text.enabled, .state-text.completed { color: var(--accent-dark); }
+.state-text.paused, .state-text.blocked, .state-text.disabled { color: var(--red); }
+.safety-callout {
+  display: flex;
+  gap: 18px;
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  background: #fff;
+  border-left: 3px solid var(--accent);
+  box-shadow: 0 5px 18px rgba(28, 63, 58, 0.04);
+  align-items: center;
+}
+.safety-callout p { flex: 1; margin: 0; color: var(--muted); font-size: 11px; }
+.inline-actions { display: flex; gap: 8px; align-items: center; }
+.inline-actions .button { padding: 7px 10px; font-size: 10px; }
+.ops-grid { display: grid; grid-template-columns: repeat(3, minmax(260px, 1fr)); gap: 12px; }
+.ops-card {
+  padding: 15px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: 0 5px 18px rgba(28, 63, 58, 0.04);
+}
+.ops-card > header { display: flex; align-items: center; justify-content: space-between; }
+.ops-card > p { min-height: 32px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.ops-card dl { display: grid; grid-template-columns: 1fr 1fr; margin: 12px 0; border: 1px solid var(--line); border-radius: 6px; }
+.ops-card dl div { padding: 9px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.ops-card dl div:nth-child(2n) { border-right: 0; }
+.ops-card dl div:nth-last-child(-n + 2) { border-bottom: 0; }
+.ops-card dt { color: var(--muted); font-size: 9px; }
+.ops-card dd { margin: 4px 0 0; color: #263d50; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+.ops-form {
+  margin: 18px 0;
+  padding: 18px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.ops-form h3 { margin: 0; color: #263d50; font-size: 13px; }
+.ops-form p { color: var(--muted); font-size: 10px; }
+.form-grid.compact { padding: 14px 0; grid-template-columns: repeat(3, 1fr); }
+.form-grid.compact select { display: block; width: 100%; margin-top: 7px; }
+.transfer-form { display: grid; grid-template-columns: 2fr repeat(3, 1fr) 1fr auto; gap: 10px; align-items: center; }
+.transfer-form h3, .transfer-form p { margin: 0 0 5px; }
+.ops-table-wrap { max-height: 520px; overflow: auto; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
+.ops-table-wrap th { top: 0; }
+.strategy-json { overflow: hidden; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
+.strategy-json header { display: flex; padding: 14px 16px; border-bottom: 1px solid var(--line); justify-content: space-between; }
+.strategy-json pre { max-height: 470px; margin: 0; padding: 18px; overflow: auto; color: #345266; font-size: 11px; background: #f8fbfa; }
+
 @media (max-width: 1250px) {
   .workspace { grid-template-columns: 1fr 330px; }
   .hero-grid { grid-template-columns: repeat(3, 160px); }
   main { padding-right: 22px; padding-left: 22px; }
+  .ops-grid { grid-template-columns: 1fr 1fr; }
+  .transfer-form { grid-template-columns: 1fr 1fr 1fr; }
+  .transfer-form > div { grid-column: 1 / -1; }
 }

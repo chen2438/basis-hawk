@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { LoginPage } from "./LoginPage";
+import { OperationsPanel } from "./OperationsPanel";
 import { SettingsPanel } from "./SettingsPanel";
 import type { Exchange, ExchangeStatus, Opportunity, Quality, Settings } from "./types";
 
@@ -45,6 +46,7 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
   const [quality, setQuality] = useState<Quality | "all">("healthy");
   const [search, setSearch] = useState("");
   const [showSettings, setShowSettings] = useState(false);
+  const [showOperations, setShowOperations] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const lastSequence = useRef<number | null>(null);
 
@@ -111,7 +113,7 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
   return <div className="app-shell">
     <header className="topbar">
       <div className="brand"><div className="mark"><span /></div><div><strong>BASIS HAWK</strong><small>FUNDING ARBITRAGE RADAR</small></div></div>
-      <div className="top-actions"><span className="read-only"><i /> {username}</span><button className="button secondary" onClick={() => setShowSettings(true)}>扫描设置</button><button className="button secondary" onClick={() => void api.logout().finally(onLogout)}>退出</button></div>
+      <div className="top-actions"><span className="read-only"><i /> {username}</span><button className="button primary" onClick={() => setShowOperations(true)}>运营控制台</button><button className="button secondary" onClick={() => setShowSettings(true)}>扫描设置</button><button className="button secondary" onClick={() => void api.logout().finally(onLogout)}>退出</button></div>
     </header>
 
     <main>
@@ -164,7 +166,8 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
         </aside>
       </section>
     </main>
-    <footer className="page-footer"><span>Basis Hawk · Local-first & read-only</span><span>收益估算不构成投资建议</span></footer>
+    <footer className="page-footer"><span>Basis Hawk · Paired execution & audit-first</span><span>收益估算不构成投资建议</span></footer>
     {showSettings && settings && <SettingsPanel value={settings} onClose={() => setShowSettings(false)} onSave={async (value) => setSettings(await api.saveSettings(value))} />}
+    {showOperations && <OperationsPanel onClose={() => setShowOperations(false)} />}
   </div>;
 }

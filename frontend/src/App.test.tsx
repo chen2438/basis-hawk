@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
@@ -10,7 +11,12 @@ describe("Basis Hawk dashboard", () => {
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       const value = url.includes("auth/session") ? { username: "admin" }
         : url.includes("opportunities?") ? { items: [], sequence: 0 }
-        : url.includes("status") ? { items: [] }
+        : url.includes("exchanges/status") ? { items: [] }
+        : url.includes("system/execution") ? { state: "blocked", reason: "worker pending", updated_at: null, accounts: [] }
+        : url.includes("accounts/credentials") ? { items: [] }
+        : url.includes("trades/positions") ? { items: [] }
+        : url.includes("transfers") ? { items: [] }
+        : url.includes("automation") ? { state: "disabled", reason: "disabled", updated_by: "system", updated_at: "2026-07-26T00:00:00Z", active_strategy: null, latest_strategy: null }
         : { universe_size: 500, minimum_quote_volume: "1000000", holding_period_days: 30, retention_days: 30, fee_checked_at: "2026-07-23", fees: { binance: { spot_taker: "0.001", perp_taker: "0.0005" }, okx: { spot_taker: "0.001", perp_taker: "0.0005" }, mexc: { spot_taker: "0.0005", perp_taker: "0.0004" }, bybit: { spot_taker: "0.001", perp_taker: "0.00055" }, bitget: { spot_taker: "0.001", perp_taker: "0.0006" }, gate: { spot_taker: "0.001", perp_taker: "0.00075" } } };
       return Promise.resolve({ ok: true, json: () => Promise.resolve(value) });
     }));
@@ -34,5 +40,15 @@ describe("Basis Hawk dashboard", () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("登录控制台")).toBeTruthy());
     expect(screen.getByText("动态验证码")).toBeTruthy();
+  });
+
+  it("opens the operational console with safety state", async () => {
+    render(<App />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "运营控制台" }));
+    await waitFor(() => expect(screen.getByRole("region", { name: "运营控制台" })).toBeTruthy());
+    expect(screen.getByText("实盘运营控制台")).toBeTruthy();
+    expect(screen.getByText("worker pending")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "交易所账户" })).toBeTruthy();
   });
 });
