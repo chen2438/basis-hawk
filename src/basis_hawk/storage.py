@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -20,6 +24,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
     AsyncEngine,
     async_sessionmaker,
     create_async_engine,
@@ -117,6 +122,50 @@ class AuditEventRow(Base):
     details: Mapped[str] = mapped_column(Text)
 
 
+class AccountSnapshotRow(Base):
+    __tablename__ = "account_snapshots"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    exchange: Mapped[str] = mapped_column(String(20))
+    environment: Mapped[str] = mapped_column(String(20))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    spot_usdt_available: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    perp_usdt_available: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    perp_usdt_equity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    shared_balance: Mapped[bool] = mapped_column(Boolean)
+    account_mode: Mapped[str] = mapped_column(String(100))
+    position_mode: Mapped[str] = mapped_column(String(20))
+    trade_permission: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    __table_args__ = (
+        Index(
+            "ix_account_snapshot_history",
+            "exchange",
+            "environment",
+            "observed_at",
+        ),
+    )
+
+
+class AccountReconciliationRow(Base):
+    __tablename__ = "account_reconciliation"
+    exchange: Mapped[str] = mapped_column(String(20), primary_key=True)
+    environment: Mapped[str] = mapped_column(String(20), primary_key=True)
+    status: Mapped[str] = mapped_column(String(30))
+    reason: Mapped[str] = mapped_column(String(300))
+    snapshot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("account_snapshots.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ExecutionControlRow(Base):
+    __tablename__ = "execution_control"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    state: Mapped[str] = mapped_column(String(30))
+    reason: Mapped[str] = mapped_column(String(300))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
@@ -135,6 +184,114 @@ class Database:
 
     async def close(self) -> None:
         await self.engine.dispose()
+
+    @asynccontextmanager
+    async def executor_lock(self) -> AsyncIterator[bool]:
+        connection: AsyncConnection | None = None
+        if self.engine.url.get_backend_name() != "postgresql":
+            yield True
+            return
+        connection = await self.engine.connect()
+        lock_key = 7_284_217_119_035_423_281
+        acquired = bool(
+            await connection.scalar(
+                text("SELECT pg_try_advisory_lock(:lock_key)"),
+                {"lock_key": lock_key},
+            )
+        )
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                await connection.execute(
+                    text("SELECT pg_advisory_unlock(:lock_key)"),
+                    {"lock_key": lock_key},
+                )
+            await connection.close()
+
+    async def record_account_reconciliation(
+        self,
+        *,
+        exchange: str,
+        environment: str,
+        status: str,
+        reason: str,
+        snapshot: Any | None = None,
+    ) -> None:
+        async with self.sessions() as session:
+            snapshot_id: str | None = None
+            checked_at = datetime.now(UTC)
+            if snapshot is not None:
+                snapshot_id = str(uuid.uuid4())
+                checked_at = snapshot.observed_at
+                session.add(
+                    AccountSnapshotRow(
+                        id=snapshot_id,
+                        exchange=exchange,
+                        environment=environment,
+                        observed_at=snapshot.observed_at,
+                        spot_usdt_available=snapshot.spot_usdt_available,
+                        perp_usdt_available=snapshot.perp_usdt_available,
+                        perp_usdt_equity=snapshot.perp_usdt_equity,
+                        shared_balance=snapshot.shared_balance,
+                        account_mode=snapshot.account_mode,
+                        position_mode=snapshot.position_mode.value,
+                        trade_permission=snapshot.trade_permission,
+                    )
+                )
+            row = await session.get(
+                AccountReconciliationRow,
+                {"exchange": exchange, "environment": environment},
+            )
+            if row is None:
+                row = AccountReconciliationRow(
+                    exchange=exchange,
+                    environment=environment,
+                    status=status,
+                    reason=reason,
+                    snapshot_id=snapshot_id,
+                    checked_at=checked_at,
+                )
+                session.add(row)
+            else:
+                row.status = status
+                row.reason = reason
+                row.snapshot_id = snapshot_id
+                row.checked_at = checked_at
+            await session.commit()
+
+    async def set_execution_control(self, *, state: str, reason: str) -> None:
+        async with self.sessions() as session:
+            row = await session.get(ExecutionControlRow, 1)
+            now = datetime.now(UTC)
+            if row is None:
+                session.add(
+                    ExecutionControlRow(
+                        id=1,
+                        state=state,
+                        reason=reason,
+                        updated_at=now,
+                    )
+                )
+            else:
+                row.state = state
+                row.reason = reason
+                row.updated_at = now
+            await session.commit()
+
+    async def execution_control(self) -> ExecutionControlRow | None:
+        async with self.sessions() as session:
+            return await session.get(ExecutionControlRow, 1)
+
+    async def reconciliation_states(self) -> list[AccountReconciliationRow]:
+        async with self.sessions() as session:
+            values = await session.scalars(
+                select(AccountReconciliationRow).order_by(
+                    AccountReconciliationRow.exchange,
+                    AccountReconciliationRow.environment,
+                )
+            )
+            return list(values)
 
     async def load_settings(self) -> ScannerSettings:
         async with self.sessions() as session:

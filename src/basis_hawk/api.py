@@ -264,6 +264,30 @@ def create_app(
     async def statuses() -> dict[str, object]:
         return {"items": [item.model_dump(mode="json") for item in scanner.statuses.values()]}
 
+    @app.get("/api/system/execution")
+    async def execution_status() -> dict[str, object]:
+        control = await scanner.database.execution_control()
+        reconciliations = await scanner.database.reconciliation_states()
+        return {
+            "state": control.state if control else "blocked",
+            "reason": (
+                control.reason
+                if control
+                else "execution worker has not completed startup reconciliation"
+            ),
+            "updated_at": control.updated_at.isoformat() if control else None,
+            "accounts": [
+                {
+                    "exchange": item.exchange,
+                    "environment": item.environment,
+                    "status": item.status,
+                    "reason": item.reason,
+                    "checked_at": item.checked_at.isoformat(),
+                }
+                for item in reconciliations
+            ],
+        }
+
     @app.get("/api/accounts/credentials")
     async def credential_summaries() -> dict[str, object]:
         if credential_service is None:

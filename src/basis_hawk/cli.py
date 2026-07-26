@@ -7,8 +7,10 @@ import logging
 
 import uvicorn
 
+from basis_hawk.accounts import create_account_client
 from basis_hawk.auth import AuthService
 from basis_hawk.config import get_config
+from basis_hawk.credentials import CredentialService
 from basis_hawk.crypto import SecretCipher
 from basis_hawk.exchanges import (
     BinanceAdapter,
@@ -19,6 +21,7 @@ from basis_hawk.exchanges import (
     OkxAdapter,
 )
 from basis_hawk.models import Exchange
+from basis_hawk.reconciliation import ReconciliationService, WorkerLockUnavailable
 from basis_hawk.storage import Database
 
 
@@ -81,11 +84,56 @@ async def create_admin(username: str) -> int:
     return 0
 
 
+async def run_worker(*, once: bool) -> int:
+    config = get_config()
+    if config.credential_master_key is None:
+        print("worker: BASIS_HAWK_CREDENTIAL_MASTER_KEY is required")
+        return 1
+    database = Database(config.database_url)
+    await database.initialize()
+    credentials = CredentialService(
+        database,
+        SecretCipher(config.credential_master_key.get_secret_value()),
+    )
+    reconciler = ReconciliationService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: (
+            create_account_client(
+                exchange,
+                secrets,
+                environment,
+                timeout=config.http_timeout_seconds,
+            )
+        ),
+    )
+    try:
+        if once:
+            result = await reconciler.run_once_exclusive()
+            print(
+                "worker: reconciliation "
+                f"checked={result.accounts_checked} "
+                f"blocked={result.accounts_blocked} "
+                f"failed={result.accounts_failed} "
+                f"execution={result.execution_state}"
+            )
+            return 0
+        await reconciler.run_forever()
+    except WorkerLockUnavailable as exc:
+        print(f"worker: {exc}")
+        return 1
+    finally:
+        await database.close()
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="basis-hawk")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("doctor")
     subparsers.add_parser("serve")
+    worker_parser = subparsers.add_parser("worker")
+    worker_parser.add_argument("--once", action="store_true")
     admin_parser = subparsers.add_parser("admin-create")
     admin_parser.add_argument("--username", default="admin")
     args = parser.parse_args()
@@ -96,6 +144,8 @@ def main() -> None:
         raise SystemExit(asyncio.run(doctor()))
     if args.command == "admin-create":
         raise SystemExit(asyncio.run(create_admin(args.username)))
+    if args.command == "worker":
+        raise SystemExit(asyncio.run(run_worker(once=args.once)))
     uvicorn.run(
         "basis_hawk.api:app",
         host=config.host,

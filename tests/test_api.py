@@ -47,6 +47,9 @@ async def test_rest_contract_and_settings() -> None:
     ) as client:
         session = await client.get("/api/auth/session")
         assert session.json() == {"username": "local"}
+        execution = await client.get("/api/system/execution")
+        assert execution.json()["state"] == "blocked"
+        assert execution.json()["accounts"] == []
         response = await client.get("/api/opportunities", params={"exchange": "binance"})
         assert response.status_code == 200
         assert response.json()["items"][0]["spot_ask"] == "100"

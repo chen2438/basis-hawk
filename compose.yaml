@@ -50,6 +50,25 @@ services:
     tmpfs: [/tmp]
     networks: [backend]
 
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      BASIS_HAWK_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      BASIS_HAWK_LOG_LEVEL: ${BASIS_HAWK_LOG_LEVEL:-INFO}
+      BASIS_HAWK_HTTP_TIMEOUT_SECONDS: ${BASIS_HAWK_HTTP_TIMEOUT_SECONDS:-10}
+      BASIS_HAWK_CREDENTIAL_MASTER_KEY: ${BASIS_HAWK_CREDENTIAL_MASTER_KEY}
+    command: ["basis-hawk", "worker"]
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    networks: [backend]
+
   caddy:
     image: caddy:2.10-alpine
     restart: unless-stopped
