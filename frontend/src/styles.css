@@ -432,6 +432,19 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
 .strategy-json { overflow: hidden; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
 .strategy-json header { display: flex; padding: 14px 16px; border-bottom: 1px solid var(--line); justify-content: space-between; }
 .strategy-json pre { max-height: 470px; margin: 0; padding: 18px; overflow: auto; color: #345266; font-size: 11px; background: #f8fbfa; }
+.strategy-editor { margin: 18px 0; overflow: hidden; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
+.strategy-editor > header { display: flex; padding: 16px 18px; background: #f8fbfa; border-bottom: 1px solid var(--line); align-items: center; justify-content: space-between; }
+.strategy-editor h3, .strategy-editor h4, .strategy-editor p { margin: 0; }
+.strategy-editor h3 { color: #263d50; font-size: 13px; }
+.strategy-editor h4 { margin-bottom: 11px; color: var(--accent-dark); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+.strategy-editor p { margin-top: 5px; color: var(--muted); font-size: 9px; }
+.strategy-editor > section { padding: 15px 18px; border-bottom: 1px solid var(--line); }
+.strategy-field-grid { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 11px; }
+.strategy-field-grid > label { color: var(--muted); font-size: 9px; }
+.strategy-field-grid input, .strategy-field-grid select { display: block; width: 100%; margin-top: 6px; }
+.exchange-checks { display: flex; grid-column: span 3; gap: 14px; min-height: 37px; align-items: center; }
+.exchange-checks label { color: #344e5f; font-size: 10px; white-space: nowrap; }
+.exchange-checks input { display: inline-block; width: auto; margin: 0 5px 0 0; vertical-align: middle; }
 
 @media (max-width: 1250px) {
   .workspace { grid-template-columns: 1fr 330px; }
@@ -442,4 +455,6 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
   .transfer-form > div { grid-column: 1 / -1; }
   .trade-form { grid-template-columns: repeat(3, 1fr); }
   .trade-form > div { grid-column: 1 / -1; }
+  .strategy-field-grid { grid-template-columns: repeat(2, 1fr); }
+  .exchange-checks { grid-column: 1 / -1; flex-wrap: wrap; }
 }

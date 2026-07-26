@@ -2,6 +2,7 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import type {
   AccountSnapshot,
+  AutoStrategyConfig,
   AutomationStatus,
   CredentialSummary,
   Environment,
@@ -126,7 +127,12 @@ export function OperationsPanel({
           busy={busy}
           action={action}
         />}
-        {tab === "automation" && <AutomationView automation={automation} busy={busy} action={action} />}
+        {tab === "automation" && <AutomationView
+          automation={automation}
+          execution={execution}
+          busy={busy}
+          action={action}
+        />}
       </div>
     </section>
   </div>;
@@ -475,15 +481,39 @@ function TransfersView({
 
 function AutomationView({
   automation,
+  execution,
   busy,
   action,
 }: {
   automation: AutomationStatus | null;
+  execution: ExecutionStatus | null;
   busy: boolean;
   action: (operation: () => Promise<unknown>) => Promise<void>;
 }) {
+  const [form, setForm] = useState<AutoStrategyConfig>(() => strategyForm());
+  useEffect(() => {
+    setForm(strategyForm(automation?.latest_strategy?.config));
+  }, [automation?.latest_strategy?.id]);
   if (!automation) return <p className="loading-note">正在读取自动策略…</p>;
-  const strategy = automation.active_strategy ?? automation.latest_strategy;
+  const strategy = automation.latest_strategy;
+  const save = (event: FormEvent) => {
+    event.preventDefault();
+    if (!window.confirm("确认保存为新的不可变策略版本？保存不会自动启用交易。")) return;
+    void action(() => api.saveAutomationConfig(form));
+  };
+  const setDecimal = (name: keyof AutoStrategyConfig, value: string) =>
+    setForm({ ...form, [name]: value });
+  const setInteger = (name: keyof AutoStrategyConfig, value: string) =>
+    setForm({ ...form, [name]: Number(value) });
+  const toggleExchange = (exchange: Exchange) => {
+    const selected = form.enabled_exchanges.includes(exchange);
+    setForm({
+      ...form,
+      enabled_exchanges: selected
+        ? form.enabled_exchanges.filter((item) => item !== exchange)
+        : [...form.enabled_exchanges, exchange],
+    });
+  };
   return <>
     <div className="ops-summary">
       <div><span>自动状态</span><strong className={`state-text ${automation.state}`}>{automation.state}</strong></div>
@@ -493,8 +523,10 @@ function AutomationView({
     <div className="safety-callout"><strong>状态说明</strong><p>{automation.reason}</p>
       <div className="inline-actions">
         {automation.state === "enabled" ? <button className="button danger" disabled={busy} onClick={() => void action(() => api.pauseAutomation("paused from web console"))}>暂停自动交易</button>
-          : automation.active_strategy ? <button className="button primary" disabled={busy} onClick={() => void action(api.resumeAutomation)}>恢复自动交易</button>
-            : <button className="button primary" disabled={busy || !strategy} onClick={() => {
+          : automation.state === "paused" && automation.active_strategy ? <button className="button primary" disabled={busy || execution?.state !== "ready"} onClick={() => {
+            if (window.confirm(`确认恢复策略版本 ${automation.active_strategy?.version}？`)) void action(api.resumeAutomation);
+          }}>恢复自动交易</button>
+            : <button className="button primary" disabled={busy || !strategy || execution?.state !== "ready"} onClick={() => {
               if (strategy && window.confirm(`确认启用策略版本 ${strategy.version}？`)) void action(() => api.enableAutomation(strategy.id));
             }}>启用最新策略</button>}
         <button className="button secondary" disabled={busy || automation.state === "disabled"} onClick={() => {
@@ -502,7 +534,87 @@ function AutomationView({
         }}>禁用</button>
       </div>
     </div>
-    {strategy ? <article className="strategy-json"><header><strong>策略版本 {strategy.version}</strong><span>{strategy.environment.toUpperCase()}</span></header><pre>{JSON.stringify(strategy.config, null, 2)}</pre></article>
-      : <div className="empty">尚未创建自动策略版本</div>}
+    {execution?.state !== "ready" && <p className="loading-note">当前全局执行不是 ready：可以保存新版本，但不能启用或恢复自动交易。</p>}
+    <form className="strategy-editor" onSubmit={save}>
+      <header><div><h3>自动策略完整配置</h3><p>比例均填写小数，例如 0.10 表示 10%。每次保存都会创建新版本，不修改历史版本。</p></div>
+        <button className="button secondary" disabled={busy || !form.enabled_exchanges.length}>保存新版本</button>
+      </header>
+      <section>
+        <h4>环境与交易所</h4>
+        <div className="strategy-field-grid">
+          <label>环境<select value={form.environment} onChange={(event) => setForm({ ...form, environment: event.target.value as Environment })}><option value="live">LIVE 实盘</option><option value="sandbox">SANDBOX</option></select></label>
+          <div className="exchange-checks">{exchanges.map((exchange) => <label key={exchange}><input type="checkbox" checked={form.enabled_exchanges.includes(exchange)} onChange={() => toggleExchange(exchange)} />{exchangeNames[exchange]}</label>)}</div>
+        </div>
+      </section>
+      <StrategyFields title="资金与仓位" fields={[
+        ["leverage", "杠杆", "number"], ["notional_per_trade", "每笔名义 USDT"], ["per_exchange_max_exposure", "单所最大敞口"],
+        ["global_max_exposure", "全局最大敞口"], ["max_concurrent_positions", "最大并发仓位", "number"],
+        ["minimum_two_leg_notional", "两腿最低成交额"], ["book_capacity_multiple", "盘口容量倍数"], ["daily_max_loss", "UTC 日最大亏损"],
+      ]} form={form} setDecimal={setDecimal} setInteger={setInteger} />
+      <StrategyFields title="开仓门槛" fields={[
+        ["minimum_current_apr", "当前最低 APR"], ["minimum_apr_24h", "24h 最低 APR"], ["minimum_apr_7d", "7d 最低 APR"],
+        ["minimum_net_return", "最低净收益"], ["maximum_opening_basis", "最大开仓基差"], ["normal_max_slippage", "普通最大滑点"],
+        ["minimum_liquidation_buffer", "最低清算缓冲"],
+      ]} form={form} setDecimal={setDecimal} setInteger={setInteger} />
+      <StrategyFields title="退出与时间" fields={[
+        ["minimum_reentry_minutes", "最短重入分钟", "number"], ["maximum_holding_hours", "最长持有小时", "number"],
+        ["close_funding_rate_below", "费率低于此值平仓"], ["close_net_return_below", "净收益低于此值平仓"],
+        ["close_basis_above", "平仓基差高于此值"], ["take_profit_usdt", "止盈 USDT"], ["stop_loss_usdt", "止损 USDT"],
+        ["emergency_max_slippage", "紧急最大滑点"],
+      ]} form={form} setDecimal={setDecimal} setInteger={setInteger} />
+    </form>
+    {strategy ? <article className="strategy-json"><header><strong>最新策略版本 {strategy.version}</strong><span>{strategy.environment.toUpperCase()} · {strategy.created_by}</span></header><pre>{JSON.stringify(strategy.config, null, 2)}</pre></article>
+      : <div className="empty">尚未创建自动策略版本；自动交易保持 disabled。</div>}
   </>;
+}
+
+type StrategyField = [keyof AutoStrategyConfig, string, "number"?];
+
+function StrategyFields({
+  title,
+  fields,
+  form,
+  setDecimal,
+  setInteger,
+}: {
+  title: string;
+  fields: StrategyField[];
+  form: AutoStrategyConfig;
+  setDecimal: (name: keyof AutoStrategyConfig, value: string) => void;
+  setInteger: (name: keyof AutoStrategyConfig, value: string) => void;
+}) {
+  return <section><h4>{title}</h4><div className="strategy-field-grid">{fields.map(([name, label, type]) =>
+    <label key={name}>{label}<input required type={type ?? "text"} step="any" value={String(form[name])}
+      onChange={(event) => type === "number" ? setInteger(name, event.target.value) : setDecimal(name, event.target.value)} /></label>,
+  )}</div></section>;
+}
+
+function strategyForm(value?: AutoStrategyConfig): AutoStrategyConfig {
+  return value ? { ...value, enabled_exchanges: [...value.enabled_exchanges] } : {
+    environment: "live",
+    enabled_exchanges: ["binance"],
+    leverage: 1,
+    notional_per_trade: "100",
+    per_exchange_max_exposure: "500",
+    global_max_exposure: "1000",
+    max_concurrent_positions: 5,
+    minimum_current_apr: "0.10",
+    minimum_apr_24h: "0.08",
+    minimum_apr_7d: "0.05",
+    minimum_net_return: "0.005",
+    maximum_opening_basis: "0.02",
+    minimum_two_leg_notional: "50",
+    book_capacity_multiple: "2",
+    normal_max_slippage: "0.001",
+    emergency_max_slippage: "0.01",
+    daily_max_loss: "50",
+    minimum_reentry_minutes: 60,
+    maximum_holding_hours: 720,
+    minimum_liquidation_buffer: "0.20",
+    close_funding_rate_below: "0",
+    close_net_return_below: "0.001",
+    close_basis_above: "0.03",
+    take_profit_usdt: "25",
+    stop_loss_usdt: "20",
+  };
 }

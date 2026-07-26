@@ -62,4 +62,26 @@ describe("Basis Hawk dashboard", () => {
     expect((screen.getByRole("button", { name: "生成开仓预览" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/先生成 15 秒预览票据/)).toBeTruthy();
   });
+
+  it("shows every automatic strategy risk group without enabling by default", async () => {
+    render(<App />);
+    const user = userEvent.setup();
+    const confirmation = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await user.click(await screen.findByRole("button", { name: "运营控制台" }));
+    await user.click(await screen.findByRole("button", { name: "自动策略" }));
+    expect(screen.getByText("自动策略完整配置")).toBeTruthy();
+    expect(screen.getByText("资金与仓位")).toBeTruthy();
+    expect(screen.getByText("开仓门槛")).toBeTruthy();
+    expect(screen.getByText("退出与时间")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "启用最新策略" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/自动交易保持 disabled/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "保存新版本" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      "/api/automation/config",
+      expect.objectContaining({ method: "PUT" }),
+    ));
+    const saveCall = vi.mocked(fetch).mock.calls.find(([url]) => url === "/api/automation/config");
+    expect(JSON.parse(String((saveCall?.[1] as RequestInit).body)).enabled_exchanges).toEqual(["binance"]);
+    confirmation.mockRestore();
+  });
 });

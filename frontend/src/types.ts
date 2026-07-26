@@ -129,11 +129,39 @@ export interface InternalTransfer {
   completed_at: string | null;
 }
 
+export interface AutoStrategyConfig {
+  environment: Environment;
+  enabled_exchanges: Exchange[];
+  leverage: number;
+  notional_per_trade: string;
+  per_exchange_max_exposure: string;
+  global_max_exposure: string;
+  max_concurrent_positions: number;
+  minimum_current_apr: string;
+  minimum_apr_24h: string;
+  minimum_apr_7d: string;
+  minimum_net_return: string;
+  maximum_opening_basis: string;
+  minimum_two_leg_notional: string;
+  book_capacity_multiple: string;
+  normal_max_slippage: string;
+  emergency_max_slippage: string;
+  daily_max_loss: string;
+  minimum_reentry_minutes: number;
+  maximum_holding_hours: number;
+  minimum_liquidation_buffer: string;
+  close_funding_rate_below: string;
+  close_net_return_below: string;
+  close_basis_above: string;
+  take_profit_usdt: string;
+  stop_loss_usdt: string;
+}
+
 export interface StrategySummary {
   id: string;
   version: number;
   environment: Environment;
-  config: Record<string, unknown>;
+  config: AutoStrategyConfig;
   created_by: string;
   created_at: string;
 }

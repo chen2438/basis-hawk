@@ -1,5 +1,6 @@
 import type {
   AccountSnapshot,
+  AutoStrategyConfig,
   AutomationStatus,
   CredentialSummary,
   Environment,
@@ -99,6 +100,11 @@ export const api = {
     body: JSON.stringify(value),
   }),
   automation: () => request<AutomationStatus>("/api/automation"),
+  saveAutomationConfig: (value: AutoStrategyConfig) =>
+    request<{ strategy: AutomationStatus["latest_strategy"] }>("/api/automation/config", {
+      method: "PUT",
+      body: JSON.stringify(value),
+    }),
   enableAutomation: (strategyId: string) => request<AutomationStatus>("/api/automation/enable", {
     method: "POST",
     body: JSON.stringify({ strategy_id: strategyId, confirmed: true }),
