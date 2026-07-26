@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import timedelta
 
 from pydantic import BaseModel, ConfigDict
 
@@ -95,7 +96,32 @@ class ReconciliationService:
                     client.snapshot(),
                     client.trading_state(),
                 )
-                reasons = ["fills and private event streams have not been reconciled yet"]
+                reasons = ["private event streams have not been connected yet"]
+                fill_reconciliation_complete = True
+                fill_count = 0
+                local_legs = await self.database.order_legs_for_reconciliation(
+                    exchange=summary.exchange.value,
+                    environment=summary.environment.value,
+                )
+                for leg in local_legs:
+                    batch = await client.fills_for_order(
+                        market=leg.market,
+                        symbol=leg.symbol,
+                        exchange_order_id=leg.exchange_order_id,
+                        client_order_id=leg.client_order_id,
+                        since=leg.created_at - timedelta(minutes=5),
+                    )
+                    await self.database.persist_remote_fills(
+                        order_leg_id=leg.id,
+                        fills=batch.fills,
+                    )
+                    fill_count += len(batch.fills)
+                    if not batch.complete:
+                        fill_reconciliation_complete = False
+                        reasons.append(
+                            batch.incomplete_reason
+                            or "remote order fills are incomplete"
+                        )
                 if not trading_state.complete:
                     reasons.append(
                         trading_state.incomplete_reason or "remote trading state is incomplete"
@@ -115,6 +141,8 @@ class ReconciliationService:
                     reason="; ".join(reasons),
                     snapshot=snapshot,
                     trading_state=trading_state,
+                    fill_reconciliation_complete=fill_reconciliation_complete,
+                    fill_count=fill_count,
                 )
                 blocked += 1
             except Exception:

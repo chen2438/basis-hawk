@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     Boolean,
@@ -34,6 +34,9 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from basis_hawk.models import FundingObservation, InstrumentPair, Opportunity, ScannerSettings
+
+if TYPE_CHECKING:
+    from basis_hawk.accounts import RemoteFill
 
 
 class Base(DeclarativeBase):
@@ -156,8 +159,13 @@ class AccountReconciliationRow(Base):
         nullable=True,
     )
     trading_state_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    fill_reconciliation_complete: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+    )
     open_order_count: Mapped[int] = mapped_column(Integer, default=0)
     position_count: Mapped[int] = mapped_column(Integer, default=0)
+    fill_count: Mapped[int] = mapped_column(Integer, default=0)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -277,13 +285,20 @@ class FillRow(Base):
         ForeignKey("order_legs.id", ondelete="CASCADE"),
         index=True,
     )
-    exchange_trade_id: Mapped[str] = mapped_column(String(100), unique=True)
+    exchange_trade_id: Mapped[str] = mapped_column(String(100))
     quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     fee_amount: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     fee_asset: Mapped[str] = mapped_column(String(40))
     liquidity: Mapped[str] = mapped_column(String(20))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint(
+            "order_leg_id",
+            "exchange_trade_id",
+            name="uq_fill_leg_exchange_trade",
+        ),
+    )
 
 
 class PairedPositionRow(Base):
@@ -325,6 +340,10 @@ class PairedPositionRow(Base):
 
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _numeric_equal(left: Decimal, right: Decimal) -> bool:
+    return abs(left - right) <= Decimal("0.000000000000001")
 
 
 class Database:
@@ -375,6 +394,8 @@ class Database:
         reason: str,
         snapshot: Any | None = None,
         trading_state: Any | None = None,
+        fill_reconciliation_complete: bool = False,
+        fill_count: int = 0,
     ) -> None:
         async with self.sessions() as session:
             snapshot_id: str | None = None
@@ -445,8 +466,10 @@ class Database:
                     reason=reason,
                     snapshot_id=snapshot_id,
                     trading_state_complete=state_complete,
+                    fill_reconciliation_complete=fill_reconciliation_complete,
                     open_order_count=open_order_count,
                     position_count=position_count,
+                    fill_count=fill_count,
                     checked_at=checked_at,
                 )
                 session.add(row)
@@ -455,8 +478,10 @@ class Database:
                 row.reason = reason
                 row.snapshot_id = snapshot_id
                 row.trading_state_complete = state_complete
+                row.fill_reconciliation_complete = fill_reconciliation_complete
                 row.open_order_count = open_order_count
                 row.position_count = position_count
+                row.fill_count = fill_count
                 row.checked_at = checked_at
             await session.commit()
 
@@ -634,6 +659,142 @@ class Database:
                 )
             )
             return row, legs
+
+    async def order_legs_for_reconciliation(
+        self,
+        *,
+        exchange: str,
+        environment: str,
+    ) -> list[OrderLegRow]:
+        async with self.sessions() as session:
+            return list(
+                await session.scalars(
+                    select(OrderLegRow)
+                    .join(
+                        TradeIntentRow,
+                        OrderLegRow.trade_intent_id == TradeIntentRow.id,
+                    )
+                    .where(
+                        TradeIntentRow.exchange == exchange,
+                        TradeIntentRow.environment == environment,
+                        TradeIntentRow.status.not_in({"closed", "failed"}),
+                    )
+                    .order_by(OrderLegRow.created_at, OrderLegRow.id)
+                )
+            )
+
+    async def persist_remote_fills(
+        self,
+        *,
+        order_leg_id: str,
+        fills: list[RemoteFill],
+    ) -> int:
+        async with self.sessions() as session:
+            leg = await session.scalar(
+                select(OrderLegRow)
+                .where(OrderLegRow.id == order_leg_id)
+                .with_for_update()
+            )
+            if leg is None:
+                raise ValueError("order leg was not found")
+            for item in fills:
+                if not item.exchange_trade_id:
+                    raise ValueError("remote fill is missing an exchange trade ID")
+                if item.quantity <= 0 or item.price <= 0:
+                    raise ValueError("remote fill quantity and price must be positive")
+                if item.occurred_at < _utc(leg.created_at) - timedelta(minutes=5):
+                    raise ValueError("remote fill predates the local order leg")
+                if item.market != leg.market or item.symbol != leg.symbol:
+                    raise ValueError("remote fill does not match the local order leg")
+                if item.side != leg.side:
+                    raise ValueError("remote fill side does not match the local order leg")
+                if item.client_order_id not in {None, leg.client_order_id}:
+                    raise ValueError(
+                        "remote fill client order ID does not match the local order leg"
+                    )
+                if (
+                    leg.exchange_order_id is not None
+                    and item.exchange_order_id != leg.exchange_order_id
+                ):
+                    raise ValueError(
+                        "remote fill exchange order ID does not match the local order leg"
+                    )
+            exchange_order_ids = {
+                item.exchange_order_id for item in fills if item.exchange_order_id
+            }
+            if leg.exchange_order_id is None and exchange_order_ids:
+                if len(exchange_order_ids) != 1:
+                    raise ValueError("remote fills contain multiple exchange order IDs")
+                leg.exchange_order_id = exchange_order_ids.pop()
+            existing_rows = list(
+                await session.scalars(
+                    select(FillRow).where(FillRow.order_leg_id == leg.id)
+                )
+            )
+            existing_by_trade = {
+                item.exchange_trade_id: item for item in existing_rows
+            }
+            for item in fills:
+                existing = existing_by_trade.get(item.exchange_trade_id)
+                if existing is not None and (
+                    not _numeric_equal(existing.quantity, item.quantity)
+                    or not _numeric_equal(existing.price, item.price)
+                    or not _numeric_equal(existing.fee_amount, item.fee_amount)
+                    or existing.fee_asset != item.fee_asset
+                    or existing.liquidity != item.liquidity
+                    or _utc(existing.occurred_at) != _utc(item.occurred_at)
+                ):
+                    raise ValueError("remote fill changed after it was persisted")
+            new_rows: list[FillRow] = []
+            seen_ids = set(existing_by_trade)
+            for item in fills:
+                if item.exchange_trade_id in seen_ids:
+                    continue
+                new_rows.append(
+                    FillRow(
+                        id=str(uuid.uuid4()),
+                        order_leg_id=leg.id,
+                        exchange_trade_id=item.exchange_trade_id,
+                        quantity=item.quantity,
+                        price=item.price,
+                        fee_amount=item.fee_amount,
+                        fee_asset=item.fee_asset,
+                        liquidity=item.liquidity,
+                        occurred_at=item.occurred_at,
+                    )
+                )
+                seen_ids.add(item.exchange_trade_id)
+            session.add_all(new_rows)
+            await session.flush()
+            filled_quantity = (
+                await session.scalar(
+                    select(func.sum(FillRow.quantity)).where(
+                        FillRow.order_leg_id == leg.id
+                    )
+                )
+                or Decimal("0")
+            )
+            if filled_quantity > leg.quantity:
+                raise ValueError("remote fills exceed the local order quantity")
+            filled_notional = (
+                await session.scalar(
+                    select(func.sum(FillRow.quantity * FillRow.price)).where(
+                        FillRow.order_leg_id == leg.id
+                    )
+                )
+                or Decimal("0")
+            )
+            leg.filled_quantity = filled_quantity
+            leg.average_price = (
+                filled_notional / filled_quantity if filled_quantity > 0 else None
+            )
+            if filled_quantity >= leg.quantity:
+                leg.status = "filled"
+            elif filled_quantity > 0:
+                leg.status = "partially_filled"
+            leg.updated_at = datetime.now(UTC)
+            await session.commit()
+            return len(new_rows)
 
     async def list_trade_intents(self, *, limit: int = 100) -> list[TradeIntentRow]:
         async with self.sessions() as session:

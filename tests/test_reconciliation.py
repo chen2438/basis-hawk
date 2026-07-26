@@ -1,3 +1,4 @@
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -7,6 +8,8 @@ from basis_hawk.accounts import (
     AccountSnapshot,
     PositionMode,
     PrivateRequestError,
+    RemoteFill,
+    RemoteFillBatch,
     RemoteOrder,
     RemotePosition,
     RemoteTradingState,
@@ -27,8 +30,14 @@ from basis_hawk.storage import (
 
 
 class FakeAccountClient:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        fills: dict[str, list[RemoteFill]] | None = None,
+    ) -> None:
         self.fail = fail
+        self.fills = fills or {}
         self.closed = False
 
     async def snapshot(self) -> AccountSnapshot:
@@ -79,6 +88,20 @@ class FakeAccountClient:
                     isolated=True,
                 )
             ],
+            complete=True,
+        )
+
+    async def fills_for_order(
+        self,
+        *,
+        market: str,
+        symbol: str,
+        exchange_order_id: str | None,
+        client_order_id: str | None,
+        since: datetime,
+    ) -> RemoteFillBatch:
+        return RemoteFillBatch(
+            fills=self.fills.get(client_order_id or "", []),
             complete=True,
         )
 
@@ -155,6 +178,93 @@ async def test_reconciliation_failure_is_persisted_without_exception_details() -
     assert states[0].reason == "private account reconciliation failed"
     assert "sensitive" not in states[0].reason
     assert client.closed is True
+    await database.close()
+
+
+async def test_reconciliation_persists_remote_fills_idempotently() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials = await _credentials(database)
+    intent_id = str(uuid.uuid4())
+    now = datetime(2026, 7, 26, 18, 0, tzinfo=UTC)
+    _, legs, _ = await database.create_trade_intent(
+        intent={
+            "id": intent_id,
+            "idempotency_key": str(uuid.uuid4()),
+            "request_fingerprint": "a" * 64,
+            "exchange": "binance",
+            "environment": "live",
+            "base_asset": "ORDER",
+            "action": "open",
+            "status": "executing",
+            "requested_notional": Decimal("1"),
+            "base_quantity": Decimal("20"),
+            "spot_fee_rate": Decimal("0.001"),
+            "perp_fee_rate": Decimal("0.0005"),
+            "market_observed_at": now,
+            "config_version": "b" * 64,
+            "version": 1,
+            "created_at": now,
+            "updated_at": now,
+        },
+        legs=[
+            {
+                "id": str(uuid.uuid4()),
+                "trade_intent_id": intent_id,
+                "leg": "spot",
+                "market": "spot",
+                "symbol": "ORDERUSDT",
+                "side": "buy",
+                "client_order_id": "bh-live-s",
+                "exchange_order_id": "remote-1",
+                "status": "acknowledged",
+                "quantity": Decimal("20"),
+                "limit_price": Decimal("0.05"),
+                "filled_quantity": Decimal("0"),
+                "reduce_only": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+        ],
+    )
+    remote_fill = RemoteFill(
+        exchange_trade_id="trade-1",
+        exchange_order_id="remote-1",
+        client_order_id="bh-live-s",
+        market="spot",
+        symbol="ORDERUSDT",
+        side="buy",
+        quantity=Decimal("20"),
+        price=Decimal("0.049"),
+        fee_amount=Decimal("0.001"),
+        fee_asset="ORDER",
+        liquidity="taker",
+        occurred_at=now,
+    )
+    client = FakeAccountClient(fills={"bh-live-s": [remote_fill]})
+    reconciler = ReconciliationService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    )
+
+    await reconciler.run_once()
+    await reconciler.run_once()
+
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    assert stored[1][0].status == "filled"
+    assert stored[1][0].filled_quantity == Decimal("20")
+    assert stored[1][0].average_price is not None
+    assert stored[1][0].average_price.quantize(Decimal("0.001")) == Decimal(
+        "0.049"
+    )
+    fills = await database.fills_for_intent(intent_id)
+    assert len(fills) == 1
+    assert fills[0].exchange_trade_id == "trade-1"
+    states = await database.reconciliation_states()
+    assert states[0].fill_reconciliation_complete is True
+    assert states[0].fill_count == 1
     await database.close()
 
 
