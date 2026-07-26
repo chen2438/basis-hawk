@@ -75,9 +75,7 @@ async def test_paper_intent_is_persisted_before_execution_and_idempotent() -> No
         ("perp", "sell"),
     }
     assert all(leg.client_order_id.startswith("bh-") for leg in first.legs)
-    assert [row.id for row in await database.recoverable_trade_intents()] == [
-        first.id
-    ]
+    assert [row.id for row in await database.recoverable_trade_intents()] == [first.id]
 
     with pytest.raises(IdempotencyConflict):
         await ledger.plan_paper_open(
@@ -148,9 +146,7 @@ async def test_paper_executor_atomically_fills_both_legs_and_opens_position() ->
     positions = await ledger.positions(status="open")
     assert len(positions) == 1
     assert positions[0].quantity == Decimal("2000")
-    assert positions[0].opening_fees_usdt.quantize(Decimal("0.001")) == Decimal(
-        "0.151"
-    )
+    assert positions[0].opening_fees_usdt.quantize(Decimal("0.001")) == Decimal("0.151")
 
     close_key = uuid.uuid4()
     close_intent, close_created = await ledger.plan_paper_close(
@@ -178,13 +174,140 @@ async def test_paper_executor_atomically_fills_both_legs_and_opens_position() ->
     assert closed_result.executed == 1
     assert closed_position.closing_intent_id == close_intent.id
     assert closed_position.closing_fees_usdt is not None
-    assert closed_position.closing_fees_usdt.quantize(
-        Decimal("0.001")
-    ) == Decimal("0.150")
+    assert closed_position.closing_fees_usdt.quantize(Decimal("0.001")) == Decimal("0.150")
     assert closed_position.realized_pnl_usdt is not None
-    assert closed_position.realized_pnl_usdt.quantize(
-        Decimal("0.001")
-    ) == Decimal("-4.301")
+    assert closed_position.realized_pnl_usdt.quantize(Decimal("0.001")) == Decimal("-4.301")
+    await database.close()
+
+
+async def test_paper_executor_compensates_excess_partial_fill() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = TradeLedger(database)
+    intent, _ = await ledger.plan_paper_open(
+        opportunity=_opportunity(),
+        notional_usdt=Decimal("100"),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+    executor = PaperExecutionService(
+        database,
+        fill_ratios={"spot": Decimal("1"), "perp": Decimal("0.5")},
+    )
+
+    result = await executor.run_once()
+
+    assert result.executed == 1
+    assert result.compensated == 1
+    assert result.manual_review == 0
+    executed = await ledger.get(intent.id)
+    assert executed is not None
+    assert executed.status == TradeIntentStatus.HEDGED
+    compensation = next(leg for leg in executed.legs if leg.leg == "spot_compensation")
+    assert compensation.side == "sell"
+    assert compensation.quantity == Decimal("1000")
+    assert compensation.status == "filled"
+    assert compensation.reduce_only is False
+    position = (await ledger.positions(status="open"))[0]
+    assert position.quantity == Decimal("1000")
+    assert position.opening_fees_usdt.quantize(Decimal("0.0001")) == Decimal("0.1755")
+    assert len(await ledger.fills(intent.id)) == 3
+    assert (await executor.run_once()).executed == 0
+    await database.close()
+
+
+async def test_paper_compensation_recovers_after_worker_restart() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = TradeLedger(database)
+    intent, _ = await ledger.plan_paper_open(
+        opportunity=_opportunity(),
+        notional_usdt=Decimal("100"),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+    recorded = await database.record_paper_open_fills(
+        intent_id=intent.id,
+        spot_fill_quantity=Decimal("500"),
+        perp_fill_quantity=Decimal("2000"),
+    )
+    assert recorded is not None
+    assert recorded[0].status == TradeIntentStatus.COMPENSATING
+
+    restarted = PaperExecutionService(database)
+    result = await restarted.run_once()
+
+    assert result.executed == 1
+    assert result.compensated == 1
+    executed = await ledger.get(intent.id)
+    assert executed is not None
+    compensation = next(leg for leg in executed.legs if leg.leg == "perp_compensation")
+    assert compensation.side == "buy"
+    assert compensation.reduce_only is True
+    assert compensation.status == "filled"
+    assert (await ledger.positions(status="open"))[0].quantity == Decimal("500")
+    await database.close()
+
+
+async def test_failed_paper_compensation_pauses_execution_for_manual_review() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = TradeLedger(database)
+    intent, _ = await ledger.plan_paper_open(
+        opportunity=_opportunity(),
+        notional_usdt=Decimal("100"),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+    executor = PaperExecutionService(
+        database,
+        fill_ratios={"spot": Decimal("1"), "perp": Decimal("0")},
+        compensation_succeeds=False,
+    )
+
+    result = await executor.run_once()
+
+    assert result.executed == 1
+    assert result.compensated == 0
+    assert result.manual_review == 1
+    executed = await ledger.get(intent.id)
+    assert executed is not None
+    assert executed.status == TradeIntentStatus.MANUAL_REVIEW
+    assert (await ledger.positions(status="open")) == []
+    control = await database.execution_control()
+    assert control is not None
+    assert control.state == "paused"
+    assert "compensation failed" in control.reason
+    await database.close()
+
+
+async def test_successful_single_leg_compensation_leaves_no_exposure() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = TradeLedger(database)
+    intent, _ = await ledger.plan_paper_open(
+        opportunity=_opportunity(),
+        notional_usdt=Decimal("100"),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+    executor = PaperExecutionService(
+        database,
+        fill_ratios={"spot": Decimal("0"), "perp": Decimal("1")},
+    )
+
+    result = await executor.run_once()
+
+    assert result.compensated == 1
+    assert result.manual_review == 0
+    executed = await ledger.get(intent.id)
+    assert executed is not None
+    assert executed.status == TradeIntentStatus.FAILED
+    compensation = next(leg for leg in executed.legs if leg.leg == "perp_compensation")
+    assert compensation.side == "buy"
+    assert compensation.reduce_only is True
+    assert compensation.status == "filled"
+    assert await ledger.positions(status="open") == []
     await database.close()
 
 
@@ -194,9 +317,7 @@ async def test_paper_plan_rejects_stale_or_oversized_market_data() -> None:
     ledger = TradeLedger(database)
     with pytest.raises(TradeValidationError, match="stale"):
         await ledger.plan_paper_open(
-            opportunity=_opportunity(
-                observed_at=datetime.now(UTC) - timedelta(seconds=16)
-            ),
+            opportunity=_opportunity(observed_at=datetime.now(UTC) - timedelta(seconds=16)),
             notional_usdt=Decimal("100"),
             idempotency_key=uuid.uuid4(),
             settings=ScannerSettings(),

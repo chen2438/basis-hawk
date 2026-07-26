@@ -168,6 +168,8 @@ class PaperExecutionResult(BaseModel):
 
     examined: int
     executed: int
+    compensated: int
+    manual_review: int
 
 
 TRANSITIONS: dict[TradeIntentStatus, set[TradeIntentStatus]] = {
@@ -508,28 +510,98 @@ class TradeLedger:
 
 
 class PaperExecutionService:
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        fill_ratios: dict[str, Decimal] | None = None,
+        compensation_succeeds: bool = True,
+    ) -> None:
         self.database = database
+        self.fill_ratios = fill_ratios or {
+            "spot": Decimal("1"),
+            "perp": Decimal("1"),
+        }
+        if set(self.fill_ratios) != {"spot", "perp"} or any(
+            value < 0 or value > 1 for value in self.fill_ratios.values()
+        ):
+            raise ValueError("paper fill ratios must contain spot/perp values from 0 to 1")
+        self.compensation_succeeds = compensation_succeeds
 
     async def run_once(self) -> PaperExecutionResult:
         recoverable = await self.database.recoverable_trade_intents()
         candidates = [
             item
             for item in recoverable
-            if item.environment == "paper" and item.status == TradeIntentStatus.PLANNED.value
+            if item.environment == "paper"
+            and item.status
+            in {
+                TradeIntentStatus.PLANNED.value,
+                TradeIntentStatus.COMPENSATING.value,
+            }
         ]
         executed = 0
+        compensated = 0
+        manual_review = 0
         for item in candidates:
-            result = (
-                await self.database.execute_paper_open(intent_id=item.id)
-                if item.action == "open"
-                else await self.database.execute_paper_close(intent_id=item.id)
-                if item.action == "close"
-                else None
-            )
+            result = None
+            if item.action == "open" and item.status == TradeIntentStatus.COMPENSATING.value:
+                result = await self.database.execute_paper_compensation(
+                    intent_id=item.id,
+                    succeeds=self.compensation_succeeds,
+                )
+                if result is not None and result[2]:
+                    compensated += int(
+                        result[0].status
+                        in {
+                            TradeIntentStatus.HEDGED.value,
+                            TradeIntentStatus.FAILED.value,
+                        }
+                    )
+                    manual_review += int(result[0].status == TradeIntentStatus.MANUAL_REVIEW.value)
+            elif item.action == "open":
+                current = await self.database.trade_intent(item.id)
+                if current is not None:
+                    primary = {leg.leg: leg for leg in current[1] if leg.leg in {"spot", "perp"}}
+                    if set(primary) == {"spot", "perp"}:
+                        result = await self.database.record_paper_open_fills(
+                            intent_id=item.id,
+                            spot_fill_quantity=(
+                                primary["spot"].quantity * self.fill_ratios["spot"]
+                            ),
+                            perp_fill_quantity=(
+                                primary["perp"].quantity * self.fill_ratios["perp"]
+                            ),
+                        )
+                        if (
+                            result is not None
+                            and result[0].status == TradeIntentStatus.COMPENSATING.value
+                        ):
+                            result = await self.database.execute_paper_compensation(
+                                intent_id=item.id,
+                                succeeds=self.compensation_succeeds,
+                            )
+                            if result is not None and result[2]:
+                                compensated += int(
+                                    result[0].status
+                                    in {
+                                        TradeIntentStatus.HEDGED.value,
+                                        TradeIntentStatus.FAILED.value,
+                                    }
+                                )
+                                manual_review += int(
+                                    result[0].status == TradeIntentStatus.MANUAL_REVIEW.value
+                                )
+            elif item.action == "close":
+                result = await self.database.execute_paper_close(intent_id=item.id)
             if result is not None and result[2]:
                 executed += 1
-        return PaperExecutionResult(examined=len(candidates), executed=executed)
+        return PaperExecutionResult(
+            examined=len(candidates),
+            executed=executed,
+            compensated=compensated,
+            manual_review=manual_review,
+        )
 
 
 def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:

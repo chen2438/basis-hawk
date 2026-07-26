@@ -131,12 +131,8 @@ async def test_startup_reconciliation_persists_snapshot_but_keeps_execution_bloc
     assert states[0].position_count == 1
     assert "local intent" in states[0].reason
     async with database.sessions() as session:
-        assert (
-            await session.scalar(select(func.count(RemoteOpenOrderSnapshotRow.id)))
-        ) == 1
-        assert (
-            await session.scalar(select(func.count(RemotePositionSnapshotRow.id)))
-        ) == 1
+        assert (await session.scalar(select(func.count(RemoteOpenOrderSnapshotRow.id)))) == 1
+        assert (await session.scalar(select(func.count(RemotePositionSnapshotRow.id)))) == 1
     await database.close()
 
 
@@ -167,4 +163,24 @@ async def test_sqlite_executor_lock_is_available_for_tests() -> None:
     await database.initialize()
     async with database.executor_lock() as acquired:
         assert acquired is True
+    await database.close()
+
+
+async def test_reconciliation_does_not_clear_a_safety_pause() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    reason = "paired trade compensation failed; manual exposure review is required"
+    await database.set_execution_control(state="paused", reason=reason)
+    credentials = CredentialService(
+        database,
+        SecretCipher(SecretCipher.generate_key()),
+    )
+
+    result = await ReconciliationService(database, credentials).run_once()
+
+    assert result.execution_state == "paused"
+    control = await database.execution_control()
+    assert control is not None
+    assert control.state == "paused"
+    assert control.reason == reason
     await database.close()

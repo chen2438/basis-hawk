@@ -52,21 +52,27 @@ class ReconciliationService:
 
     async def run_once(self) -> ReconciliationResult:
         await self.paper_executor.run_once()
-        await self.database.set_execution_control(
-            state="reconciling",
-            reason="startup account reconciliation is running",
+        control = await self.database.execution_control()
+        safety_pause_reason = (
+            control.reason if control is not None and control.state == "paused" else None
         )
+        if safety_pause_reason is None:
+            await self.database.set_execution_control(
+                state="reconciling",
+                reason="startup account reconciliation is running",
+            )
         summaries = await self.credentials.list()
         if not summaries:
-            await self.database.set_execution_control(
-                state="blocked",
-                reason="no exchange accounts are configured",
-            )
+            if safety_pause_reason is None:
+                await self.database.set_execution_control(
+                    state="blocked",
+                    reason="no exchange accounts are configured",
+                )
             return ReconciliationResult(
                 accounts_checked=0,
                 accounts_blocked=0,
                 accounts_failed=0,
-                execution_state="blocked",
+                execution_state="paused" if safety_pause_reason else "blocked",
             )
 
         blocked = 0
@@ -89,13 +95,10 @@ class ReconciliationService:
                     client.snapshot(),
                     client.trading_state(),
                 )
-                reasons = [
-                    "fills and private event streams have not been reconciled yet"
-                ]
+                reasons = ["fills and private event streams have not been reconciled yet"]
                 if not trading_state.complete:
                     reasons.append(
-                        trading_state.incomplete_reason
-                        or "remote trading state is incomplete"
+                        trading_state.incomplete_reason or "remote trading state is incomplete"
                     )
                 if trading_state.open_orders:
                     reasons.append("remote open orders require local intent matching")
@@ -131,18 +134,19 @@ class ReconciliationService:
                     except Exception:
                         pass
 
-        await self.database.set_execution_control(
-            state="blocked",
-            reason=(
-                "startup reconciliation is incomplete; "
-                "order, fill, and position matching is required before execution"
-            ),
-        )
+        if safety_pause_reason is None:
+            await self.database.set_execution_control(
+                state="blocked",
+                reason=(
+                    "startup reconciliation is incomplete; "
+                    "order, fill, and position matching is required before execution"
+                ),
+            )
         return ReconciliationResult(
             accounts_checked=len(summaries),
             accounts_blocked=blocked,
             accounts_failed=failed,
-            execution_state="blocked",
+            execution_state="paused" if safety_pause_reason else "blocked",
         )
 
     async def run_forever(self, *, interval_seconds: float = 60) -> None:

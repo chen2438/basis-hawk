@@ -33,6 +33,10 @@ worker 定期写入 `account_snapshots`、`remote_open_order_snapshots`、
 私有流或 REST 查询为准。
 平仓意图通过唯一 `paired_position_id` 关联原仓位，计划时即把仓位置为 `closing`，执行事务完成后
 写入平仓费用、已实现净盈亏和 `closed_at`；同一仓位不能并发创建两个平仓意图。
+纸面开仓的双腿成交量不同时，主成交事务把意图转为 `compensating`，并新增
+`spot_compensation` 或 `perp_compensation` 订单腿。下一次 worker 运行可恢复并成交该反向腿，
+只按主订单共同成交量创建仓位；全部实际主成交与补偿费用均计入该仓位开仓费用。若补偿失败，意图转为
+`manual_review` 并原子写入全局 `paused`，普通启动对账只能保留、不能覆盖此安全暂停。
 
 可使用单次命令验证解密、签名、持久化与安全阻断：
 
