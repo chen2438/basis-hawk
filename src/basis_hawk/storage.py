@@ -203,6 +203,20 @@ class NotificationOutboxRow(Base):
     )
 
 
+class NotificationProjectionStateRow(Base):
+    __tablename__ = "notification_projection_state"
+    source_key: Mapped[str] = mapped_column(String(150), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    generation: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        CheckConstraint(
+            "generation >= 0",
+            name="ck_notification_projection_generation",
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class NotificationOutboxItem:
     id: str
@@ -3526,6 +3540,109 @@ class Database:
                 )
             )
             return [_notification_item(row) for row in rows]
+
+    async def project_notification(
+        self,
+        *,
+        source_key: str,
+        fingerprint: str,
+        notify: bool,
+        event_type: str,
+        severity: str,
+        channels: set[str],
+        subject: str,
+        body: str,
+        now: datetime | None = None,
+    ) -> bool:
+        if not source_key or len(source_key) > 150:
+            raise ValueError("notification source key must contain 1-150 characters")
+        if (
+            len(fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in fingerprint)
+        ):
+            raise ValueError("notification fingerprint must be lowercase SHA-256")
+        projected_at = now or datetime.now(UTC)
+        async with self.sessions() as session:
+            statement = select(NotificationProjectionStateRow).where(
+                NotificationProjectionStateRow.source_key == source_key
+            )
+            if self.engine.url.get_backend_name() == "postgresql":
+                statement = statement.with_for_update()
+            state = await session.scalar(statement)
+            if state is not None and state.fingerprint == fingerprint:
+                return False
+            generation = (state.generation if state is not None else 0) + 1
+            if state is None:
+                state = NotificationProjectionStateRow(
+                    source_key=source_key,
+                    fingerprint=fingerprint,
+                    generation=generation,
+                    updated_at=projected_at,
+                )
+                session.add(state)
+            else:
+                state.fingerprint = fingerprint
+                state.generation = generation
+                state.updated_at = projected_at
+            if notify:
+                if severity not in {"info", "warning", "critical"}:
+                    raise ValueError("unsupported notification severity")
+                if not channels or not channels <= {"telegram", "email"}:
+                    raise ValueError("unsupported notification channel")
+                if not event_type or len(event_type) > 100:
+                    raise ValueError(
+                        "notification event type must contain 1-100 characters"
+                    )
+                if not subject or len(subject) > 200:
+                    raise ValueError(
+                        "notification subject must contain 1-200 characters"
+                    )
+                if not body:
+                    raise ValueError("notification body is required")
+                dedupe_key = f"projection:{source_key}:{generation}"
+                session.add_all(
+                    NotificationOutboxRow(
+                        id=str(uuid.uuid4()),
+                        dedupe_key=dedupe_key,
+                        event_type=event_type,
+                        severity=severity,
+                        channel=channel,
+                        subject=subject,
+                        body=body,
+                        status="pending",
+                        attempts=0,
+                        next_attempt_at=projected_at,
+                        created_at=projected_at,
+                        updated_at=projected_at,
+                    )
+                    for channel in sorted(channels)
+                )
+            await session.commit()
+            return notify
+
+    async def notification_trade_intents(
+        self,
+        *,
+        updated_since: datetime,
+    ) -> list[TradeIntentRow]:
+        async with self.sessions() as session:
+            return list(
+                await session.scalars(
+                    select(TradeIntentRow)
+                    .where(
+                        (TradeIntentRow.updated_at >= updated_since)
+                        | TradeIntentRow.status.in_(
+                            {
+                                "planned",
+                                "executing",
+                                "compensating",
+                                "manual_review",
+                            }
+                        )
+                    )
+                    .order_by(TradeIntentRow.created_at)
+                )
+            )
 
     async def save_exchange_credential(
         self,

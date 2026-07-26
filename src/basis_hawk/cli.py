@@ -21,7 +21,10 @@ from basis_hawk.exchanges import (
     OkxAdapter,
 )
 from basis_hawk.models import Exchange
-from basis_hawk.notifications import NotificationDeliveryService
+from basis_hawk.notifications import (
+    NotificationDeliveryService,
+    NotificationProjectionService,
+)
 from basis_hawk.private_stream import PrivateStreamRegistry, PrivateStreamSupervisor
 from basis_hawk.private_stream_factory import create_private_stream_connections
 from basis_hawk.reconciliation import ReconciliationService, WorkerLockUnavailable
@@ -112,9 +115,12 @@ async def run_worker(*, once: bool) -> int:
         ),
     )
     notifications = NotificationDeliveryService.from_config(database, config)
+    notification_projection = NotificationProjectionService(database)
     try:
+        await notification_projection.run_once(emit_initial_alerts=False)
         if once:
             result = await reconciler.run_once_exclusive()
+            await notification_projection.run_once()
             delivered = await notifications.run_once()
             print(
                 "worker: reconciliation "
@@ -143,6 +149,7 @@ async def run_worker(*, once: bool) -> int:
         tasks = [
             asyncio.create_task(supervisor.run(connections)),
             asyncio.create_task(reconciler.run_forever()),
+            asyncio.create_task(notification_projection.run_forever()),
             asyncio.create_task(notifications.run_forever()),
         ]
         try:

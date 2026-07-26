@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import logging
 import smtplib
 import ssl
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from typing import Protocol
 
 import httpx
 
 from basis_hawk.config import AppConfig
-from basis_hawk.storage import Database, NotificationOutboxItem
+from basis_hawk.storage import Database, NotificationOutboxItem, TradeIntentRow
+
+logger = logging.getLogger(__name__)
 
 
 class NotificationDeliveryError(RuntimeError):
@@ -259,7 +265,12 @@ class NotificationDeliveryService:
 
     async def run_forever(self) -> None:
         while True:
-            processed = await self.run_once()
+            try:
+                processed = await self.run_once()
+            except Exception:
+                logger.warning("notification delivery iteration failed")
+                await asyncio.sleep(5)
+                continue
             if processed == 0:
                 await asyncio.sleep(1)
             else:
@@ -270,3 +281,149 @@ class NotificationDeliveryService:
             close = getattr(sender, "close", None)
             if close is not None:
                 await close()
+
+
+class NotificationProjectionService:
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def run_once(
+        self,
+        *,
+        emit_initial_alerts: bool = True,
+    ) -> int:
+        projected = 0
+        control = await self.database.execution_control()
+        if control is not None:
+            projected += int(
+                await self.database.project_notification(
+                    source_key="execution",
+                    fingerprint=_fingerprint(control.state, control.reason),
+                    notify=emit_initial_alerts
+                    and control.state in {"paused", "blocked"},
+                    event_type=f"execution.{control.state}",
+                    severity="critical",
+                    channels={"telegram", "email"},
+                    subject="Basis Hawk execution safety state",
+                    body=(
+                        f"Execution is {control.state}. "
+                        "Review system health and reconciliation before resuming."
+                    ),
+                )
+            )
+        for account in await self.database.reconciliation_states():
+            abnormal = account.status != "ready"
+            projected += int(
+                await self.database.project_notification(
+                    source_key=(
+                        f"account:{account.exchange}:{account.environment}"
+                    ),
+                    fingerprint=_fingerprint(account.status, account.reason),
+                    notify=emit_initial_alerts and abnormal,
+                    event_type=f"account.{account.status}",
+                    severity="critical",
+                    channels={"telegram", "email"},
+                    subject=(
+                        f"Basis Hawk account {account.status}: "
+                        f"{account.exchange} {account.environment}"
+                    ),
+                    body=(
+                        f"{account.exchange} {account.environment} account "
+                        f"reconciliation is {account.status}. "
+                        "Review the account health page before trading."
+                    ),
+                )
+            )
+        updated_since = datetime.now(UTC) - timedelta(hours=1)
+        for intent in await self.database.notification_trade_intents(
+            updated_since=updated_since
+        ):
+            notification = _trade_notification(intent)
+            projected += int(
+                await self.database.project_notification(
+                    source_key=f"trade:{intent.id}",
+                    fingerprint=_fingerprint(intent.status),
+                    notify=emit_initial_alerts and notification is not None,
+                    event_type=(
+                        notification[0]
+                        if notification is not None
+                        else f"trade.{intent.status}"
+                    ),
+                    severity=(
+                        notification[1]
+                        if notification is not None
+                        else "info"
+                    ),
+                    channels=(
+                        notification[2]
+                        if notification is not None
+                        else {"telegram"}
+                    ),
+                    subject=(
+                        notification[3]
+                        if notification is not None
+                        else "Basis Hawk trade update"
+                    ),
+                    body=(
+                        notification[4]
+                        if notification is not None
+                        else "Trade state updated."
+                    ),
+                )
+            )
+        return projected
+
+    async def run_forever(self) -> None:
+        while True:
+            try:
+                await self.run_once()
+            except Exception:
+                logger.warning("notification projection iteration failed")
+            await asyncio.sleep(1)
+
+
+def _fingerprint(*values: str) -> str:
+    payload = json.dumps(values, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _trade_notification(
+    intent: TradeIntentRow,
+) -> tuple[str, str, set[str], str, str] | None:
+    status = intent.status
+    exchange = intent.exchange
+    environment = intent.environment
+    base_asset = intent.base_asset
+    action = intent.action
+    label = f"{exchange} {environment} {base_asset} {action}"
+    if status in {"hedged", "closed"}:
+        return (
+            f"trade.{status}",
+            "info",
+            {"telegram"},
+            f"Basis Hawk trade {status}",
+            f"{label} completed with status {status}.",
+        )
+    if status == "compensating":
+        return (
+            "trade.imbalance",
+            "critical",
+            {"telegram", "email"},
+            "Basis Hawk fill imbalance",
+            (
+                f"{label} has imbalanced fills. A protection order is pending "
+                "and execution remains paused."
+            ),
+        )
+    if status in {"failed", "manual_review"}:
+        return (
+            f"trade.{status}",
+            "critical",
+            {"telegram", "email"},
+            f"Basis Hawk trade {status}",
+            (
+                f"{label} ended with status {status}. "
+                "Review orders, fills, and account exposure."
+            ),
+        )
+    return None
