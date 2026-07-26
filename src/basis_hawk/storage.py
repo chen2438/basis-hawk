@@ -22,7 +22,9 @@ from sqlalchemy import (
     func,
     select,
     text,
+    update,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
@@ -208,6 +210,57 @@ class ExecutionControlRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class TradeIntentRow(Base):
+    __tablename__ = "trade_intents"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(36), unique=True)
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    exchange: Mapped[str] = mapped_column(String(20), index=True)
+    environment: Mapped[str] = mapped_column(String(20))
+    base_asset: Mapped[str] = mapped_column(String(40))
+    action: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    requested_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    base_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    market_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    config_version: Mapped[str] = mapped_column(String(64))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class OrderLegRow(Base):
+    __tablename__ = "order_legs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    trade_intent_id: Mapped[str] = mapped_column(
+        ForeignKey("trade_intents.id", ondelete="CASCADE"),
+        index=True,
+    )
+    leg: Mapped[str] = mapped_column(String(20))
+    market: Mapped[str] = mapped_column(String(20))
+    symbol: Mapped[str] = mapped_column(String(100))
+    side: Mapped[str] = mapped_column(String(20))
+    client_order_id: Mapped[str] = mapped_column(String(100), unique=True)
+    exchange_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(30))
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    limit_price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    filled_quantity: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        default=Decimal("0"),
+    )
+    average_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    reduce_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("trade_intent_id", "leg", name="uq_order_leg_intent_leg"),
+    )
+
+
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
@@ -381,6 +434,116 @@ class Database:
                 )
             )
             return list(values)
+
+    async def create_trade_intent(
+        self,
+        *,
+        intent: dict[str, Any],
+        legs: list[dict[str, Any]],
+    ) -> tuple[TradeIntentRow, list[OrderLegRow], bool]:
+        async with self.sessions() as session:
+            existing = await session.scalar(
+                select(TradeIntentRow).where(
+                    TradeIntentRow.idempotency_key == intent["idempotency_key"]
+                )
+            )
+            if existing is not None:
+                existing_legs = list(
+                    await session.scalars(
+                        select(OrderLegRow)
+                        .where(OrderLegRow.trade_intent_id == existing.id)
+                        .order_by(OrderLegRow.leg)
+                    )
+                )
+                return existing, existing_legs, False
+            row = TradeIntentRow(**intent)
+            leg_rows = [OrderLegRow(**value) for value in legs]
+            session.add(row)
+            session.add_all(leg_rows)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                existing = await session.scalar(
+                    select(TradeIntentRow).where(
+                        TradeIntentRow.idempotency_key == intent["idempotency_key"]
+                    )
+                )
+                if existing is None:
+                    raise
+                existing_legs = list(
+                    await session.scalars(
+                        select(OrderLegRow)
+                        .where(OrderLegRow.trade_intent_id == existing.id)
+                        .order_by(OrderLegRow.leg)
+                    )
+                )
+                return existing, existing_legs, False
+            await session.refresh(row)
+            return row, leg_rows, True
+
+    async def trade_intent(
+        self, intent_id: str
+    ) -> tuple[TradeIntentRow, list[OrderLegRow]] | None:
+        async with self.sessions() as session:
+            row = await session.get(TradeIntentRow, intent_id)
+            if row is None:
+                return None
+            legs = list(
+                await session.scalars(
+                    select(OrderLegRow)
+                    .where(OrderLegRow.trade_intent_id == row.id)
+                    .order_by(OrderLegRow.leg)
+                )
+            )
+            return row, legs
+
+    async def list_trade_intents(self, *, limit: int = 100) -> list[TradeIntentRow]:
+        async with self.sessions() as session:
+            return list(
+                await session.scalars(
+                    select(TradeIntentRow)
+                    .order_by(TradeIntentRow.created_at.desc())
+                    .limit(limit)
+                )
+            )
+
+    async def recoverable_trade_intents(self) -> list[TradeIntentRow]:
+        terminal = {"closed", "failed"}
+        async with self.sessions() as session:
+            return list(
+                await session.scalars(
+                    select(TradeIntentRow)
+                    .where(TradeIntentRow.status.not_in(terminal))
+                    .order_by(TradeIntentRow.created_at)
+                )
+            )
+
+    async def transition_trade_intent(
+        self,
+        *,
+        intent_id: str,
+        expected_version: int,
+        status: str,
+    ) -> TradeIntentRow | None:
+        async with self.sessions() as session:
+            result = await session.execute(
+                update(TradeIntentRow)
+                .where(
+                    TradeIntentRow.id == intent_id,
+                    TradeIntentRow.version == expected_version,
+                )
+                .values(
+                    status=status,
+                    version=TradeIntentRow.version + 1,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            if not result.rowcount:
+                await session.rollback()
+                return None
+            await session.commit()
+            return await session.get(TradeIntentRow, intent_id)
 
     async def load_settings(self) -> ScannerSettings:
         async with self.sessions() as session:

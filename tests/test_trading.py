@@ -1,0 +1,140 @@
+import uuid
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import pytest
+
+from basis_hawk.models import Exchange, Opportunity, Quality, ScannerSettings
+from basis_hawk.storage import Database
+from basis_hawk.trading import (
+    IdempotencyConflict,
+    StateConflict,
+    TradeIntentStatus,
+    TradeLedger,
+    TradeValidationError,
+)
+
+
+def _opportunity(*, observed_at: datetime | None = None) -> Opportunity:
+    return Opportunity(
+        exchange=Exchange.BINANCE,
+        base_asset="ORDER",
+        spot_symbol="ORDERUSDT",
+        perp_symbol="ORDERUSDT",
+        observed_at=observed_at or datetime.now(UTC),
+        spot_ask=Decimal("0.05"),
+        perp_bid=Decimal("0.051"),
+        executable_basis=Decimal("0.02"),
+        top_book_notional=Decimal("500"),
+        current_funding_rate=Decimal("0.0001"),
+        funding_interval_hours=Decimal("8"),
+        next_funding_at=None,
+        current_apr=Decimal("0.1095"),
+        apr_24h=Decimal("0.1095"),
+        apr_7d=Decimal("0.1095"),
+        net_return=Decimal("0.006"),
+        spot_quote_volume_24h=Decimal("2000000"),
+        perp_quote_volume_24h=Decimal("3000000"),
+        spot_taker_fee=Decimal("0.001"),
+        perp_taker_fee=Decimal("0.0005"),
+        quality=Quality.HEALTHY,
+    )
+
+
+async def test_paper_intent_is_persisted_before_execution_and_idempotent() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = TradeLedger(database)
+    key = uuid.uuid4()
+    opportunity = _opportunity()
+
+    first, created = await ledger.plan_paper_open(
+        opportunity=opportunity,
+        notional_usdt=Decimal("100"),
+        idempotency_key=key,
+        settings=ScannerSettings(),
+    )
+    repeated, repeated_created = await ledger.plan_paper_open(
+        opportunity=opportunity,
+        notional_usdt=Decimal("100"),
+        idempotency_key=key,
+        settings=ScannerSettings(),
+    )
+
+    assert created is True
+    assert repeated_created is False
+    assert repeated.id == first.id
+    assert first.status == TradeIntentStatus.PLANNED
+    assert first.base_quantity == Decimal("2000")
+    assert {(leg.leg, leg.side) for leg in first.legs} == {
+        ("spot", "buy"),
+        ("perp", "sell"),
+    }
+    assert all(leg.client_order_id.startswith("bh-") for leg in first.legs)
+    assert [row.id for row in await database.recoverable_trade_intents()] == [
+        first.id
+    ]
+
+    with pytest.raises(IdempotencyConflict):
+        await ledger.plan_paper_open(
+            opportunity=opportunity,
+            notional_usdt=Decimal("101"),
+            idempotency_key=key,
+            settings=ScannerSettings(),
+        )
+    await database.close()
+
+
+async def test_trade_state_machine_uses_optimistic_versions() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = TradeLedger(database)
+    intent, _ = await ledger.plan_paper_open(
+        opportunity=_opportunity(),
+        notional_usdt=Decimal("100"),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+
+    executing = await ledger.transition(
+        intent_id=intent.id,
+        expected_version=1,
+        target=TradeIntentStatus.EXECUTING,
+    )
+    assert executing.version == 2
+    with pytest.raises(StateConflict, match="version changed"):
+        await ledger.transition(
+            intent_id=intent.id,
+            expected_version=1,
+            target=TradeIntentStatus.HEDGED,
+        )
+    with pytest.raises(StateConflict, match="cannot transition"):
+        await ledger.transition(
+            intent_id=intent.id,
+            expected_version=2,
+            target=TradeIntentStatus.CLOSED,
+        )
+    await database.close()
+
+
+async def test_paper_plan_rejects_stale_or_oversized_market_data() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = TradeLedger(database)
+    with pytest.raises(TradeValidationError, match="stale"):
+        await ledger.plan_paper_open(
+            opportunity=_opportunity(
+                observed_at=datetime.now(UTC) - timedelta(seconds=16)
+            ),
+            notional_usdt=Decimal("100"),
+            idempotency_key=uuid.uuid4(),
+            settings=ScannerSettings(),
+        )
+    with pytest.raises(TradeValidationError, match="capacity"):
+        await ledger.plan_paper_open(
+            opportunity=_opportunity(),
+            notional_usdt=Decimal("501"),
+            idempotency_key=uuid.uuid4(),
+            settings=ScannerSettings(),
+        )
+    await database.close()

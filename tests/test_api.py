@@ -1,3 +1,4 @@
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -58,6 +59,34 @@ async def test_rest_contract_and_settings() -> None:
         saved = await client.put("/api/settings", json=settings)
         assert saved.status_code == 200
         assert saved.json()["holding_period_days"] == 14
+        idempotency_key = str(uuid.uuid4())
+        planned = await client.post(
+            "/api/trades/paper/open",
+            headers={"Idempotency-Key": idempotency_key},
+            json={
+                "exchange": "binance",
+                "base_asset": "btc",
+                "notional_usdt": "100",
+            },
+        )
+        assert planned.status_code == 200
+        assert planned.json()["created"] is True
+        assert planned.json()["intent"]["status"] == "planned"
+        intent_id = planned.json()["intent"]["id"]
+        repeated = await client.post(
+            "/api/trades/paper/open",
+            headers={"Idempotency-Key": idempotency_key},
+            json={
+                "exchange": "binance",
+                "base_asset": "BTC",
+                "notional_usdt": "100",
+            },
+        )
+        assert repeated.json()["created"] is False
+        fetched = await client.get(f"/api/trades/intents/{intent_id}")
+        assert fetched.json()["intent"]["legs"][0]["client_order_id"].startswith(
+            "bh-"
+        )
     await database.close()
 
 

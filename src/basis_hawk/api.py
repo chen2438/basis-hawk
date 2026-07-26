@@ -3,9 +3,20 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
+from typing import Annotated
+from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
@@ -27,6 +38,7 @@ from basis_hawk.crypto import SecretCipher
 from basis_hawk.models import Exchange, Quality, ScannerSettings
 from basis_hawk.service import ScannerService, default_adapters
 from basis_hawk.storage import Database
+from basis_hawk.trading import IdempotencyConflict, TradeLedger, TradeValidationError
 
 SESSION_COOKIE = "basis_hawk_session"
 CSRF_COOKIE = "basis_hawk_csrf"
@@ -43,6 +55,12 @@ class CredentialRequest(BaseModel):
     api_key: SecretStr
     api_secret: SecretStr
     passphrase: SecretStr | None = None
+
+
+class PaperOpenRequest(BaseModel):
+    exchange: Exchange
+    base_asset: str = Field(min_length=1, max_length=40)
+    notional_usdt: Decimal = Field(gt=0)
 
 
 def create_app(
@@ -103,6 +121,7 @@ def create_app(
     app = FastAPI(title="Basis Hawk", version="0.1.0", lifespan=lifespan)
     app.state.scanner = scanner
     app.state.auth_service = auth_service
+    trade_ledger = TradeLedger(scanner.database)
     login_limiter = LoginAttemptLimiter()
 
     @app.middleware("http")
@@ -290,6 +309,58 @@ def create_app(
                 for item in reconciliations
             ],
         }
+
+    @app.post("/api/trades/paper/open")
+    async def plan_paper_open(
+        value: PaperOpenRequest,
+        request: Request,
+        idempotency_key: Annotated[UUID, Header(alias="Idempotency-Key")],
+    ) -> dict[str, object]:
+        base_asset = value.base_asset.strip().upper()
+        opportunity = scanner.opportunities.get(
+            f"{value.exchange.value}:{base_asset}"
+        )
+        if opportunity is None:
+            raise HTTPException(status_code=404, detail="opportunity is not available")
+        try:
+            intent, created = await trade_ledger.plan_paper_open(
+                opportunity=opportunity,
+                notional_usdt=value.notional_usdt,
+                idempotency_key=idempotency_key,
+                settings=scanner.settings,
+            )
+        except TradeValidationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except IdempotencyConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if created:
+            actor = (
+                request.state.admin.username
+                if getattr(request.state, "admin", None)
+                else "local"
+            )
+            await scanner.database.append_audit(
+                "trade.intent_planned",
+                actor=actor,
+                details={
+                    "intent_id": intent.id,
+                    "exchange": intent.exchange.value,
+                    "environment": intent.environment,
+                    "base_asset": intent.base_asset,
+                    "action": intent.action,
+                },
+            )
+        return {
+            "created": created,
+            "intent": intent.model_dump(mode="json"),
+        }
+
+    @app.get("/api/trades/intents/{intent_id}")
+    async def trade_intent(intent_id: UUID) -> dict[str, object]:
+        intent = await trade_ledger.get(str(intent_id))
+        if intent is None:
+            raise HTTPException(status_code=404, detail="trade intent was not found")
+        return {"intent": intent.model_dump(mode="json")}
 
     @app.get("/api/accounts/credentials")
     async def credential_summaries() -> dict[str, object]:
