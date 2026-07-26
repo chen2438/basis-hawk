@@ -4,6 +4,7 @@ from basis_hawk.binance_private_stream import BinancePrivateStreamConnection
 from basis_hawk.bitget_private_stream import BitgetPrivateStreamConnection
 from basis_hawk.bybit_private_stream import BybitPrivateStreamConnection
 from basis_hawk.credentials import CredentialService
+from basis_hawk.gate_private_stream import GatePrivateStreamConnection
 from basis_hawk.models import Exchange
 from basis_hawk.okx_private_stream import OkxPrivateStreamConnection
 from basis_hawk.private_stream import PrivateStreamConnection
@@ -46,6 +47,14 @@ async def create_private_stream_connections(
         elif summary.exchange == Exchange.BITGET:
             connections.append(
                 BitgetPrivateStreamConnection(
+                    secrets,
+                    summary.environment,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
+        elif summary.exchange == Exchange.GATE:
+            connections.append(
+                GatePrivateStreamConnection(
                     secrets,
                     summary.environment,
                     timeout_seconds=timeout_seconds,

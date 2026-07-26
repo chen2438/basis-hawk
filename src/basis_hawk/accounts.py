@@ -2454,6 +2454,15 @@ class GateAccountClient(PrivateAccountClient):
             trade_permission=None,
         )
 
+    async def user_id(self) -> str:
+        account = await self._get("/api/v4/futures/usdt/accounts")
+        value = str(account.get("user") or "")
+        if not value.isdigit() or int(value) <= 0:
+            raise PrivateRequestError(
+                "Gate futures account did not return a valid user identifier"
+            )
+        return value
+
     async def trading_state(self) -> RemoteTradingState:
         spot_groups, perp_orders, position_items = await _gather(
             self._get("/api/v4/spot/open_orders", page=1, limit=100),

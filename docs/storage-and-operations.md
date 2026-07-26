@@ -46,11 +46,10 @@ worker 定期写入 `account_snapshots`、`remote_open_order_snapshots`、
 只有全部三类订阅成功且心跳不超过 30 秒才视为就绪。worker 每次启动都先把旧连接状态重置为断开，
 防止把上一个已退出进程的记录当作活连接；全局状态为 `ready` 时任一私有流断开会原子切换为
 `paused`，后续必须完成 REST 对账才能恢复。表内只保存通用健康标志和时间，不保存凭据、订阅载荷或
-交易所错误原文。当前仅完成该健康状态与阻断基础，六所私有 WebSocket 的认证、续期和事件消费尚未接入。
+交易所错误原文。
 通用私有流监督器以独立任务管理每个账户连接：收到事件时记录事件心跳，空闲 10 秒时必须由连接适配器
 完成真实 ping/pong 探测后才续写健康心跳；异常会先关闭连接、写入断开状态，再以 1–30 秒指数退避
-重连。日志只记录交易所和环境，不记录异常正文、URL、签名、订阅载荷或凭据。当前监督器尚未由 worker
-创建具体交易所连接。
+重连。日志只记录交易所和环境，不记录异常正文、URL、签名、订阅载荷或凭据。
 Binance 私有连接由两条通道组成：现货使用
 `userDataStream.subscribe.signature`，USDT 永续使用 `/fapi/v1/listenKey` 后连接私有
 WebSocket，并每 30 分钟续期。只有现货签名订阅返回成功且永续 listenKey 与连接都建立后，通用监督器
@@ -74,7 +73,13 @@ Bitget 私有流连接前复用交易适配器的只读账户代际探测：UTA 
 `fill`、`position`、`account` 主题；Classic 使用 V2 域名并分别订阅现货/USDT 永续订单与成交、
 USDT 永续仓位及两类账户频道。模拟盘使用对应 `wspap` V2/V3 域名。所有实际请求频道逐项确认后才
 登记就绪，文本 `ping`/`pong` 用于空闲保活；代际不明、升级/切换中、登录或任一订阅失败均整条断开，
-绝不在 V2/V3 之间失败回退。常驻 worker 已装配 Bitget；Gate 和 MEXC 仍保持私有流阻断。
+绝不在 V2/V3 之间失败回退。常驻 worker 已装配 Bitget。
+Gate LIVE 使用现货与 USDT 永续两条私有连接。现货订阅 `spot.orders`、`spot.usertrades` 的全标的更新；
+永续先通过签名 REST 账户接口读取并验证正整数用户 ID，再订阅 `futures.orders`、
+`futures.usertrades`、`futures.positions` 的全合约更新，连接显式发送
+`X-Gate-Size-Decimal: 1` 以保留十进制合约数量。两条连接都必须通过 WebSocket 协议 ping/pong；
+任一通道断开即使整个 Gate 连接失败并由监督器重连。Gate 沙盒不满足同所现货和 USDT 永续要求，
+因此明确拒绝且不得回退到实盘。常驻 worker 已装配 Gate；MEXC 仍保持私有流阻断。
 每轮对账对每个账户独立汇总阻断原因；只有全部已配置账户都没有原因且没有请求失败，才把账户状态写为
 `ready`。写入全局 `ready` 前会再次检查每个账户的私有流心跳，避免把本轮处理中已经陈旧的连接放行。
 任一账户为 `blocked`/`error` 或已有补偿失败等安全暂停时，全局状态不会进入 `ready`。

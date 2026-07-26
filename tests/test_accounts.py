@@ -276,6 +276,7 @@ async def test_gate_account_snapshot_and_signature() -> None:
         return httpx.Response(
             200,
             json={
+                "user": 20011,
                 "available": "22",
                 "total": "23",
                 "in_dual_mode": False,
@@ -297,6 +298,7 @@ async def test_gate_account_snapshot_and_signature() -> None:
     assert snapshot.spot_usdt_available == 21
     assert snapshot.perp_usdt_equity == 23
     assert snapshot.position_mode == PositionMode.ONE_WAY
+    assert await client.user_id() == "20011"
     await http.aclose()
 
     with pytest.raises(UnsupportedEnvironmentError):
