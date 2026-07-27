@@ -74,6 +74,19 @@ export const api = {
   notificationHistory: () =>
     request<{ items: NotificationHistoryItem[] }>("/api/operations/notifications?limit=100"),
   backupStatus: () => request<BackupStatus>("/api/operations/backup"),
+  deleteBackup: (archiveName: string) =>
+    request<{ deleted: true; archive_name: string }>(
+      `/api/operations/backups/${encodeURIComponent(archiveName)}`,
+      {
+        method: "DELETE",
+        body: JSON.stringify({ confirmed: true }),
+      },
+    ),
+  pruneLogs: (retentionDays: number) =>
+    request<{ deleted_count: number; cutoff: string }>("/api/operations/logs/prune", {
+      method: "POST",
+      body: JSON.stringify({ retention_days: retentionDays, confirmed: true }),
+    }),
   testNotifications: (channels: ("telegram" | "email")[]) =>
     request<{ request_id: string; items: { id: string; channel: string; status: string }[] }>(
       "/api/operations/notifications/test",

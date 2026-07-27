@@ -3952,6 +3952,18 @@ class Database:
             rows = list(await session.scalars(statement))
             return [_notification_item(row) for row in rows]
 
+    async def prune_notification_history(self, *, before: datetime) -> int:
+        cutoff = _utc(before)
+        async with self.sessions() as session:
+            result = await session.execute(
+                delete(NotificationOutboxRow).where(
+                    NotificationOutboxRow.status.in_({"sent", "dead"}),
+                    NotificationOutboxRow.updated_at < cutoff,
+                )
+            )
+            await session.commit()
+            return int(result.rowcount or 0)
+
     async def project_notification(
         self,
         *,

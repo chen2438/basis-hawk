@@ -90,6 +90,9 @@ docker compose exec backup python3 -m basis_hawk.backup verify \
 校验先把完整归档解密到空设备以验证 AES-GCM tag，再把同一归档交给静默的 `pg_restore --list` 解析
 TOC。对于包含实际表数据的大归档，`pg_restore --list` 成功取得 TOC 后可能提前关闭标准输入；只有其
 退出码为 0 时才把该 `BrokenPipe` 视为正常，非零退出仍使校验和部署失败。对象清单不会刷满终端。
+API 以同一非 root UID 对备份卷拥有删除权限，但不持有备份密钥。Web 删除入口只接受严格命名的
+`basis-hawk-YYYYMMDDTHHMMSSZ-(daily|weekly).bhbk`，拒绝符号链接、路径片段、缺失归档和最新归档，
+并同步删除 `.sha256`；删除请求和成功结果分别进入不可修改审计。
 
 生产恢复必须先进入维护暂停并停止 `api`、`worker` 和 `backup`，先验证目标归档，再恢复到一个新的空
 数据库。工具默认拒绝非空目标；只有灾难恢复明确要清理当前数据库时，才可同时提供 `--confirmed`
@@ -396,7 +399,9 @@ API 进程重启、PostgreSQL 重启及连接池恢复、advisory lock 排他 wo
 失败都只按本次随机名称清理资源，不会连接 Compose 项目、读取真实凭据或接触交易所。CI 的
 `container-acceptance` job 会执行同一命令。
 
-API 容器只读挂载同一 `postgres_backups` 卷到 `/backups`，仅用于
-`GET /api/operations/backup` 展示归档元数据和旁路 SHA-256 文件是否存在。API 不接收
-`BASIS_HAWK_BACKUP_KEY`，因此不能解密、验证内容或恢复数据库；实际认证验证和恢复仍只允许通过专用
-备份镜像命令执行。管理员通知测试同样只创建 outbox 项，不让 API 进程直接连接 Telegram 或 SMTP。
+API 容器挂载同一 `postgres_backups` 卷，仅用于列出归档以及受控删除非最新归档和旁路 SHA-256 文件。
+API 不接收 `BASIS_HAWK_BACKUP_KEY`，因此不能解密、验证内容或恢复数据库；实际认证验证和恢复仍只允许
+通过专用备份镜像命令执行。管理员通知测试同样只创建 outbox 项，不让 API 进程直接连接 Telegram 或
+SMTP。通知日志清理只删除超过管理员指定保留期的 `sent/dead` outbox 行，不触碰待发送、发送中或重试
+记录；`audit_events` 继续不可通过应用删除。PostgreSQL、API、worker、backup 和 Caddy 都使用 Docker
+`json-file` 的 10 MiB × 5 文件轮转上限，避免宿主机运行日志无限增长，也不向应用暴露 Docker Socket。

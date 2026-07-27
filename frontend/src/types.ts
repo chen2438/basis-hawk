@@ -287,12 +287,16 @@ export interface NotificationHistoryItem {
 export interface BackupStatus {
   directory_available: boolean;
   archive_count: number;
-  latest: {
+  latest: BackupArchive | null;
+  archives: BackupArchive[];
+}
+
+export interface BackupArchive {
     name: string;
     size_bytes: number;
     modified_at: string;
     checksum_present: boolean;
-  } | null;
+    latest?: boolean;
 }
 
 export interface LiveOpenPreview {

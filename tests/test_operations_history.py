@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -81,9 +83,14 @@ async def test_notification_test_and_backup_status_are_operator_safe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    old_backup = tmp_path / "basis-hawk-20260726T000000Z-daily.bhbk"
     backup = tmp_path / "basis-hawk-20260727T000000Z-daily.bhbk"
-    backup.write_bytes(b"encrypted")
-    backup.with_suffix(".bhbk.sha256").write_text("checksum", encoding="ascii")
+    for index, path in enumerate((old_backup, backup), start=1):
+        path.write_bytes(b"encrypted")
+        path.with_suffix(".bhbk.sha256").write_text("checksum", encoding="ascii")
+        path.chmod(0o600)
+        path_time = datetime(2026, 7, 25 + index, tzinfo=UTC).timestamp()
+        os.utime(path, (path_time, path_time))
     monkeypatch.setenv("BASIS_HAWK_BACKUP_DIRECTORY", str(tmp_path))
     monkeypatch.setenv("BASIS_HAWK_TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setenv("BASIS_HAWK_TELEGRAM_CHAT_ID", "123")
@@ -102,13 +109,31 @@ async def test_notification_test_and_backup_status_are_operator_safe(
         ) as client:
             status = await client.get("/api/operations/backup")
             assert status.status_code == 200
-            assert status.json()["archive_count"] == 1
+            assert status.json()["archive_count"] == 2
             assert status.json()["latest"] == {
                 "name": backup.name,
                 "size_bytes": 9,
                 "modified_at": status.json()["latest"]["modified_at"],
                 "checksum_present": True,
             }
+            assert [item["name"] for item in status.json()["archives"]] == [
+                backup.name,
+                old_backup.name,
+            ]
+
+            delete_latest = await client.request(
+                "DELETE",
+                f"/api/operations/backups/{backup.name}",
+                json={"confirmed": True},
+            )
+            assert delete_latest.status_code == 409
+            deleted = await client.request(
+                "DELETE",
+                f"/api/operations/backups/{old_backup.name}",
+                json={"confirmed": True},
+            )
+            assert deleted.status_code == 200
+            assert not old_backup.exists()
 
             queued = await client.post(
                 "/api/operations/notifications/test",
@@ -132,6 +157,39 @@ async def test_notification_test_and_backup_status_are_operator_safe(
                 params={"event_type": "notification.test_requested"},
             )
             assert len(audit.json()["items"]) == 1
+
+            old = datetime.now(UTC) - timedelta(days=60)
+            [old_notification] = await database.enqueue_notification(
+                dedupe_key="old:sent",
+                event_type="old.sent",
+                severity="info",
+                channels={"telegram"},
+                subject="Old sent notification",
+                body="safe body",
+                now=old,
+            )
+            await database.claim_notifications(now=old)
+            await database.mark_notification_sent(old_notification.id, now=old)
+            await database.enqueue_notification(
+                dedupe_key="old:pending",
+                event_type="old.pending",
+                severity="info",
+                channels={"email"},
+                subject="Old pending notification",
+                body="safe body",
+                now=old,
+            )
+            pruned = await client.post(
+                "/api/operations/logs/prune",
+                json={"retention_days": 30, "confirmed": True},
+            )
+            assert pruned.status_code == 200
+            assert pruned.json()["deleted_count"] == 1
+            remaining = await database.notification_outbox()
+            assert {item.event_type for item in remaining} == {
+                "notification.test",
+                "old.pending",
+            }
     finally:
         await database.close()
         get_config.cache_clear()

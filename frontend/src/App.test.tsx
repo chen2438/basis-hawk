@@ -15,7 +15,15 @@ describe("Basis Hawk dashboard", () => {
         : url.includes("system/execution") ? { state: "blocked", reason: "worker pending", updated_at: null, accounts: [] }
         : url.includes("operations/audit") ? { items: [] }
         : url.includes("operations/notifications") ? { items: [] }
-        : url.includes("operations/backup") ? { directory_available: true, archive_count: 1, latest: { name: "basis-hawk-test-daily.bhbk", size_bytes: 1024, modified_at: "2026-07-27T00:00:00Z", checksum_present: true } }
+        : url.includes("operations/backup") ? {
+          directory_available: true,
+          archive_count: 2,
+          latest: { name: "basis-hawk-20260727T000000Z-daily.bhbk", size_bytes: 1024, modified_at: "2026-07-27T00:00:00Z", checksum_present: true },
+          archives: [
+            { name: "basis-hawk-20260727T000000Z-daily.bhbk", size_bytes: 1024, modified_at: "2026-07-27T00:00:00Z", checksum_present: true, latest: true },
+            { name: "basis-hawk-20260726T000000Z-daily.bhbk", size_bytes: 1024, modified_at: "2026-07-26T00:00:00Z", checksum_present: true, latest: false },
+          ],
+        }
         : url.includes("accounts/credentials") ? { items: [] }
         : url.includes("trades/positions") ? { items: [] }
         : url.includes("trades/intents") ? { items: [] }
@@ -58,6 +66,8 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByText("实盘运营控制台")).toBeTruthy();
     expect(screen.getByText("worker pending")).toBeTruthy();
     expect(screen.getByRole("button", { name: "交易所账户" })).toBeTruthy();
+    expect((screen.getAllByRole("button", { name: "删除旧备份" })[0] as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getAllByRole("button", { name: "删除旧备份" })[1] as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("shows bounded manual paired-trade controls", async () => {
@@ -104,6 +114,7 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByText(/不返回消息正文或去重键/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "测试 Telegram" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "测试邮件" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "清理旧日志" })).toBeTruthy();
   });
 
   it("shows bounded trade, fill, pnl, and funding ledgers", async () => {

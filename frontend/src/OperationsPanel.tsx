@@ -227,6 +227,22 @@ function SystemView({
       <div><span>最近备份</span><strong>{time(backup?.latest?.modified_at ?? null)}</strong></div>
       <div><span>校验文件</span><strong>{backup?.latest ? (backup.latest.checksum_present ? "存在" : "缺失") : "—"}</strong></div>
     </div>
+    <section className="backup-manager">
+      <header><div><h3>加密备份管理</h3><p>最新备份受保护；删除旧归档时会同时删除对应校验文件。</p></div></header>
+      <div className="ops-table-wrap"><table><thead><tr><th>归档</th><th>时间</th><th>大小</th><th>校验</th><th>操作</th></tr></thead>
+        <tbody>{backup?.archives.map((item) => <tr key={item.name}>
+          <td><code>{item.name}</code>{item.latest && <span className="status-pill ready">最新</span>}</td>
+          <td>{time(item.modified_at)}</td><td>{(item.size_bytes / 1024 / 1024).toFixed(2)} MB</td>
+          <td>{item.checksum_present ? "存在" : "缺失"}</td><td>
+            <button className="button danger ghost" disabled={busy || item.latest} onClick={() => {
+              if (window.confirm(`确认永久删除旧备份 ${item.name} 及其校验文件？`)) {
+                void action(() => api.deleteBackup(item.name));
+              }
+            }}>删除旧备份</button>
+          </td>
+        </tr>)}</tbody>
+      </table>{!backup?.archives.length && <div className="empty">当前没有备份归档</div>}</div>
+    </section>
     <div className="safety-callout"><strong>当前原因</strong><p>{execution.reason}</p>
       <div className="inline-actions">
         <button className="button danger" disabled={busy || execution.state === "paused"} onClick={() => {
@@ -773,9 +789,10 @@ function HistoryView({
   busy: boolean;
   action: (operation: () => Promise<unknown>) => Promise<void>;
 }) {
+  const [retentionDays, setRetentionDays] = useState(30);
   return <div className="history-grid">
     <section>
-      <header><div><h3>管理员审计</h3><p>最新 100 条；敏感键由服务端递归脱敏。</p></div><strong>{auditEvents.length}</strong></header>
+      <header><div><h3>管理员审计</h3><p>最新 100 条；敏感键由服务端递归脱敏，审计记录不可删除。</p></div><strong>{auditEvents.length}</strong></header>
       <div className="ops-table-wrap"><table><thead><tr><th>时间</th><th>事件</th><th>操作者</th><th>安全详情</th></tr></thead>
         <tbody>{auditEvents.map((item) => <tr key={item.id}>
           <td>{time(item.occurred_at)}</td><td><code>{item.event_type}</code></td><td>{item.actor}</td>
@@ -796,6 +813,15 @@ function HistoryView({
               void action(() => api.testNotifications(["email"]));
             }
           }}>测试邮件</button>
+          <label className="inline-retention">保留
+            <input type="number" min="1" max="3650" value={retentionDays}
+              onChange={(event) => setRetentionDays(Number(event.target.value))} />天
+          </label>
+          <button className="button danger ghost" disabled={busy || retentionDays < 1 || retentionDays > 3650} onClick={() => {
+            if (window.confirm(`确认删除 ${retentionDays} 天前已发送或已终止的通知投递日志？待发送和重试记录不会删除。`)) {
+              void action(() => api.pruneLogs(retentionDays));
+            }
+          }}>清理旧日志</button>
           <strong>{notifications.length}</strong>
         </div>
       </header>

@@ -23,7 +23,8 @@
 前醒目标记；确认只持久化 UUID 幂等意图，浏览器不直接向交易所发单。自动策略编辑器覆盖后端全部
 必填风控参数，保存仅创建不可变新版本；启用最新版本和恢复原生效版本是两个独立动作，且都要求全局
 执行 ready。审计与通知页分别展示最新 100 条管理员动作和投递状态；审计详情由服务端递归脱敏，
-通知不返回正文或去重键。
+通知不返回正文或去重键。执行页列出全部加密备份，最新项不可删除；审计与通知页可设置天数清理终态
+通知日志，并明确标识管理员审计不可删除。
 
 交易所凭据接口为：
 
@@ -80,8 +81,12 @@
 - `POST /api/operations/notifications/test`：要求 `confirmed=true` 并明确选择 Telegram、邮件或两者；
   只对已完整配置的通道创建独立 `notification.test` outbox 项，随后仍由 worker 按普通重试规则投递。
   未配置通道返回冲突，不直接从 API 进程发送，也不在响应中返回正文。
-- `GET /api/operations/backup`：从 API 容器的只读备份卷返回归档数量、最近归档文件名、大小、修改时间
-  及校验文件是否存在；不会读取备份密钥、解密归档或把恢复能力暴露为 HTTP 接口。
+- `GET /api/operations/backup`：返回全部归档及最新归档的文件名、大小、修改时间和校验文件状态；
+  不读取备份密钥、不解密归档，也不把恢复能力暴露为 HTTP 接口。
+- `DELETE /api/operations/backups/{archive_name}`：要求 `confirmed=true`，只接受严格的 Basis Hawk
+  归档文件名并拒绝删除最新备份；成功时同时删除旁路校验文件并写入请求与完成审计。
+- `POST /api/operations/logs/prune`：要求 `confirmed=true` 和 1–3650 天保留期，只删除截止时间前
+  已经 `sent/dead` 的通知投递日志；`pending/sending/retry` 和管理员审计永不由该接口删除。
 - `GET /api/transfers`：返回最近内部划转及提交前/预期余额、远端 ID、状态和脱敏错误码；金额均为
   十进制字符串。
 - `POST /api/transfers`：仅允许 USDT 现货↔USDT 永续，要求 `confirmed=true` 和 UUID

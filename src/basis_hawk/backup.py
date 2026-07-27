@@ -4,6 +4,7 @@ import argparse
 import base64
 import hashlib
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -21,6 +22,9 @@ NONCE_SIZE = 12
 TAG_SIZE = 16
 HEADER_SIZE = len(MAGIC) + len(VERSION) + NONCE_SIZE
 CHUNK_SIZE = 1024 * 1024
+ARCHIVE_NAME_PATTERN = re.compile(
+    r"^basis-hawk-\d{8}T\d{6}Z-(daily|weekly)\.bhbk$"
+)
 
 
 class BackupError(RuntimeError):
@@ -114,9 +118,12 @@ def backup_status(directory: Path) -> dict[str, object]:
             "directory_available": False,
             "archive_count": 0,
             "latest": None,
+            "archives": [],
         }
     archives: list[tuple[Path, os.stat_result]] = []
     for path in directory.glob("basis-hawk-*.bhbk"):
+        if not ARCHIVE_NAME_PATTERN.fullmatch(path.name) or path.is_symlink():
+            continue
         try:
             archives.append((path, path.stat()))
         except FileNotFoundError:
@@ -130,20 +137,41 @@ def backup_status(directory: Path) -> dict[str, object]:
             "directory_available": True,
             "archive_count": 0,
             "latest": None,
+            "archives": [],
         }
-    latest, stat = archives[0]
+    items = [
+        {
+            "name": path.name,
+            "size_bytes": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime, UTC),
+            "checksum_present": path.with_suffix(path.suffix + ".sha256").is_file(),
+            "latest": index == 0,
+        }
+        for index, (path, stat) in enumerate(archives)
+    ]
     return {
         "directory_available": True,
         "archive_count": len(archives),
-        "latest": {
-            "name": latest.name,
-            "size_bytes": stat.st_size,
-            "modified_at": datetime.fromtimestamp(stat.st_mtime, UTC),
-            "checksum_present": latest.with_suffix(
-                latest.suffix + ".sha256"
-            ).is_file(),
-        },
+        "latest": {key: value for key, value in items[0].items() if key != "latest"},
+        "archives": items,
     }
+
+
+def delete_backup(directory: Path, archive_name: str) -> None:
+    if not ARCHIVE_NAME_PATTERN.fullmatch(archive_name):
+        raise BackupError("invalid backup archive name")
+    status = backup_status(directory)
+    latest = status["latest"]
+    if isinstance(latest, dict) and latest.get("name") == archive_name:
+        raise BackupError("the latest backup cannot be deleted")
+    path = directory / archive_name
+    if path.is_symlink() or not path.is_file():
+        raise BackupError("backup archive does not exist")
+    checksum_path = path.with_suffix(path.suffix + ".sha256")
+    if checksum_path.is_symlink():
+        raise BackupError("backup checksum path is invalid")
+    path.unlink()
+    checksum_path.unlink(missing_ok=True)
 
 
 def _prune(directory: Path, suffix: str, keep: int) -> None:

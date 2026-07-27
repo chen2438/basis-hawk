@@ -31,7 +31,7 @@ from basis_hawk.accounts import (
 )
 from basis_hawk.auth import AuthenticationError, AuthService, LoginAttemptLimiter
 from basis_hawk.automation import AutoStrategyConfig
-from basis_hawk.backup import backup_status
+from basis_hawk.backup import BackupError, backup_status, delete_backup
 from basis_hawk.config import get_config
 from basis_hawk.credentials import (
     CredentialService,
@@ -138,6 +138,15 @@ class InternalTransferConfirmRequest(BaseModel):
 
 class NotificationTestRequest(BaseModel):
     channels: set[Literal["telegram", "email"]] = Field(min_length=1)
+    confirmed: Literal[True]
+
+
+class BackupDeleteRequest(BaseModel):
+    confirmed: Literal[True]
+
+
+class LogPruneRequest(BaseModel):
+    retention_days: int = Field(default=30, ge=1, le=3650)
     confirmed: Literal[True]
 
 
@@ -716,6 +725,47 @@ def create_app(
     @app.get("/api/operations/backup")
     async def operation_backup_status() -> dict[str, object]:
         return backup_status(config.backup_directory)
+
+    @app.delete("/api/operations/backups/{archive_name}")
+    async def operation_delete_backup(
+        archive_name: str,
+        value: BackupDeleteRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        actor = request_actor(request)
+        await scanner.database.append_audit(
+            "backup.delete_requested",
+            actor=actor,
+            details={"archive_name": archive_name},
+        )
+        try:
+            delete_backup(config.backup_directory, archive_name)
+        except BackupError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await scanner.database.append_audit(
+            "backup.deleted",
+            actor=actor,
+            details={"archive_name": archive_name},
+        )
+        return {"deleted": True, "archive_name": archive_name}
+
+    @app.post("/api/operations/logs/prune")
+    async def operation_prune_logs(
+        value: LogPruneRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        cutoff = datetime.now(UTC) - timedelta(days=value.retention_days)
+        deleted = await scanner.database.prune_notification_history(before=cutoff)
+        await scanner.database.append_audit(
+            "notification.history_pruned",
+            actor=request_actor(request),
+            details={
+                "retention_days": value.retention_days,
+                "deleted_count": deleted,
+                "cutoff": cutoff.isoformat(),
+            },
+        )
+        return {"deleted_count": deleted, "cutoff": cutoff}
 
     @app.get("/api/transfers")
     async def internal_transfers(

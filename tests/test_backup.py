@@ -15,6 +15,7 @@ from basis_hawk.backup import (
     _write_checksum,
     backup_status,
     decrypt_stream,
+    delete_backup,
     encrypt_stream,
 )
 
@@ -62,6 +63,7 @@ def test_backup_status_reports_only_archive_metadata(tmp_path: Path) -> None:
         "directory_available": False,
         "archive_count": 0,
         "latest": None,
+        "archives": [],
     }
     older = tmp_path / "basis-hawk-20260725T000000Z-daily.bhbk"
     latest = tmp_path / "basis-hawk-20260726T000000Z-daily.bhbk"
@@ -81,6 +83,29 @@ def test_backup_status_reports_only_archive_metadata(tmp_path: Path) -> None:
         "modified_at": datetime.fromtimestamp(2, UTC),
         "checksum_present": True,
     }
+    assert [item["name"] for item in value["archives"]] == [latest.name, older.name]
+    assert value["archives"][0]["latest"] is True
+    assert value["archives"][1]["latest"] is False
+
+
+def test_manual_backup_deletion_rejects_latest_and_removes_old_pair(
+    tmp_path: Path,
+) -> None:
+    older = tmp_path / "basis-hawk-20260725T000000Z-daily.bhbk"
+    latest = tmp_path / "basis-hawk-20260726T000000Z-daily.bhbk"
+    for index, path in enumerate((older, latest), start=1):
+        path.write_bytes(b"archive")
+        path.with_suffix(".bhbk.sha256").write_text("checksum", encoding="ascii")
+        os.utime(path, (index, index))
+
+    with pytest.raises(BackupError, match="latest backup"):
+        delete_backup(tmp_path, latest.name)
+    with pytest.raises(BackupError, match="invalid backup archive name"):
+        delete_backup(tmp_path, "../latest.bhbk")
+
+    delete_backup(tmp_path, older.name)
+    assert not older.exists()
+    assert not older.with_suffix(".bhbk.sha256").exists()
 
 
 def test_backup_key_must_be_independent_valid_material(monkeypatch: pytest.MonkeyPatch) -> None:

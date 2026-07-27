@@ -1,3 +1,9 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -13,6 +19,7 @@ services:
       retries: 12
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    logging: *default-logging
     networks: [backend]
 
   api:
@@ -50,7 +57,8 @@ services:
     read_only: true
     tmpfs: [/tmp]
     volumes:
-      - postgres_backups:/backups:ro
+      - postgres_backups:/backups
+    logging: *default-logging
     networks: [backend]
 
   worker:
@@ -70,6 +78,7 @@ services:
         condition: service_healthy
     read_only: true
     tmpfs: [/tmp]
+    logging: *default-logging
     networks: [backend]
 
   backup:
@@ -93,6 +102,7 @@ services:
     tmpfs: [/tmp]
     volumes:
       - postgres_backups:/backups
+    logging: *default-logging
     networks: [backend]
 
   caddy:
@@ -111,6 +121,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+    logging: *default-logging
     networks: [backend]
 
 networks:
