@@ -344,6 +344,7 @@ function AccountsView({
   busy: boolean;
   action: (operation: () => Promise<unknown>) => Promise<void>;
 }) {
+  const [positionModes, setPositionModes] = useState<Record<string, "one_way" | "hedge">>({});
   const [form, setForm] = useState({
     exchange: "binance" as Exchange,
     environment: "live" as Environment,
@@ -351,6 +352,7 @@ function AccountsView({
     apiKey: "",
     apiSecret: "",
     passphrase: "",
+    positionMode: "one_way" as "one_way" | "hedge",
   });
   const save = (event: FormEvent) => {
     event.preventDefault();
@@ -361,6 +363,7 @@ function AccountsView({
         api_key: form.apiKey,
         api_secret: form.apiSecret,
         ...(form.passphrase ? { passphrase: form.passphrase } : {}),
+        ...(form.exchange === "bybit" ? { position_mode: form.positionMode } : {}),
       });
       setForm((current) => ({ ...current, apiKey: "", apiSecret: "", passphrase: "" }));
     });
@@ -377,8 +380,28 @@ function AccountsView({
             <div><dt>现货可用</dt><dd>{amount(snapshot.spot_usdt_available)} USDT</dd></div>
             <div><dt>永续可用</dt><dd>{amount(snapshot.perp_usdt_available)} USDT</dd></div>
             <div><dt>账户模式</dt><dd>{snapshot.account_mode}</dd></div>
+            <div><dt>持仓模式</dt><dd>{snapshot.position_mode}</dd></div>
             <div><dt>交易权限</dt><dd>{snapshot.trade_permission === true ? "已确认" : "未确认"}</dd></div>
           </dl>}
+          {item.exchange === "bybit" && <div className="inline-actions">
+            <select
+              aria-label="Bybit 持仓模式"
+              value={positionModes[key] ?? item.position_mode ?? "one_way"}
+              onChange={(event) => setPositionModes({
+                ...positionModes,
+                [key]: event.target.value as "one_way" | "hedge",
+              })}
+            >
+              <option value="one_way">单向模式</option>
+              <option value="hedge">双向持仓模式</option>
+            </select>
+            <button className="button secondary" disabled={busy} onClick={() => {
+              const value = positionModes[key] ?? item.position_mode ?? "one_way";
+              if (window.confirm(`确认 Bybit 当前设置为${value === "one_way" ? "单向" : "双向持仓"}模式？程序不会在这里修改交易所设置。`)) {
+                void action(() => api.updateBybitPositionMode(item.environment, value));
+              }
+            }}>保存模式声明</button>
+          </div>}
           <div className="inline-actions">
             <button className="button secondary" disabled={busy} onClick={() => void action(async () => {
               const value = await api.accountSnapshot(item.exchange, item.environment);
@@ -403,6 +426,7 @@ function AccountsView({
         <label>API Key<input required autoComplete="off" value={form.apiKey} onChange={(event) => setForm({ ...form, apiKey: event.target.value })} /></label>
         <label>API Secret<input required type="password" autoComplete="new-password" value={form.apiSecret} onChange={(event) => setForm({ ...form, apiSecret: event.target.value })} /></label>
         <label>Passphrase（OKX/Bitget）<input type="password" autoComplete="new-password" value={form.passphrase} onChange={(event) => setForm({ ...form, passphrase: event.target.value })} /></label>
+        {form.exchange === "bybit" && <label>Bybit 持仓模式<select value={form.positionMode} onChange={(event) => setForm({ ...form, positionMode: event.target.value as "one_way" | "hedge" })}><option value="one_way">单向模式</option><option value="hedge">双向持仓模式</option></select></label>}
       </div>
       <button className="button primary" disabled={busy}>加密保存凭据</button>
     </form>

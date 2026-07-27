@@ -66,6 +66,12 @@ class CredentialRequest(BaseModel):
     api_key: SecretStr
     api_secret: SecretStr
     passphrase: SecretStr | None = None
+    position_mode: Literal["one_way", "hedge"] | None = None
+
+
+class BybitPositionModeRequest(BaseModel):
+    position_mode: Literal["one_way", "hedge"]
+    confirmed: Literal[True]
 
 
 class PaperOpenRequest(BaseModel):
@@ -1739,6 +1745,7 @@ def create_app(
                     "environment": item.environment,
                     "label": item.label,
                     "masked_api_key": item.masked_api_key,
+                    "position_mode": item.position_mode,
                     "updated_at": item.updated_at.isoformat(),
                 }
                 for item in await credential_service.list()
@@ -1767,6 +1774,7 @@ def create_app(
                         if value.passphrase is not None
                         else None
                     ),
+                    position_mode=value.position_mode,
                 ),
                 actor=getattr(request.state, "admin", None).username
                 if getattr(request.state, "admin", None)
@@ -1779,6 +1787,37 @@ def create_app(
             "environment": summary.environment,
             "label": summary.label,
             "masked_api_key": summary.masked_api_key,
+            "position_mode": summary.position_mode,
+            "updated_at": summary.updated_at.isoformat(),
+        }
+
+    @app.put("/api/accounts/bybit/{environment}/position-mode")
+    async def update_bybit_position_mode(
+        environment: ExchangeEnvironment,
+        value: BybitPositionModeRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        if credential_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        try:
+            summary = await credential_service.update_position_mode(
+                environment,
+                position_mode=value.position_mode,
+                actor=getattr(request.state, "admin", None).username
+                if getattr(request.state, "admin", None)
+                else "local",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "exchange": summary.exchange,
+            "environment": summary.environment,
+            "label": summary.label,
+            "masked_api_key": summary.masked_api_key,
+            "position_mode": summary.position_mode,
             "updated_at": summary.updated_at.isoformat(),
         }
 

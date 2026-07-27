@@ -119,10 +119,23 @@ export const api = {
   saveCredential: (
     exchange: Exchange,
     environment: Environment,
-    value: { label: string; api_key: string; api_secret: string; passphrase?: string },
+    value: {
+      label: string;
+      api_key: string;
+      api_secret: string;
+      passphrase?: string;
+      position_mode?: "one_way" | "hedge";
+    },
   ) => request<CredentialSummary>(`/api/accounts/${exchange}/${environment}/credentials`, {
     method: "PUT",
     body: JSON.stringify(value),
+  }),
+  updateBybitPositionMode: (
+    environment: Environment,
+    positionMode: "one_way" | "hedge",
+  ) => request<CredentialSummary>(`/api/accounts/bybit/${environment}/position-mode`, {
+    method: "PUT",
+    body: JSON.stringify({ position_mode: positionMode, confirmed: true }),
   }),
   deleteCredential: (exchange: Exchange, environment: Environment) =>
     request<void>(`/api/accounts/${exchange}/${environment}/credentials`, { method: "DELETE" }),

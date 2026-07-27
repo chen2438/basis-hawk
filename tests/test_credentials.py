@@ -118,3 +118,45 @@ async def test_credential_api_never_echoes_plaintext() -> None:
         assert deleted.status_code == 204
         assert await credentials.load(Exchange.BINANCE, ExchangeEnvironment.LIVE) is None
     await database.close()
+
+
+async def test_bybit_position_mode_declaration_can_be_updated_without_new_keys() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    scanner = ScannerService(database, {})
+    await scanner.initialize()
+    credentials = CredentialService(database, SecretCipher(SecretCipher.generate_key()))
+    app = create_app(
+        scanner,
+        manage_lifecycle=False,
+        auth_required=False,
+        credential_service=credentials,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        saved = await client.put(
+            "/api/accounts/bybit/live/credentials",
+            json={
+                "label": "primary",
+                "api_key": "bybit-api-key",
+                "api_secret": "bybit-api-secret",
+                "position_mode": "one_way",
+            },
+        )
+        assert saved.status_code == 200
+        assert saved.json()["position_mode"] == "one_way"
+
+        updated = await client.put(
+            "/api/accounts/bybit/live/position-mode",
+            json={"position_mode": "hedge", "confirmed": True},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["position_mode"] == "hedge"
+        loaded = await credentials.load(Exchange.BYBIT, ExchangeEnvironment.LIVE)
+        assert loaded == ExchangeSecrets(
+            api_key="bybit-api-key",
+            api_secret="bybit-api-secret",
+            position_mode="hedge",
+        )
+    await database.close()

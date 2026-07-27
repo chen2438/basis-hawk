@@ -32,6 +32,7 @@ async def test_factory_builds_implemented_private_stream_connections() -> None:
                 api_key=f"{exchange.value}-api-key",
                 api_secret=f"{exchange.value}-api-secret",
                 passphrase=passphrase,
+                position_mode="one_way" if exchange == Exchange.BYBIT else None,
             ),
             actor="test",
         )

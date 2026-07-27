@@ -34,7 +34,14 @@ describe("Basis Hawk dashboard", () => {
             { name: "basis-hawk-20260726T000000Z-daily.bhbk", size_bytes: 1024, modified_at: "2026-07-26T00:00:00Z", checksum_present: true, latest: false },
           ],
         }
-        : url.includes("accounts/credentials") ? { items: [] }
+        : url.includes("accounts/credentials") ? { items: [{
+          exchange: "bybit",
+          environment: "live",
+          label: "primary",
+          masked_api_key: "abcd…wxyz",
+          position_mode: null,
+          updated_at: "2026-07-27T00:00:00Z",
+        }] }
         : url.includes("trades/positions") ? { items: [] }
         : url.includes("trades/intents") ? { items: [] }
         : url.includes("trades/orders") ? { items: [] }
@@ -101,6 +108,21 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByText("真实配对持仓平仓")).toBeTruthy();
     expect((screen.getByRole("button", { name: "生成开仓预览" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/先生成 15 秒预览票据/)).toBeTruthy();
+  });
+
+  it("lets an existing Bybit account declare its empty-account position mode", async () => {
+    render(<App />);
+    const user = userEvent.setup();
+    const confirmation = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await user.click(await screen.findByRole("button", { name: "运营控制台" }));
+    await user.click(await screen.findByRole("button", { name: "交易所账户" }));
+    expect(screen.getByRole("combobox", { name: "Bybit 持仓模式" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "保存模式声明" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      "/api/accounts/bybit/live/position-mode",
+      expect.objectContaining({ method: "PUT" }),
+    ));
+    confirmation.mockRestore();
   });
 
   it("shows every automatic strategy risk group without enabling by default", async () => {

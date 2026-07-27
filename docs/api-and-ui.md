@@ -36,6 +36,9 @@
 - `DELETE /api/accounts/{exchange}/{sandbox|live}/credentials`：删除本地加密凭据。
 - `GET /api/accounts/{exchange}/{sandbox|live}/snapshot`：按需解密凭据并从交易所读取 USDT
   现货可用余额、永续可用余额/权益、账户类型和持仓模式；响应仍不包含任何凭据。
+- `PUT /api/accounts/bybit/{sandbox|live}/position-mode`：要求 `confirmed=true`，只更新既有加密
+  凭据中的单向/双向模式声明，不需要重新输入 Key，也不会修改交易所设置；用于 Bybit 空子账户不返回
+  `positionIdx` 时完成只读能力声明。
 - `GET /api/system/execution`：读取 worker 的全局执行阻断状态，以及各账户最近一次启动对账状态、
   私有流就绪状态、远端结果完整性、挂单数和仓位数。
 - `POST /api/trades/paper/open`：使用当前健康机会持久化纸面开仓意图和现货买入/永续卖出双腿；
@@ -115,9 +118,11 @@ AES-GCM 关联数据加密；响应、审计事件和日志均不得包含 API S
 账户快照使用各所官方只读接口和签名规则。签名错误、超时及 HTTP 错误统一映射为不带请求 URL、
 签名参数或响应原文的脱敏错误。MEXC 和 Gate 没有满足同所现货+USDT 永续完整验收要求的沙盒，
 其 `sandbox` 快照明确返回不支持，不会回退到实盘地址。Bybit V5 使用 `settleCoin=USDT` 时不会返回
-空仓标的，因此聚合结果无法识别模式时会再以 `symbol=BTCUSDT` 只读查询有效 `positionIdx`；该探测
-仍无法确认时快照返回 `unknown`，后续状态机必须禁止下单。目标标的在配置杠杆前还会重新读取自身模式，
-不能仅凭探测标的发单。
+空仓标的，因此聚合结果无法识别模式时会再以 `symbol=BTCUSDT` 只读查询有效 `positionIdx`；若该空
+子账户仍返回空列表，快照只使用管理员明确保存的模式声明，未声明则继续返回 `unknown` 并阻断。
+声明不修改 Bybit 设置，目标标的在配置杠杆前还会重新读取自身模式，不能仅凭声明直接发单。
+UTA 2.0 逐仓模式不使用账户级 `totalAvailableBalance`，永续可用 USDT 按币种 `walletBalance` 扣除
+`totalPositionIM`、`totalOrderIM`、`locked` 和 `bonus` 计算并限制为非负数。
 Binance 快照从现货账户的 `canTrade` 和独立的永续 `/fapi/v1/accountConfig` 配置共同确认双腿权限；
 永续 V3 账户响应只用于余额/权益，不从其已移除的配置字段猜测权限。OKX 快照从账户配置的 `perm`
 确认 `trade`；Bybit 从当前 API Key 信息同时确认非只读、SpotTrade

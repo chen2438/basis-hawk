@@ -1470,6 +1470,11 @@ class BybitAccountClient(PrivateAccountClient):
             position_mode = _bybit_position_mode(
                 (probe.get("result") or {}).get("list") or []
             )
+        if (
+            position_mode == PositionMode.UNKNOWN
+            and self.secrets.position_mode is not None
+        ):
+            position_mode = PositionMode(self.secrets.position_mode)
         account = ((wallet.get("result") or {}).get("list") or [{}])[0]
         coin = next(
             (item for item in account.get("coin", []) if item.get("coin") == "USDT"),
@@ -1489,12 +1494,28 @@ class BybitAccountClient(PrivateAccountClient):
             key_details.get("readOnly") is not None
             and isinstance(raw_permissions, dict)
         )
-        available = Decimal(str(account.get("totalAvailableBalance") or "0"))
+        wallet_balance = Decimal(str(coin.get("walletBalance") or "0"))
+        locked = Decimal(str(coin.get("locked") or "0"))
+        spot_borrow = Decimal(str(coin.get("spotBorrow") or "0"))
+        total_order_im = Decimal(str(coin.get("totalOrderIM") or "0"))
+        total_position_im = Decimal(str(coin.get("totalPositionIM") or "0"))
+        bonus = Decimal(str(coin.get("bonus") or "0"))
+        if str(details.get("marginMode") or "") == "ISOLATED_MARGIN":
+            available = max(
+                Decimal("0"),
+                wallet_balance
+                - total_position_im
+                - total_order_im
+                - locked
+                - bonus,
+            )
+        else:
+            available = Decimal(
+                str(account.get("totalAvailableBalance") or "0")
+            )
         spot_available = max(
             Decimal("0"),
-            Decimal(str(coin.get("walletBalance") or "0"))
-            - Decimal(str(coin.get("locked") or "0"))
-            - Decimal(str(coin.get("spotBorrow") or "0")),
+            wallet_balance - locked - spot_borrow,
         )
         return AccountSnapshot(
             exchange=self.exchange,

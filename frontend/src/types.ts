@@ -51,6 +51,7 @@ export interface CredentialSummary {
   environment: Environment;
   label: string;
   masked_api_key: string;
+  position_mode: "one_way" | "hedge" | null;
   updated_at: string;
 }
 

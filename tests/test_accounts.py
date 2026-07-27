@@ -272,11 +272,7 @@ async def test_bybit_account_snapshot_and_signature() -> None:
                 json={
                     "retCode": 0,
                     "result": {
-                        "list": (
-                            [{"positionIdx": 0, "size": "0"}]
-                            if request.url.params.get("symbol") == "BTCUSDT"
-                            else []
-                        ),
+                        "list": [],
                         "nextPageCursor": "",
                     },
                 },
@@ -321,6 +317,9 @@ async def test_bybit_account_snapshot_and_signature() -> None:
                                     "walletBalance": "29",
                                     "locked": "2",
                                     "spotBorrow": "1",
+                                    "totalOrderIM": "4",
+                                    "totalPositionIM": "3",
+                                    "bonus": "1",
                                 }
                             ],
                         }
@@ -334,13 +333,18 @@ async def test_bybit_account_snapshot_and_signature() -> None:
         base_url="https://bybit.test",
     )
     client = BybitAccountClient(
-        SECRETS,
+        ExchangeSecrets(
+            api_key=SECRETS.api_key,
+            api_secret=SECRETS.api_secret,
+            position_mode="one_way",
+        ),
         ExchangeEnvironment.LIVE,
         clock_ms=lambda: 1_700_000_000_000,
         client=http,
     )
     snapshot = await client.snapshot()
     assert snapshot.spot_usdt_available == 26
+    assert snapshot.perp_usdt_available == 19
     assert snapshot.perp_usdt_equity == 31
     assert snapshot.account_mode == "unified:5:ISOLATED_MARGIN"
     assert snapshot.position_mode == PositionMode.ONE_WAY
