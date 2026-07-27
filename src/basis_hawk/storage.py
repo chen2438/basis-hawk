@@ -26,6 +26,8 @@ from sqlalchemy import (
     text,
     update,
 )
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
@@ -367,10 +369,12 @@ class AccountReconciliationRow(Base):
         Boolean,
         default=False,
     )
+    funding_income_complete: Mapped[bool] = mapped_column(Boolean, default=False)
     private_stream_ready: Mapped[bool] = mapped_column(Boolean, default=False)
     open_order_count: Mapped[int] = mapped_column(Integer, default=0)
     position_count: Mapped[int] = mapped_column(Integer, default=0)
     fill_count: Mapped[int] = mapped_column(Integer, default=0)
+    funding_income_count: Mapped[int] = mapped_column(Integer, default=0)
     recovered_order_count: Mapped[int] = mapped_column(Integer, default=0)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -725,6 +729,46 @@ class PnlRealizationRow(Base):
     )
 
 
+class FundingIncomeRow(Base):
+    __tablename__ = "funding_income"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    exchange_record_id: Mapped[str] = mapped_column(String(120))
+    exchange: Mapped[str] = mapped_column(String(20))
+    environment: Mapped[str] = mapped_column(String(20))
+    symbol: Mapped[str] = mapped_column(String(100))
+    base_asset: Mapped[str] = mapped_column(String(40))
+    asset: Mapped[str] = mapped_column(String(20))
+    amount: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    rate: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    position_value: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint(
+            "exchange",
+            "environment",
+            "exchange_record_id",
+            name="uq_funding_income_remote_record",
+        ),
+        CheckConstraint(
+            "asset = 'USDT'",
+            name="ck_funding_income_usdt_only",
+        ),
+        Index(
+            "ix_funding_income_account",
+            "exchange",
+            "environment",
+            "occurred_at",
+        ),
+    )
+
+
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
@@ -881,6 +925,8 @@ class Database:
         recovered_order_count: int = 0,
         fill_reconciliation_complete: bool = False,
         fill_count: int = 0,
+        funding_income_complete: bool = False,
+        funding_income_count: int = 0,
         private_stream_ready: bool = False,
     ) -> None:
         async with self.sessions() as session:
@@ -954,10 +1000,12 @@ class Database:
                     trading_state_complete=state_complete,
                     order_reconciliation_complete=order_reconciliation_complete,
                     fill_reconciliation_complete=fill_reconciliation_complete,
+                    funding_income_complete=funding_income_complete,
                     private_stream_ready=private_stream_ready,
                     open_order_count=open_order_count,
                     position_count=position_count,
                     fill_count=fill_count,
+                    funding_income_count=funding_income_count,
                     recovered_order_count=recovered_order_count,
                     checked_at=checked_at,
                 )
@@ -969,10 +1017,12 @@ class Database:
                 row.trading_state_complete = state_complete
                 row.order_reconciliation_complete = order_reconciliation_complete
                 row.fill_reconciliation_complete = fill_reconciliation_complete
+                row.funding_income_complete = funding_income_complete
                 row.private_stream_ready = private_stream_ready
                 row.open_order_count = open_order_count
                 row.position_count = position_count
                 row.fill_count = fill_count
+                row.funding_income_count = funding_income_count
                 row.recovered_order_count = recovered_order_count
                 row.checked_at = checked_at
             await session.commit()
@@ -1537,6 +1587,88 @@ class Database:
                     )
                 ).tuples()
             )
+
+    async def persist_funding_income(
+        self,
+        *,
+        exchange: str,
+        environment: str,
+        records: list[dict[str, Any]],
+    ) -> int:
+        if not records:
+            return 0
+        async with self.sessions() as session:
+            inserted = 0
+            observed_at = datetime.now(UTC)
+            for record in records:
+                statement = (
+                    sqlite_insert(FundingIncomeRow)
+                    if self.engine.dialect.name == "sqlite"
+                    else postgresql_insert(FundingIncomeRow)
+                ).values(
+                    id=str(uuid.uuid4()),
+                    exchange_record_id=record["exchange_record_id"],
+                    exchange=exchange,
+                    environment=environment,
+                    symbol=record["symbol"],
+                    base_asset=record["base_asset"],
+                    asset=record["asset"],
+                    amount=record["amount"],
+                    rate=record.get("rate"),
+                    position_value=record.get("position_value"),
+                    occurred_at=_utc(record["occurred_at"]),
+                    observed_at=observed_at,
+                )
+                statement = statement.on_conflict_do_nothing(
+                    index_elements=[
+                        "exchange",
+                        "environment",
+                        "exchange_record_id",
+                    ]
+                )
+                result = await session.execute(statement)
+                inserted += int(result.rowcount or 0)
+            await session.commit()
+            return inserted
+
+    async def list_funding_income(
+        self,
+        *,
+        limit: int,
+        exchange: str | None = None,
+        environment: str | None = None,
+    ) -> list[FundingIncomeRow]:
+        async with self.sessions() as session:
+            statement = select(FundingIncomeRow)
+            if exchange is not None:
+                statement = statement.where(FundingIncomeRow.exchange == exchange)
+            if environment is not None:
+                statement = statement.where(
+                    FundingIncomeRow.environment == environment
+                )
+            return list(
+                await session.scalars(
+                    statement.order_by(
+                        FundingIncomeRow.occurred_at.desc(),
+                        FundingIncomeRow.id.desc(),
+                    ).limit(limit)
+                )
+            )
+
+    async def latest_funding_income_at(
+        self,
+        *,
+        exchange: str,
+        environment: str,
+    ) -> datetime | None:
+        async with self.sessions() as session:
+            latest = await session.scalar(
+                select(func.max(FundingIncomeRow.occurred_at)).where(
+                    FundingIncomeRow.exchange == exchange,
+                    FundingIncomeRow.environment == environment,
+                )
+            )
+            return _utc(latest) if latest is not None else None
 
     async def trade_intent_by_idempotency(
         self, idempotency_key: str

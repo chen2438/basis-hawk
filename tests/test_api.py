@@ -210,6 +210,22 @@ async def test_global_trade_ledgers_are_bounded_filterable_and_decimal_safe() ->
         settings=await database.load_settings(),
     )
     assert (await executor.run_once()).executed == 1
+    await database.persist_funding_income(
+        exchange="binance",
+        environment="paper",
+        records=[
+            {
+                "exchange_record_id": "fund-1",
+                "symbol": "BTCUSDT",
+                "base_asset": "BTC",
+                "asset": "USDT",
+                "amount": Decimal("0.25"),
+                "rate": Decimal("0.0001"),
+                "position_value": Decimal("2500"),
+                "occurred_at": datetime(2026, 7, 26, 12, tzinfo=UTC),
+            }
+        ],
+    )
 
     app = create_app(service, manage_lifecycle=False, auth_required=False)
     async with httpx.AsyncClient(
@@ -247,6 +263,15 @@ async def test_global_trade_ledgers_are_bounded_filterable_and_decimal_safe() ->
         assert realization["paired_position_id"] == position.id
         assert realization["closing_intent_id"] == closing.id
         assert isinstance(realization["net_pnl_usdt"], str)
+
+        funding_income = await client.get(
+            "/api/trades/funding-income",
+            params={"exchange": "binance", "limit": 10},
+        )
+        assert funding_income.status_code == 200
+        [funding_item] = funding_income.json()["items"]
+        assert funding_item["exchange_record_id"] == "fund-1"
+        assert funding_item["amount"] == "0.250000000000000000"
 
         too_many = await client.get("/api/trades/orders", params={"limit": 501})
         assert too_many.status_code == 422

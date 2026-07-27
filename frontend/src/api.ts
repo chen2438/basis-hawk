@@ -13,6 +13,7 @@ import type {
   LiveClosePreview,
   LiveOpenPreview,
   FillHistoryItem,
+  FundingIncome,
   NotificationHistoryItem,
   Opportunity,
   OrderHistoryItem,
@@ -107,6 +108,7 @@ export const api = {
   orders: () => request<{ items: OrderHistoryItem[] }>("/api/trades/orders?limit=100"),
   fills: () => request<{ items: FillHistoryItem[] }>("/api/trades/fills?limit=100"),
   pnlRealizations: () => request<{ items: PnlRealization[] }>("/api/trades/pnl?limit=100"),
+  fundingIncome: () => request<{ items: FundingIncome[] }>("/api/trades/funding-income?limit=100"),
   transfers: () => request<{ items: InternalTransfer[] }>("/api/transfers"),
   createTransfer: (
     value: {

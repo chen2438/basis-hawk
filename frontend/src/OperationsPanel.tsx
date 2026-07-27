@@ -11,6 +11,7 @@ import type {
   Exchange,
   ExecutionStatus,
   FillHistoryItem,
+  FundingIncome,
   InternalTransfer,
   LiveClosePreview,
   LiveOpenPreview,
@@ -53,6 +54,7 @@ export function OperationsPanel({
   const [orders, setOrders] = useState<OrderHistoryItem[]>([]);
   const [fills, setFills] = useState<FillHistoryItem[]>([]);
   const [pnlRealizations, setPnlRealizations] = useState<PnlRealization[]>([]);
+  const [fundingIncome, setFundingIncome] = useState<FundingIncome[]>([]);
   const [transfers, setTransfers] = useState<InternalTransfer[]>([]);
   const [automation, setAutomation] = useState<AutomationStatus | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
@@ -71,6 +73,7 @@ export function OperationsPanel({
       orderValue,
       fillValue,
       pnlValue,
+      fundingIncomeValue,
       transferValue,
       automationValue,
       auditValue,
@@ -85,6 +88,7 @@ export function OperationsPanel({
         api.orders(),
         api.fills(),
         api.pnlRealizations(),
+        api.fundingIncome(),
         api.transfers(),
         api.automation(),
         api.auditHistory(),
@@ -98,6 +102,7 @@ export function OperationsPanel({
     setOrders(orderValue.items);
     setFills(fillValue.items);
     setPnlRealizations(pnlValue.items);
+    setFundingIncome(fundingIncomeValue.items);
     setTransfers(transferValue.items);
     setAutomation(automationValue);
     setAuditEvents(auditValue.items);
@@ -174,6 +179,7 @@ export function OperationsPanel({
           orders={orders}
           fills={fills}
           pnlRealizations={pnlRealizations}
+          fundingIncome={fundingIncome}
         />}
         {tab === "transfers" && <TransfersView
           transfers={transfers}
@@ -502,11 +508,13 @@ function TradeLedgerView({
   orders,
   fills,
   pnlRealizations,
+  fundingIncome,
 }: {
   intents: TradeIntent[];
   orders: OrderHistoryItem[];
   fills: FillHistoryItem[];
   pnlRealizations: PnlRealization[];
+  fundingIncome: FundingIncome[];
 }) {
   return <div className="history-grid trade-ledger">
     <section>
@@ -550,6 +558,17 @@ function TradeLedgerView({
           <td className={Number(item.net_pnl_usdt) >= 0 ? "positive" : "negative"}>{amount(item.net_pnl_usdt)} USDT</td>
         </tr>)}</tbody>
       </table>{!pnlRealizations.length && <div className="empty">尚无已实现盈亏</div>}</div>
+    </section>
+    <section>
+      <header><div><h3>实际资金费</h3><p>最近 100 条从交易所私有账户账单核对的资金费收支。</p></div><strong>{fundingIncome.length}</strong></header>
+      <div className="ops-table-wrap"><table><thead><tr><th>结算时间</th><th>交易所</th><th>环境</th><th>标的</th><th>金额</th><th>费率</th><th>仓位价值</th></tr></thead>
+        <tbody>{fundingIncome.map((item) => <tr key={item.id}>
+          <td>{time(item.occurred_at)}</td><td>{exchangeNames[item.exchange]}</td><td>{item.environment}</td>
+          <td>{item.base_asset} · {item.symbol}</td>
+          <td className={Number(item.amount) >= 0 ? "positive" : "negative"}>{amount(item.amount)} {item.asset}</td>
+          <td>{item.rate == null ? "—" : `${amount(item.rate)}`}</td><td>{amount(item.position_value)}</td>
+        </tr>)}</tbody>
+      </table>{!fundingIncome.length && <div className="empty">尚无实际资金费记录</div>}</div>
     </section>
   </div>;
 }

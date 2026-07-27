@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict
@@ -144,6 +144,36 @@ class ReconciliationService:
                     client.snapshot(),
                     client.trading_state(),
                 )
+                funding_income_complete = False
+                funding_income_count = 0
+                latest_funding_income_at = (
+                    await self.database.latest_funding_income_at(
+                        exchange=summary.exchange.value,
+                        environment=summary.environment.value,
+                    )
+                )
+                funding_since = (
+                    latest_funding_income_at - timedelta(minutes=1)
+                    if latest_funding_income_at is not None
+                    else datetime.now(UTC) - timedelta(days=1)
+                )
+                try:
+                    funding_batch = await client.funding_income(
+                        since=funding_since
+                    )
+                except Exception:
+                    pass
+                else:
+                    funding_income_count = len(funding_batch.records)
+                    await self.database.persist_funding_income(
+                        exchange=summary.exchange.value,
+                        environment=summary.environment.value,
+                        records=[
+                            item.model_dump(mode="python")
+                            for item in funding_batch.records
+                        ],
+                    )
+                    funding_income_complete = funding_batch.complete
                 cancellation_submitted = 0
                 cancellation_failed = 0
                 if safety_pause_reason is not None:
@@ -322,6 +352,8 @@ class ReconciliationService:
                     recovered_order_count=recovered_order_count,
                     fill_reconciliation_complete=fill_reconciliation_complete,
                     fill_count=fill_count,
+                    funding_income_complete=funding_income_complete,
+                    funding_income_count=funding_income_count,
                     private_stream_ready=private_stream_ready,
                 )
                 blocked += int(not account_ready)

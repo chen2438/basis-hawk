@@ -43,7 +43,9 @@
 - `GET /api/trades/orders`：按更新时间倒序读取现货、永续及补偿订单腿，允许精确 `status` 过滤。
 - `GET /api/trades/fills`：按成交时间倒序读取本地已核对成交，并附带交易所、环境、标的、动作和订单腿。
 - `GET /api/trades/pnl`：按结算时间倒序读取已实现 PnL，并分别返回毛盈亏、分摊开仓费、平仓费和净盈亏。
-  四个全局账本入口默认返回 100 条、`limit` 范围为 1–500，所有金融值均为十进制字符串。
+- `GET /api/trades/funding-income`：按实际结算时间倒序读取交易所私有账户资金费收支，可按交易所和
+  环境过滤；正数表示收到、负数表示支付。
+  五个全局账本入口默认返回 100 条、`limit` 范围为 1–500，所有金融值均为十进制字符串。
 - `GET /api/trades/positions?status=open`：读取配对仓位。
 - `POST /api/trades/paper/positions/{uuid}/close`：使用现货 bid 卖出及永续 ask reduce-only
   买回计划纸面平仓，同样要求 UUID `Idempotency-Key`。

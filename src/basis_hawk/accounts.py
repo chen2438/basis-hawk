@@ -231,6 +231,36 @@ class RemoteFillBatch(BaseModel):
     incomplete_reason: str | None = None
 
 
+class RemoteFundingIncome(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    exchange_record_id: str
+    symbol: str
+    base_asset: str
+    asset: str = "USDT"
+    amount: Decimal
+    rate: Decimal | None = None
+    position_value: Decimal | None = None
+    occurred_at: datetime
+
+    @field_serializer(
+        "amount",
+        "rate",
+        "position_value",
+        when_used="json",
+    )
+    def serialize_decimal(self, value: Decimal | None) -> str | None:
+        return format(value, "f") if value is not None else None
+
+
+class RemoteFundingIncomeBatch(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    records: list[RemoteFundingIncome]
+    complete: bool
+    incomplete_reason: str | None = None
+
+
 class RemoteOrderLookup(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -364,6 +394,19 @@ class PrivateAccountClient(ABC):
         symbol: str,
         client_order_id: str,
     ) -> RemoteOrderLookup: ...
+
+    async def funding_income(
+        self,
+        *,
+        since: datetime,
+    ) -> RemoteFundingIncomeBatch:
+        return RemoteFundingIncomeBatch(
+            records=[],
+            complete=False,
+            incomplete_reason=(
+                f"{self.exchange.value} funding income is not implemented"
+            ),
+        )
 
     async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
         raise UnsupportedTradingError(
@@ -737,6 +780,38 @@ class BinanceAccountClient(PrivateAccountClient):
                 ),
             ),
             complete=True,
+        )
+
+    async def funding_income(
+        self,
+        *,
+        since: datetime,
+    ) -> RemoteFundingIncomeBatch:
+        items = await self._get(
+            self.perp,
+            "/fapi/v1/income",
+            incomeType="FUNDING_FEE",
+            startTime=_milliseconds(since),
+            limit=1000,
+        )
+        records = [
+            RemoteFundingIncome(
+                exchange_record_id=str(item.get("tranId") or ""),
+                symbol=str(item.get("symbol") or ""),
+                base_asset=_funding_base_asset(
+                    self.exchange,
+                    str(item.get("symbol") or ""),
+                ),
+                asset=str(item.get("asset") or ""),
+                amount=Decimal(str(item.get("income") or "0")),
+                occurred_at=_from_milliseconds(item.get("time")),
+            )
+            for item in items
+        ]
+        return _funding_batch(
+            records,
+            limit_reached=len(items) >= 1000,
+            exchange="Binance",
         )
 
     async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
@@ -1113,6 +1188,42 @@ class OkxAccountClient(PrivateAccountClient):
                 reduce_only=_okx_reduce_only(item),
             ),
             complete=True,
+        )
+
+    async def funding_income(
+        self,
+        *,
+        since: datetime,
+    ) -> RemoteFundingIncomeBatch:
+        payload = await self._get(
+            "/api/v5/account/bills",
+            type="8",
+            begin=_milliseconds(since),
+            limit=100,
+        )
+        _okx_success(payload)
+        items = payload.get("data") or []
+        records = [
+            RemoteFundingIncome(
+                exchange_record_id=str(item.get("billId") or ""),
+                symbol=str(item.get("instId") or ""),
+                base_asset=_funding_base_asset(
+                    self.exchange,
+                    str(item.get("instId") or ""),
+                ),
+                asset=str(item.get("ccy") or ""),
+                amount=Decimal(
+                    str(item.get("balChg") or item.get("pnl") or "0")
+                ),
+                occurred_at=_from_milliseconds(item.get("ts")),
+            )
+            for item in items
+            if str(item.get("subType") or "") in {"173", "174"}
+        ]
+        return _funding_batch(
+            records,
+            limit_reached=len(items) >= 100,
+            exchange="OKX",
         )
 
     async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
@@ -1514,6 +1625,44 @@ class BybitAccountClient(PrivateAccountClient):
         return RemoteOrderLookup(
             order=_bybit_order(items[0], market=market) if items else None,
             complete=True,
+        )
+
+    async def funding_income(
+        self,
+        *,
+        since: datetime,
+    ) -> RemoteFundingIncomeBatch:
+        payload = await self._get(
+            "/v5/account/transaction-log",
+            accountType="UNIFIED",
+            category="linear",
+            type="SETTLEMENT",
+            startTime=_milliseconds(since),
+            endTime=_milliseconds(datetime.now(UTC)),
+            limit=50,
+        )
+        result = _bybit_result(payload, "funding income")
+        items = result.get("list") or []
+        records = [
+            RemoteFundingIncome(
+                exchange_record_id=str(item.get("id") or ""),
+                symbol=str(item.get("symbol") or ""),
+                base_asset=_funding_base_asset(
+                    self.exchange,
+                    str(item.get("symbol") or ""),
+                ),
+                asset=str(item.get("currency") or ""),
+                amount=Decimal(str(item.get("funding") or "0")),
+                rate=_optional_decimal(item.get("feeRate")),
+                occurred_at=_from_milliseconds(item.get("transactionTime")),
+            )
+            for item in items
+            if Decimal(str(item.get("funding") or "0")) != 0
+        ]
+        return _funding_batch(
+            records,
+            limit_reached=bool(result.get("nextPageCursor")),
+            exchange="Bybit",
         )
 
     async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
@@ -2195,6 +2344,86 @@ class BitgetAccountClient(PrivateAccountClient):
         return RemoteOrderLookup(
             order=_bitget_order(items[0], market=market) if items else None,
             complete=True,
+        )
+
+    async def funding_income(
+        self,
+        *,
+        since: datetime,
+    ) -> RemoteFundingIncomeBatch:
+        generation = await self._detect_account_generation()
+        if generation == "uta":
+            payload = await self._get(
+                "/api/v3/account/financial-records",
+                category="USDT-FUTURES",
+                coin="USDT",
+                startTime=_milliseconds(since),
+                limit=100,
+            )
+            result = _bitget_result(payload, "funding income")
+            items = result.get("list") or []
+            funding_types = {
+                "CONTRACT_MAIN_SETTLE_FEE_USER_IN",
+                "CONTRACT_MAIN_SETTLE_FEE_USER_OUT",
+                "MARGIN_SETTLE_FEE_USER_IN",
+                "MARGIN_SETTLE_FEE_USER_OUT",
+                "FIXED_SETTLE_FEE_USER_IN",
+                "FIXED_SETTLE_FEE_USER_OUT",
+            }
+            records = []
+            for item in items:
+                record_type = str(item.get("type") or "")
+                if record_type not in funding_types:
+                    continue
+                amount = abs(Decimal(str(item.get("amount") or "0")))
+                if record_type.endswith("_OUT"):
+                    amount = -amount
+                symbol = str(item.get("symbol") or "")
+                records.append(
+                    RemoteFundingIncome(
+                        exchange_record_id=str(item.get("id") or ""),
+                        symbol=symbol,
+                        base_asset=_funding_base_asset(self.exchange, symbol),
+                        asset=str(item.get("coin") or "USDT"),
+                        amount=amount,
+                        occurred_at=_from_milliseconds(
+                            item.get("cTime") or item.get("uTime")
+                        ),
+                    )
+                )
+            return _funding_batch(
+                records,
+                limit_reached=bool(result.get("endId")),
+                exchange="Bitget",
+            )
+
+        payload = await self._get(
+            "/api/v2/mix/account/bill",
+            productType="USDT-FUTURES",
+            businessType="contract_settle_fee",
+            startTime=_milliseconds(since),
+            limit=100,
+        )
+        result = _bitget_result(payload, "funding income")
+        items = result.get("bills") or []
+        records = [
+            RemoteFundingIncome(
+                exchange_record_id=str(item.get("billId") or ""),
+                symbol=str(item.get("symbol") or ""),
+                base_asset=_funding_base_asset(
+                    self.exchange,
+                    str(item.get("symbol") or ""),
+                ),
+                asset=str(item.get("coin") or ""),
+                amount=Decimal(str(item.get("amount") or "0")),
+                occurred_at=_from_milliseconds(item.get("cTime")),
+            )
+            for item in items
+        ]
+        return _funding_batch(
+            records,
+            limit_reached=bool(result.get("endId")) and len(items) >= 100,
+            exchange="Bitget",
         )
 
     async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
@@ -3021,6 +3250,41 @@ class GateAccountClient(PrivateAccountClient):
             order = _gate_perp_order(item)
         return RemoteOrderLookup(order=order, complete=True)
 
+    async def funding_income(
+        self,
+        *,
+        since: datetime,
+    ) -> RemoteFundingIncomeBatch:
+        items = await self._request(
+            "GET",
+            "/api/v4/futures/usdt/account_book",
+            params={
+                "type": "fund",
+                "from": int(since.timestamp()),
+                "limit": 100,
+                "offset": 0,
+            },
+        )
+        records = [
+            RemoteFundingIncome(
+                exchange_record_id=str(item.get("id") or ""),
+                symbol=str(item.get("contract") or ""),
+                base_asset=_funding_base_asset(
+                    self.exchange,
+                    str(item.get("contract") or ""),
+                ),
+                asset="USDT",
+                amount=Decimal(str(item.get("change") or "0")),
+                occurred_at=_from_seconds(item.get("time")),
+            )
+            for item in items
+        ]
+        return _funding_batch(
+            records,
+            limit_reached=len(items) >= 100,
+            exchange="Gate",
+        )
+
     async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
         if (
             not re.fullmatch(r"t-[A-Za-z0-9_.-]+", order.client_order_id)
@@ -3588,6 +3852,44 @@ class MexcAccountClient(PrivateAccountClient):
             order = _mexc_perp_order(item) if item else None
         return RemoteOrderLookup(order=order, complete=True)
 
+    async def funding_income(
+        self,
+        *,
+        since: datetime,
+    ) -> RemoteFundingIncomeBatch:
+        payload = await self._perp_get(
+            "/api/v1/private/position/funding_records",
+            page_num=1,
+            page_size=100,
+        )
+        if not _mexc_success(payload):
+            raise PrivateRequestError("MEXC funding income request failed")
+        data = payload.get("data") or {}
+        items = data.get("resultList") or []
+        records = [
+            RemoteFundingIncome(
+                exchange_record_id=str(item.get("id") or ""),
+                symbol=str(item.get("symbol") or ""),
+                base_asset=_funding_base_asset(
+                    self.exchange,
+                    str(item.get("symbol") or ""),
+                ),
+                asset="USDT",
+                amount=Decimal(str(item.get("funding") or "0")),
+                rate=_optional_decimal(item.get("rate")),
+                position_value=_optional_decimal(item.get("positionValue")),
+                occurred_at=_from_milliseconds(item.get("settleTime")),
+            )
+            for item in items
+            if _from_milliseconds(item.get("settleTime")) >= since
+        ]
+        total_count = int(data.get("totalCount") or len(items))
+        return _funding_batch(
+            records,
+            limit_reached=total_count > len(items),
+            exchange="MEXC",
+        )
+
     async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", order.client_order_id):
             raise ValueError(
@@ -4126,6 +4428,47 @@ def _from_milliseconds(value: object) -> datetime:
 
 def _from_seconds(value: object) -> datetime:
     return datetime.fromtimestamp(int(value or 0), tz=UTC)
+
+
+def _funding_base_asset(exchange: Exchange, symbol: str) -> str:
+    value = symbol.upper()
+    if exchange == Exchange.OKX and value.endswith("-USDT-SWAP"):
+        value = value[: -len("-USDT-SWAP")]
+    elif exchange in {Exchange.GATE, Exchange.MEXC} and value.endswith("_USDT"):
+        value = value[: -len("_USDT")]
+    elif value.endswith("USDT"):
+        value = value[:-4].rstrip("-_")
+    else:
+        value = ""
+    if not value:
+        raise PrivateRequestError("funding income returned an invalid USDT symbol")
+    return value
+
+
+def _funding_batch(
+    records: list[RemoteFundingIncome],
+    *,
+    limit_reached: bool,
+    exchange: str,
+) -> RemoteFundingIncomeBatch:
+    for record in records:
+        if not record.exchange_record_id:
+            raise PrivateRequestError(
+                f"{exchange} funding income returned no record ID"
+            )
+        if record.asset.upper() != "USDT":
+            raise PrivateRequestError(
+                f"{exchange} funding income returned a non-USDT asset"
+            )
+    return RemoteFundingIncomeBatch(
+        records=records,
+        complete=not limit_reached,
+        incomplete_reason=(
+            None
+            if not limit_reached
+            else f"{exchange} funding income result requires another page"
+        ),
+    )
 
 
 def _missing_order_id(exchange: str) -> RemoteFillBatch:

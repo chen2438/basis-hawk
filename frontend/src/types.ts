@@ -75,10 +75,12 @@ export interface ReconciliationAccount {
   trading_state_complete: boolean;
   order_reconciliation_complete: boolean;
   fill_reconciliation_complete: boolean;
+  funding_income_complete: boolean;
   private_stream_ready: boolean;
   open_order_count: number;
   position_count: number;
   fill_count: number;
+  funding_income_count: number;
   recovered_order_count: number;
   checked_at: string;
 }
@@ -177,6 +179,21 @@ export interface PnlRealization {
   closing_fees_usdt: string;
   net_pnl_usdt: string;
   realized_at: string;
+}
+
+export interface FundingIncome {
+  id: string;
+  exchange_record_id: string;
+  exchange: Exchange;
+  environment: Environment;
+  symbol: string;
+  base_asset: string;
+  asset: "USDT";
+  amount: string;
+  rate: string | null;
+  position_value: string | null;
+  occurred_at: string;
+  observed_at: string;
 }
 
 export interface InternalTransfer {

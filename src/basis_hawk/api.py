@@ -535,10 +535,12 @@ def create_app(
                     "fill_reconciliation_complete": (
                         item.fill_reconciliation_complete
                     ),
+                    "funding_income_complete": item.funding_income_complete,
                     "private_stream_ready": item.private_stream_ready,
                     "open_order_count": item.open_order_count,
                     "position_count": item.position_count,
                     "fill_count": item.fill_count,
+                    "funding_income_count": item.funding_income_count,
                     "recovered_order_count": item.recovered_order_count,
                     "checked_at": item.checked_at.isoformat(),
                 }
@@ -1479,6 +1481,45 @@ def create_app(
             "items": [
                 item.model_dump(mode="json")
                 for item in await trade_ledger.pnl_realizations(limit=limit)
+            ]
+        }
+
+    @app.get("/api/trades/funding-income")
+    async def funding_income(
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        exchange: Exchange | None = None,
+        environment: ExchangeEnvironment | None = None,
+    ) -> dict[str, object]:
+        rows = await scanner.database.list_funding_income(
+            limit=limit,
+            exchange=exchange.value if exchange is not None else None,
+            environment=(
+                environment.value if environment is not None else None
+            ),
+        )
+        return {
+            "items": [
+                {
+                    "id": item.id,
+                    "exchange_record_id": item.exchange_record_id,
+                    "exchange": item.exchange,
+                    "environment": item.environment,
+                    "symbol": item.symbol,
+                    "base_asset": item.base_asset,
+                    "asset": item.asset,
+                    "amount": format(item.amount, "f"),
+                    "rate": (
+                        format(item.rate, "f") if item.rate is not None else None
+                    ),
+                    "position_value": (
+                        format(item.position_value, "f")
+                        if item.position_value is not None
+                        else None
+                    ),
+                    "occurred_at": item.occurred_at.isoformat(),
+                    "observed_at": item.observed_at.isoformat(),
+                }
+                for item in rows
             ]
         }
 
