@@ -62,6 +62,42 @@ const updateStateNames: Record<UpdateStatus["state"], string> = {
   succeeded: "更新完成",
   failed: "更新失败",
 };
+const tradeFailureReasons: Record<string, string> = {
+  market_data_expired: "行情数据过期，订单未提交",
+  no_fills: "现货与永续均未成交",
+  exposure_neutralized: "单腿成交后已补偿归零，未建立持仓",
+  state_transition_failed: "交易状态机已终止该意图",
+  credential_missing: "交易所凭据不存在",
+  account_client_failed: "交易所账户连接初始化失败",
+  account_snapshot_failed: "账户余额或权限快照读取失败",
+  remote_state_failed: "远端订单与仓位状态读取失败",
+  account_snapshot_stale: "账户快照已过期或与当前账户不匹配",
+  trade_permission_unconfirmed: "现货与永续双腿交易权限未确认",
+  position_mode_unknown: "永续持仓模式无法确认",
+  remote_state_incomplete: "远端订单或仓位结果不完整",
+  remote_open_orders: "账户存在未完成的远端订单",
+  intent_missing: "交易意图在提交前已不存在",
+  intent_legs_invalid: "交易意图的现货或永续订单腿不完整",
+  remote_positions_present: "账户存在未匹配的远端仓位",
+  balance_insufficient: "现货余额或永续保证金不足",
+  perp_configuration_failed: "永续保证金模式或杠杆配置失败",
+  close_state_mismatch: "远端持仓与待平配对仓位不一致",
+  preflight_internal_error: "订单预检发生未分类内部错误",
+};
+export const executionReason = (reason: string) => {
+  const match = /^live_order_preflight:([^:]+):([^:]+)$/.exec(reason);
+  if (!match) return reason;
+  const exchange = match[1] as Exchange;
+  const exchangeName = exchangeNames[exchange] ?? match[1];
+  const detail = tradeFailureReasons[match[2]] ?? `未知预检代码：${match[2]}`;
+  return `${exchangeName} 实盘订单预检未通过：${detail}。订单尚未提交，重新对账并检查账户配置后再试。`;
+};
+export const tradeFailureReason = (item: TradeIntent) =>
+  item.failure_code
+    ? (tradeFailureReasons[item.failure_code] ?? `未知失败代码：${item.failure_code}`)
+    : item.status === "failed"
+      ? "升级前记录，未保存失败原因"
+      : "—";
 
 export function OperationsPanel({
   opportunities,
@@ -333,7 +369,7 @@ function SystemView({
         </tr>)}</tbody>
       </table>{!backup?.archives.length && <div className="empty">当前没有备份归档</div>}</div>
     </section>
-    <div className="safety-callout"><strong>当前原因</strong><p>{execution.reason}</p>
+    <div className="safety-callout"><strong>当前原因</strong><p>{executionReason(execution.reason)}</p>
       <div className="inline-actions">
         <button className="button danger" disabled={busy || execution.state === "paused"} onClick={() => {
           if (window.confirm("确认暂停新交易并让 worker 撤销所有远端活动订单？")) {
@@ -657,27 +693,15 @@ function TradeLedgerView({
   pnlRealizations: PnlRealization[];
   fundingIncome: FundingIncome[];
 }) {
-  const failureReason = (item: TradeIntent) => {
-    if (item.status !== "failed") return "—";
-    const reasons: Record<string, string> = {
-      market_data_expired: "行情数据过期，订单未提交",
-      no_fills: "现货与永续均未成交",
-      exposure_neutralized: "单腿成交后已补偿归零，未建立持仓",
-      state_transition_failed: "交易状态机已终止该意图",
-    };
-    return item.failure_code
-      ? (reasons[item.failure_code] ?? `未知失败代码：${item.failure_code}`)
-      : "升级前记录，未保存失败原因";
-  };
   return <div className="history-grid trade-ledger">
     <section>
       <header><div><h3>交易意图</h3><p>最近 100 条持久化开平仓请求。</p></div><strong>{intents.length}</strong></header>
-      <div className="ops-table-wrap"><table><thead><tr><th>时间</th><th>交易所</th><th>环境</th><th>标的</th><th>动作</th><th>名义额</th><th>状态</th><th>失败原因</th></tr></thead>
+      <div className="ops-table-wrap"><table><thead><tr><th>时间</th><th>交易所</th><th>环境</th><th>标的</th><th>动作</th><th>名义额</th><th>状态</th><th>失败/阻断原因</th></tr></thead>
         <tbody>{intents.map((item) => <tr key={item.id}>
           <td>{time(item.created_at)}</td><td>{exchangeNames[item.exchange]}</td><td>{item.environment}</td>
           <td>{item.base_asset}</td><td>{item.emergency ? `紧急${item.action}` : item.action}</td>
           <td>{amount(item.requested_notional)} USDT</td><td><span className={`status-pill ${item.status}`}>{item.status}</span></td>
-          <td>{failureReason(item)}</td>
+          <td>{tradeFailureReason(item)}</td>
         </tr>)}</tbody>
       </table>{!intents.length && <div className="empty">尚无交易意图</div>}</div>
     </section>

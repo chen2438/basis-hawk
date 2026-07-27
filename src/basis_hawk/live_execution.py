@@ -45,6 +45,12 @@ class LiveCompensationResult(BaseModel):
     failed: int
 
 
+class LivePreflightError(RuntimeError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class LiveExecutionService:
     def __init__(
         self,
@@ -99,14 +105,20 @@ class LiveExecutionService:
                 continue
             try:
                 did_submit, uncertain_legs = await self._execute(item)
+            except LivePreflightError as exc:
+                preflight_failed += 1
+                await self.database.record_live_preflight_failure(
+                    intent_id=item.id,
+                    exchange=item.exchange,
+                    failure_code=exc.code,
+                )
+                break
             except Exception:
                 preflight_failed += 1
-                await self.database.set_execution_control(
-                    state="paused",
-                    reason=(
-                        "live order preflight failed; account reconciliation "
-                        "and operator review are required"
-                    ),
+                await self.database.record_live_preflight_failure(
+                    intent_id=item.id,
+                    exchange=item.exchange,
+                    failure_code="preflight_internal_error",
                 )
                 break
             submitted += int(did_submit)
@@ -125,55 +137,76 @@ class LiveExecutionService:
         environment = ExchangeEnvironment(intent.environment)
         secrets = await self.credentials.load(exchange, environment)
         if secrets is None:
-            raise RuntimeError("exchange credential is not configured")
-        client = self.account_client_factory(exchange, secrets, environment)
+            raise LivePreflightError("credential_missing")
         try:
-            snapshot = await client.snapshot()
-            remote_state = await client.trading_state()
+            client = self.account_client_factory(exchange, secrets, environment)
+        except Exception as exc:
+            raise LivePreflightError("account_client_failed") from exc
+        try:
+            try:
+                snapshot = await client.snapshot()
+            except Exception as exc:
+                raise LivePreflightError("account_snapshot_failed") from exc
+            try:
+                remote_state = await client.trading_state()
+            except Exception as exc:
+                raise LivePreflightError("remote_state_failed") from exc
             if (
                 snapshot.exchange != exchange
                 or snapshot.environment != environment
                 or snapshot.observed_at < datetime.now(UTC) - timedelta(seconds=30)
             ):
-                raise RuntimeError("private account snapshot is not current")
+                raise LivePreflightError("account_snapshot_stale")
             if snapshot.trade_permission is not True:
-                raise RuntimeError("two-leg trade permission is not confirmed")
+                raise LivePreflightError("trade_permission_unconfirmed")
             if snapshot.position_mode == PositionMode.UNKNOWN:
-                raise RuntimeError("perpetual position mode is unknown")
+                raise LivePreflightError("position_mode_unknown")
             if not remote_state.complete:
-                raise RuntimeError("remote account state is incomplete")
+                raise LivePreflightError("remote_state_incomplete")
             if remote_state.open_orders:
-                raise RuntimeError("remote account has open orders")
+                raise LivePreflightError("remote_open_orders")
             current = await self.database.trade_intent(intent.id)
             if current is None:
-                raise RuntimeError("trade intent disappeared before submission")
+                raise LivePreflightError("intent_missing")
             _, legs = current
             primary = {item.leg: item for item in legs if item.leg in {"spot", "perp"}}
             if set(primary) != {"spot", "perp"}:
-                raise RuntimeError("trade intent does not contain two primary legs")
+                raise LivePreflightError("intent_legs_invalid")
             if intent.action == "open":
                 if remote_state.positions:
-                    raise RuntimeError("remote account has an existing position")
-                LiveCompensationService._validate_balance(
-                    snapshot,
-                    intent,
-                    primary,
-                )
-                await client.configure_perp(
-                    symbol=primary["perp"].symbol,
-                    leverage=intent.leverage,
-                    position_mode=snapshot.position_mode,
-                )
+                    raise LivePreflightError("remote_positions_present")
+                try:
+                    LiveCompensationService._validate_balance(
+                        snapshot,
+                        intent,
+                        primary,
+                    )
+                except Exception as exc:
+                    raise LivePreflightError("balance_insufficient") from exc
+                try:
+                    await client.configure_perp(
+                        symbol=primary["perp"].symbol,
+                        leverage=intent.leverage,
+                        position_mode=snapshot.position_mode,
+                    )
+                except Exception as exc:
+                    raise LivePreflightError(
+                        "perp_configuration_failed"
+                    ) from exc
             else:
-                await LiveCompensationService._validate_close_state(
-                    self,
-                    intent,
-                    primary,
-                    remote_state.positions,
-                    expected_isolated=(
-                        snapshot.perp_margin_mode == PerpMarginMode.ISOLATED
-                    ),
-                )
+                try:
+                    await LiveCompensationService._validate_close_state(
+                        self,
+                        intent,
+                        primary,
+                        remote_state.positions,
+                        expected_isolated=(
+                            snapshot.perp_margin_mode
+                            == PerpMarginMode.ISOLATED
+                        ),
+                    )
+                except Exception as exc:
+                    raise LivePreflightError("close_state_mismatch") from exc
             prepared = await self.database.prepare_live_submission(
                 intent_id=intent.id
             )
@@ -225,7 +258,10 @@ class LiveExecutionService:
                     uncertain += 1
             return True, uncertain
         finally:
-            await client.close()
+            try:
+                await client.close()
+            except Exception:
+                pass
 
 
 class LiveCompensationService:

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { apiErrorMessage } from "./api";
+import { executionReason, tradeFailureReason } from "./OperationsPanel";
 
 class FakeSocket { onmessage: ((event: { data: string }) => void) | null = null; close() {} }
 
@@ -134,6 +135,20 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByRole("button", { name: "市场总览" })).toBeTruthy();
     expect(screen.getAllByText("Bitget").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Gate").length).toBeGreaterThan(0);
+  });
+
+  it("translates safe live preflight reasons for execution and ledger views", () => {
+    expect(executionReason(
+      "live_order_preflight:gate:perp_configuration_failed",
+    )).toContain(
+      "Gate 实盘订单预检未通过：永续保证金模式或杠杆配置失败",
+    );
+    expect(tradeFailureReason({
+      status: "planned",
+      failure_code: "perp_configuration_failed",
+    } as Parameters<typeof tradeFailureReason>[0])).toBe(
+      "永续保证金模式或杠杆配置失败",
+    );
   });
 
   it("loads and shows each opening-leg top-book capacity", async () => {

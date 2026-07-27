@@ -86,10 +86,12 @@ class FakeLiveAccountClient:
         database: Database,
         *,
         fail_market: str | None = None,
+        fail_configuration: bool = False,
         positions: list[RemotePosition] | None = None,
     ) -> None:
         self.database = database
         self.fail_market = fail_market
+        self.fail_configuration = fail_configuration
         self.positions = positions or []
         self.placed: list[LimitIocOrder] = []
         self.configured: list[tuple[str, int, PositionMode]] = []
@@ -126,6 +128,10 @@ class FakeLiveAccountClient:
         leverage: int,
         position_mode: PositionMode,
     ) -> PerpConfiguration:
+        if self.fail_configuration:
+            raise RuntimeError(
+                "sensitive exchange response with signed request data"
+            )
         self.configured.append((symbol, leverage, position_mode))
         return PerpConfiguration(
             symbol=symbol,
@@ -465,8 +471,43 @@ async def test_live_executor_rejects_close_when_remote_position_drifted() -> Non
     assert client.placed == []
     stored = await database.trade_intent(intent_id)
     assert stored is not None and stored[0].status == "planned"
+    assert stored[0].failure_code == "close_state_mismatch"
     control = await database.execution_control()
     assert control is not None and control.state == "paused"
+    assert (
+        control.reason
+        == "live_order_preflight:okx:close_state_mismatch"
+    )
+    await database.close()
+
+
+async def test_live_executor_persists_safe_configuration_failure() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials, intent_id = await _planned_live_intent(database)
+    await database.set_execution_control(state="ready", reason="test")
+    client = FakeLiveAccountClient(database, fail_configuration=True)
+
+    result = await LiveExecutionService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    ).run_once()
+
+    stored = await database.trade_intent(intent_id)
+    control = await database.execution_control()
+    assert result.preflight_failed == 1
+    assert client.placed == []
+    assert stored is not None
+    assert stored[0].status == "planned"
+    assert stored[0].failure_code == "perp_configuration_failed"
+    assert control is not None
+    assert control.state == "paused"
+    assert (
+        control.reason
+        == "live_order_preflight:okx:perp_configuration_failed"
+    )
+    assert "sensitive" not in control.reason
     await database.close()
 
 

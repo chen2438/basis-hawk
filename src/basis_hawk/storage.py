@@ -682,7 +682,15 @@ class TradeIntentRow(Base):
         CheckConstraint(
             "failure_code IS NULL OR failure_code IN "
             "('market_data_expired', 'no_fills', "
-            "'exposure_neutralized', 'state_transition_failed')",
+            "'exposure_neutralized', 'state_transition_failed', "
+            "'credential_missing', 'account_client_failed', "
+            "'account_snapshot_failed', 'remote_state_failed', "
+            "'account_snapshot_stale', 'trade_permission_unconfirmed', "
+            "'position_mode_unknown', 'remote_state_incomplete', "
+            "'remote_open_orders', 'intent_missing', "
+            "'intent_legs_invalid', 'remote_positions_present', "
+            "'balance_insufficient', 'perp_configuration_failed', "
+            "'close_state_mismatch', 'preflight_internal_error')",
             name="ck_trade_intent_failure_code",
         ),
         CheckConstraint(
@@ -1152,6 +1160,45 @@ class Database:
                 row.state = state
                 row.reason = reason
                 row.updated_at = now
+            await session.commit()
+
+    async def record_live_preflight_failure(
+        self,
+        *,
+        intent_id: str,
+        exchange: str,
+        failure_code: str,
+    ) -> None:
+        async with self.sessions() as session:
+            intent = await session.scalar(
+                select(TradeIntentRow)
+                .where(TradeIntentRow.id == intent_id)
+                .with_for_update()
+            )
+            control = await session.scalar(
+                select(ExecutionControlRow)
+                .where(ExecutionControlRow.id == 1)
+                .with_for_update()
+            )
+            now = datetime.now(UTC)
+            if intent is not None and intent.status == "planned":
+                intent.failure_code = failure_code
+                intent.version += 1
+                intent.updated_at = now
+            reason = f"live_order_preflight:{exchange}:{failure_code}"
+            if control is None:
+                session.add(
+                    ExecutionControlRow(
+                        id=1,
+                        state="paused",
+                        reason=reason,
+                        updated_at=now,
+                    )
+                )
+            else:
+                control.state = "paused"
+                control.reason = reason
+                control.updated_at = now
             await session.commit()
 
     async def request_execution_reconciliation(self, *, reason: str) -> None:
@@ -2213,6 +2260,7 @@ class Database:
                     )
             now = datetime.now(UTC)
             intent.status = "executing"
+            intent.failure_code = None
             intent.version += 1
             intent.updated_at = now
             for item in primary.values():
