@@ -1458,6 +1458,18 @@ class BybitAccountClient(PrivateAccountClient):
         _bybit_success(wallet)
         _bybit_success(info)
         _bybit_success(api_key)
+        position_mode = _bybit_position_mode(positions)
+        if position_mode == PositionMode.UNKNOWN:
+            probe = await self._get(
+                "/v5/position/list",
+                category="linear",
+                symbol="BTCUSDT",
+                limit=200,
+            )
+            _bybit_success(probe)
+            position_mode = _bybit_position_mode(
+                (probe.get("result") or {}).get("list") or []
+            )
         account = ((wallet.get("result") or {}).get("list") or [{}])[0]
         coin = next(
             (item for item in account.get("coin", []) if item.get("coin") == "USDT"),
@@ -1496,7 +1508,7 @@ class BybitAccountClient(PrivateAccountClient):
                 f"unified:{details.get('unifiedMarginStatus', 'unknown')}:"
                 f"{details.get('marginMode', 'unknown')}"
             ),
-            position_mode=_bybit_position_mode(positions),
+            position_mode=position_mode,
             trade_permission=(
                 str(key_details.get("readOnly")) == "0"
                 and "Order" in contract_permissions

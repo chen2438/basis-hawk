@@ -257,6 +257,8 @@ async def test_okx_account_snapshot_and_signature() -> None:
 
 
 async def test_bybit_account_snapshot_and_signature() -> None:
+    position_queries: list[dict[str, str]] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
         query = request.url.query.decode()
         assert request.headers["X-BAPI-SIGN"] == _hmac_hex(
@@ -264,12 +266,17 @@ async def test_bybit_account_snapshot_and_signature() -> None:
             f"1700000000000{SECRETS.api_key}5000{query}",
         )
         if request.url.path == "/v5/position/list":
+            position_queries.append(dict(request.url.params))
             return httpx.Response(
                 200,
                 json={
                     "retCode": 0,
                     "result": {
-                        "list": [{"positionIdx": 0, "size": "0"}],
+                        "list": (
+                            [{"positionIdx": 0, "size": "0"}]
+                            if request.url.params.get("symbol") == "BTCUSDT"
+                            else []
+                        ),
                         "nextPageCursor": "",
                     },
                 },
@@ -338,6 +345,10 @@ async def test_bybit_account_snapshot_and_signature() -> None:
     assert snapshot.account_mode == "unified:5:ISOLATED_MARGIN"
     assert snapshot.position_mode == PositionMode.ONE_WAY
     assert snapshot.trade_permission is True
+    assert position_queries == [
+        {"category": "linear", "limit": "200", "settleCoin": "USDT"},
+        {"category": "linear", "limit": "200", "symbol": "BTCUSDT"},
+    ]
     await http.aclose()
 
 
