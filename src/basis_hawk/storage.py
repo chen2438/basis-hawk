@@ -3622,6 +3622,45 @@ class Database:
                 select(AdminUserRow).where(AdminUserRow.username == username)
             )
 
+    async def rotate_admin_totp(
+        self,
+        *,
+        username: str,
+        expected_nonce: str,
+        totp_ciphertext: str,
+        totp_nonce: str,
+        key_version: int,
+    ) -> bool:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(AdminUserRow)
+                .where(AdminUserRow.username == username)
+                .with_for_update()
+            )
+            if row is None or row.totp_nonce != expected_nonce:
+                return False
+            row.totp_ciphertext = totp_ciphertext
+            row.totp_nonce = totp_nonce
+            row.key_version = key_version
+            await session.execute(
+                delete(AdminSessionRow).where(AdminSessionRow.admin_id == row.id)
+            )
+            session.add(
+                AuditEventRow(
+                    id=str(uuid.uuid4()),
+                    occurred_at=datetime.now(UTC),
+                    event_type="auth.totp_rotated",
+                    actor=row.username,
+                    details=json.dumps(
+                        {"all_sessions_revoked": True},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            )
+            await session.commit()
+            return True
+
     async def create_session(
         self,
         *,

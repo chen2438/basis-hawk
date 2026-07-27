@@ -1,3 +1,5 @@
+import hashlib
+from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -6,7 +8,11 @@ import pytest
 from cryptography.exceptions import InvalidTag
 
 from basis_hawk.api import CSRF_COOKIE, create_app
-from basis_hawk.auth import AuthService, LoginAttemptLimiter
+from basis_hawk.auth import (
+    AuthenticationError,
+    AuthService,
+    LoginAttemptLimiter,
+)
 from basis_hawk.crypto import EncryptedPayload, SecretCipher
 from basis_hawk.service import ScannerService
 from basis_hawk.storage import Database
@@ -77,6 +83,66 @@ async def test_login_session_and_csrf_protection() -> None:
                 headers={"X-CSRF-Token": csrf},
             )
         ).status_code == 200
+    await database.close()
+
+
+async def test_totp_rotation_requires_password_and_revokes_sessions() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    cipher = SecretCipher(SecretCipher.generate_key())
+    auth = AuthService(database, cipher)
+    original_uri = await auth.bootstrap_admin(
+        "admin",
+        "correct horse battery staple",
+    )
+    original_secret = parse_qs(urlparse(original_uri).query)["secret"][0]
+    session = await auth.login(
+        "admin",
+        "correct horse battery staple",
+        pyotp.TOTP(original_secret).now(),
+    )
+
+    with pytest.raises(
+        AuthenticationError,
+        match="invalid administrator username or password",
+    ):
+        await auth.rotate_admin_totp("admin", "wrong password")
+    assert (
+        await database.admin_for_session(
+            token_hash=hashlib.sha256(session.session_token.encode()).hexdigest(),
+            now=session.expires_at - timedelta(seconds=1),
+        )
+        is not None
+    )
+
+    rotated_uri = await auth.rotate_admin_totp(
+        "admin",
+        "correct horse battery staple",
+    )
+    rotated_secret = parse_qs(urlparse(rotated_uri).query)["secret"][0]
+    assert rotated_secret != original_secret
+    assert (
+        await database.admin_for_session(
+            token_hash=hashlib.sha256(session.session_token.encode()).hexdigest(),
+            now=session.expires_at - timedelta(seconds=1),
+        )
+        is None
+    )
+    with pytest.raises(AuthenticationError):
+        await auth.login(
+            "admin",
+            "correct horse battery staple",
+            pyotp.TOTP(original_secret).now(),
+        )
+    await auth.login(
+        "admin",
+        "correct horse battery staple",
+        pyotp.TOTP(rotated_secret).now(),
+    )
+    events = await database.audit_events(event_type="auth.totp_rotated")
+    assert len(events) == 1
+    assert events[0].details == {"all_sessions_revoked": True}
+    assert rotated_secret not in str(events[0].details)
     await database.close()
 
 

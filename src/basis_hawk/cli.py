@@ -8,7 +8,7 @@ import logging
 import uvicorn
 
 from basis_hawk.accounts import create_account_client
-from basis_hawk.auth import AuthService
+from basis_hawk.auth import AuthenticationError, AuthService
 from basis_hawk.config import get_config
 from basis_hawk.credentials import CredentialService
 from basis_hawk.crypto import SecretCipher
@@ -108,6 +108,38 @@ async def create_admin(username: str) -> int:
     return 0
 
 
+async def rotate_admin_totp(username: str) -> int:
+    config = get_config()
+    if config.credential_master_key is None:
+        print(
+            "admin-rotate-totp: BASIS_HAWK_CREDENTIAL_MASTER_KEY is required"
+        )
+        return 1
+    print(
+        "This rotates the administrator TOTP and signs out every active session."
+    )
+    password = getpass.getpass("Current administrator password: ")
+    database = Database(config.database_url)
+    await database.initialize()
+    auth = AuthService(
+        database,
+        SecretCipher(config.credential_master_key.get_secret_value()),
+        session_hours=config.session_hours,
+    )
+    try:
+        provisioning_uri = await auth.rotate_admin_totp(username, password)
+    except (AuthenticationError, RuntimeError) as exc:
+        print(f"admin-rotate-totp: {exc}")
+        return 1
+    finally:
+        await database.close()
+    print("Administrator TOTP rotated. Existing sessions are now invalid.")
+    print("Add this one-time URI to your authenticator:")
+    print(provisioning_uri)
+    print("This URI will not be displayed again; store it securely.")
+    return 0
+
+
 async def run_worker(*, once: bool) -> int:
     config = get_config()
     if config.credential_master_key is None:
@@ -194,6 +226,8 @@ def main() -> None:
     worker_parser.add_argument("--once", action="store_true")
     admin_parser = subparsers.add_parser("admin-create")
     admin_parser.add_argument("--username", default="admin")
+    rotate_totp_parser = subparsers.add_parser("admin-rotate-totp")
+    rotate_totp_parser.add_argument("--username", default="admin")
     args = parser.parse_args()
     config = get_config()
     logging.basicConfig(level=config.log_level)
@@ -202,6 +236,8 @@ def main() -> None:
         raise SystemExit(asyncio.run(doctor()))
     if args.command == "admin-create":
         raise SystemExit(asyncio.run(create_admin(args.username)))
+    if args.command == "admin-rotate-totp":
+        raise SystemExit(asyncio.run(rotate_admin_totp(args.username)))
     if args.command == "worker":
         raise SystemExit(asyncio.run(run_worker(once=args.once)))
     uvicorn.run(

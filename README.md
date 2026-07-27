@@ -41,6 +41,15 @@ curl -fsSL \
 脚本只让 Compose 对外发布 80/443，PostgreSQL 不发布主机端口。DNS、云厂商安全组、固定出口 IP、
 异地备份和交易所 API Key 仍必须由管理员配置。
 
+管理员 TOTP 泄露或设备丢失时，只能在 VPS 终端验证当前管理员密码后轮换；成功会立刻注销全部浏览器
+会话并输出一次性新 URI：
+
+```bash
+cd /opt/basis-hawk
+sudo docker compose --env-file .env run --rm api \
+  basis-hawk admin-rotate-totp --username admin
+```
+
 代码与隔离容器验收完成后，生产交付仍需由管理员在目标环境完成：配置域名、TLS、防火墙、固定出口
 IP 和异地备份；保存禁止提现且绑定出口 IP 的交易所 Key；验证 Telegram/SMTP；连续运行 72 小时纸面
 模式；在 Binance、OKX、Bybit、Bitget 的受支持沙盒重复开平仓；最后由管理员明确确认最小名义金额的

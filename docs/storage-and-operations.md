@@ -112,6 +112,17 @@ docker compose run --rm api basis-hawk admin-create --username admin
 
 管理员密码使用 Argon2id，TOTP 密钥和后续交易所凭据使用 AES-256-GCM；关联数据绑定管理员或交易所环境，
 数据库只保存密文、nonce 和密钥版本。主密钥不得写入仓库、日志或数据库。
+TOTP 泄露或身份验证器丢失时，在 VPS 上运行：
+
+```bash
+cd /opt/basis-hawk
+sudo docker compose --env-file .env run --rm api \
+  basis-hawk admin-rotate-totp --username admin
+```
+
+命令只通过隐藏终端提示读取当前管理员密码。密码错误时不修改任何认证状态；验证成功后在一个数据库
+事务中写入新的加密 TOTP、删除该管理员全部会话并记录不含密钥的 `auth.totp_rotated` 审计事件，然后
+只显示一次新 provisioning URI。所有浏览器需要使用新 TOTP 重新登录。
 同一交易所、同一环境只保存一个账户配置；替换和删除都会写入不含秘密值的审计事件。API 读取只能返回
 Key 掩码，私有适配器在进程内按需解密，不能把解密结果缓存到数据库或发送给前端。
 私有请求的签名查询串必须和实际发送顺序完全一致；异常消息禁止包含完整 URL，因为查询参数可能带签名。

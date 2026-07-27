@@ -86,6 +86,35 @@ class AuthService:
         )
         return pyotp.TOTP(secret).provisioning_uri(name=username, issuer_name="Basis Hawk")
 
+    async def rotate_admin_totp(self, username: str, password: str) -> str:
+        username = username.strip()
+        user = await self.database.get_admin_by_username(username)
+        if not user or not self._password_matches(user, password):
+            await self.database.append_audit(
+                "auth.totp_rotation_failed",
+                actor=username or "unknown",
+                details={},
+            )
+            raise AuthenticationError("invalid administrator username or password")
+        secret = pyotp.random_base32()
+        encrypted = self.cipher.encrypt(
+            secret,
+            associated_data=f"admin:{user.username}",
+        )
+        rotated = await self.database.rotate_admin_totp(
+            username=user.username,
+            expected_nonce=user.totp_nonce,
+            totp_ciphertext=encrypted.ciphertext,
+            totp_nonce=encrypted.nonce,
+            key_version=encrypted.key_version,
+        )
+        if not rotated:
+            raise RuntimeError("administrator TOTP changed concurrently; retry")
+        return pyotp.TOTP(secret).provisioning_uri(
+            name=user.username,
+            issuer_name="Basis Hawk",
+        )
+
     async def login(
         self,
         username: str,
