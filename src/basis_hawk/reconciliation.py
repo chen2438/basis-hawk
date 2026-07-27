@@ -425,9 +425,16 @@ class ReconciliationService:
             ),
         )
 
-    async def run_forever(self, *, interval_seconds: float = 60) -> None:
+    async def run_forever(
+        self,
+        *,
+        interval_seconds: float = 60,
+        planned_poll_interval_seconds: float = 1,
+    ) -> None:
         if interval_seconds <= 0:
             raise ValueError("reconciliation interval must be positive")
+        if planned_poll_interval_seconds <= 0:
+            raise ValueError("planned intent poll interval must be positive")
         async with self.database.executor_lock() as acquired:
             if not acquired:
                 raise WorkerLockUnavailable(
@@ -435,17 +442,42 @@ class ReconciliationService:
                 )
             while True:
                 await self.run_once()
-                try:
-                    await asyncio.wait_for(
-                        self._reconciliation_requested.wait(),
-                        timeout=interval_seconds,
-                    )
-                except TimeoutError:
-                    continue
+                await self._wait_for_next_run(
+                    interval_seconds=interval_seconds,
+                    planned_poll_interval_seconds=(
+                        planned_poll_interval_seconds
+                    ),
+                )
+
+    async def _wait_for_next_run(
+        self,
+        *,
+        interval_seconds: float,
+        planned_poll_interval_seconds: float,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + interval_seconds
+        while True:
+            if await self.database.has_executable_planned_trade_intent():
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            try:
+                await asyncio.wait_for(
+                    self._reconciliation_requested.wait(),
+                    timeout=min(
+                        planned_poll_interval_seconds,
+                        remaining,
+                    ),
+                )
+            except TimeoutError:
+                continue
+            self._reconciliation_requested.clear()
+            if self.event_debounce_seconds:
+                await asyncio.sleep(self.event_debounce_seconds)
                 self._reconciliation_requested.clear()
-                if self.event_debounce_seconds:
-                    await asyncio.sleep(self.event_debounce_seconds)
-                    self._reconciliation_requested.clear()
+            return
 
     async def run_once_exclusive(self) -> ReconciliationResult:
         async with self.database.executor_lock() as acquired:

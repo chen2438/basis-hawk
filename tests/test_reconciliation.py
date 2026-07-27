@@ -37,6 +37,7 @@ from basis_hawk.storage import (
     OrderLegRow,
     RemoteOpenOrderSnapshotRow,
     RemotePositionSnapshotRow,
+    TradeIntentRow,
 )
 
 
@@ -719,6 +720,64 @@ async def test_sqlite_executor_lock_is_available_for_tests() -> None:
     await database.close()
 
 
+async def _insert_planned_live_intent(
+    database: Database,
+    *,
+    action: str = "open",
+    emergency: bool = False,
+) -> str:
+    intent_id = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    async with database.sessions() as session:
+        session.add(
+            TradeIntentRow(
+                id=intent_id,
+                idempotency_key=str(uuid.uuid4()),
+                request_fingerprint="a" * 64,
+                exchange="gate",
+                environment="live",
+                base_asset="WET",
+                action=action,
+                emergency=emergency,
+                status="planned",
+                leverage=1,
+                requested_notional=Decimal("30"),
+                base_quantity=Decimal("400"),
+                spot_fee_rate=Decimal("0.001"),
+                perp_fee_rate=Decimal("0.0005"),
+                market_observed_at=now,
+                config_version="b" * 64,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+    return intent_id
+
+
+async def test_planned_intent_poll_respects_execution_state() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    await _insert_planned_live_intent(database)
+
+    assert await database.has_executable_planned_trade_intent() is False
+
+    await database.set_execution_control(state="ready", reason="test")
+    assert await database.has_executable_planned_trade_intent() is True
+
+    await database.set_execution_control(state="paused", reason="test")
+    assert await database.has_executable_planned_trade_intent() is False
+
+    await _insert_planned_live_intent(
+        database,
+        action="close",
+        emergency=True,
+    )
+    assert await database.has_executable_planned_trade_intent() is True
+    await database.close()
+
+
 async def test_private_event_wakes_serial_reconciliation_loop() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()
@@ -754,6 +813,58 @@ async def test_private_event_wakes_serial_reconciliation_loop() -> None:
     reconciler.request_reconciliation()
     await asyncio.wait_for(second.wait(), timeout=1)
     await asyncio.sleep(0.01)
+
+    assert calls == 2
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await database.close()
+
+
+async def test_planned_intent_wakes_worker_without_waiting_for_full_interval() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    await database.set_execution_control(state="ready", reason="test")
+    credentials = CredentialService(
+        database,
+        SecretCipher(SecretCipher.generate_key()),
+    )
+    reconciler = ReconciliationService(
+        database,
+        credentials,
+        event_debounce_seconds=0,
+    )
+    calls = 0
+    intent_id: str | None = None
+    first = asyncio.Event()
+    second = asyncio.Event()
+
+    async def run_once() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first.set()
+        elif calls == 2:
+            assert intent_id is not None
+            async with database.sessions() as session:
+                intent = await session.get(TradeIntentRow, intent_id)
+                assert intent is not None
+                intent.status = "failed"
+                await session.commit()
+            second.set()
+
+    reconciler.run_once = run_once  # type: ignore[method-assign]
+    task = asyncio.create_task(
+        reconciler.run_forever(
+            interval_seconds=3_600,
+            planned_poll_interval_seconds=0.01,
+        )
+    )
+    await asyncio.wait_for(first.wait(), timeout=1)
+
+    intent_id = await _insert_planned_live_intent(database)
+    await asyncio.wait_for(second.wait(), timeout=1)
+    await asyncio.sleep(0.03)
 
     assert calls == 2
     task.cancel()

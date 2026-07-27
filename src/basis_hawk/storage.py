@@ -2077,6 +2077,27 @@ class Database:
                 )
             )
 
+    async def has_executable_planned_trade_intent(self) -> bool:
+        async with self.sessions() as session:
+            control = await session.get(ExecutionControlRow, 1)
+            if control is None or control.state not in {"ready", "paused"}:
+                return False
+            statement = (
+                select(TradeIntentRow.id)
+                .where(
+                    TradeIntentRow.environment.in_({"sandbox", "live"}),
+                    TradeIntentRow.action.in_({"open", "close"}),
+                    TradeIntentRow.status == "planned",
+                )
+                .limit(1)
+            )
+            if control.state == "paused":
+                statement = statement.where(
+                    TradeIntentRow.action == "close",
+                    TradeIntentRow.emergency.is_(True),
+                )
+            return await session.scalar(statement) is not None
+
     async def transition_trade_intent(
         self,
         *,
