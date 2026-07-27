@@ -377,6 +377,11 @@ async def test_live_open_requires_persisted_preview_and_confirmation() -> None:
         preview = preview_response.json()["preview"]
         assert "request_fingerprint" not in preview
         assert "config_version" not in preview
+        preview_lifetime = (
+            datetime.fromisoformat(preview["expires_at"])
+            - datetime.fromisoformat(preview["market_observed_at"])
+        )
+        assert preview_lifetime.total_seconds() >= 59
         assert preview["spot_quantity"] == "1"
         assert preview["perp_quantity"] == "1"
         assert Decimal(preview["spot_limit_price"]) > Decimal("100")
@@ -475,7 +480,12 @@ async def test_live_close_requires_position_bound_preview_and_confirmation() -> 
         )
         assert unconfirmed.status_code == 422
         await database.set_execution_control(state="ready", reason="test")
-        service.opportunities["binance:BTC"] = opportunity()
+        service.opportunities["binance:BTC"] = opportunity().model_copy(
+            update={
+                "spot_bid": Decimal("98.9"),
+                "perp_ask": Decimal("102.1"),
+            }
+        )
         key = str(uuid.uuid4())
         confirmed = await client.post(
             f"/api/trades/positions/{position_id}/close/confirm",
@@ -490,8 +500,14 @@ async def test_live_close_requires_position_bound_preview_and_confirmation() -> 
         legs = {item["market"]: item for item in intent["legs"]}
         assert legs["spot"]["side"] == "sell"
         assert legs["spot"]["reduce_only"] is False
+        assert Decimal(legs["spot"]["limit_price"]).quantize(
+            Decimal("0.01")
+        ) == Decimal(preview["spot_limit_price"])
         assert legs["perp"]["side"] == "buy"
         assert legs["perp"]["reduce_only"] is True
+        assert Decimal(legs["perp"]["limit_price"]).quantize(
+            Decimal("0.01")
+        ) == Decimal(preview["perp_limit_price"])
         position = await database.paired_position(position_id)
         assert position is not None
         assert position.status == "closing"
@@ -652,7 +668,10 @@ async def test_live_confirmation_rejects_changed_market() -> None:
             },
         )
         assert confirmed.status_code == 409
-        assert "changed after trade preview" in confirmed.json()["detail"]
+        assert (
+            confirmed.json()["detail"]
+            == "market moved beyond preview slippage protection"
+        )
     await database.close()
 
 
@@ -696,8 +715,14 @@ async def test_live_confirmation_accepts_refreshed_market_timestamp() -> None:
             },
         )
         assert preview.status_code == 200, preview.text
+        original = preview.json()["preview"]
         await database.set_execution_control(state="ready", reason="test")
-        service.opportunities["binance:BTC"] = opportunity()
+        service.opportunities["binance:BTC"] = opportunity().model_copy(
+            update={
+                "spot_ask": Decimal("100.05"),
+                "perp_bid": Decimal("100.95"),
+            }
+        )
         confirmed = await client.post(
             "/api/trades/open/confirm",
             headers={"Idempotency-Key": str(uuid.uuid4())},
@@ -708,6 +733,45 @@ async def test_live_confirmation_accepts_refreshed_market_timestamp() -> None:
         )
         assert confirmed.status_code == 200, confirmed.text
         assert confirmed.json()["created"] is True
+        legs = {
+            item["market"]: item
+            for item in confirmed.json()["intent"]["legs"]
+        }
+        assert Decimal(legs["spot"]["limit_price"]).quantize(
+            Decimal("0.01")
+        ) == Decimal(original["spot_limit_price"])
+        assert Decimal(legs["perp"]["limit_price"]).quantize(
+            Decimal("0.01")
+        ) == Decimal(original["perp_limit_price"])
+
+        rules_preview = await client.post(
+            "/api/trades/open/preview",
+            json={
+                "exchange": "binance",
+                "environment": "live",
+                "base_asset": "BTC",
+                "notional_usdt": "100",
+            },
+        )
+        assert rules_preview.status_code == 200, rules_preview.text
+        service.pairs[Exchange.BINANCE] = [
+            instrument_pair().model_copy(
+                update={"spot_price_increment": Decimal("0.1")}
+            )
+        ]
+        changed_rules = await client.post(
+            "/api/trades/open/confirm",
+            headers={"Idempotency-Key": str(uuid.uuid4())},
+            json={
+                "preview_id": rules_preview.json()["preview_id"],
+                "confirmed": True,
+            },
+        )
+        assert changed_rules.status_code == 409
+        assert (
+            changed_rules.json()["detail"]
+            == "market or configuration changed after trade preview"
+        )
     await database.close()
 
 

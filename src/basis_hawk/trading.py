@@ -36,6 +36,33 @@ def _canonical_decimal(value: Decimal) -> str:
     return format(value.normalize(), "f") if value else "0"
 
 
+MANUAL_PREVIEW_TTL = timedelta(seconds=60)
+
+
+def _instrument_rules_payload(pair: InstrumentPair) -> dict[str, str]:
+    return {
+        "spot_symbol": pair.spot_symbol,
+        "perp_symbol": pair.perp_symbol,
+        "spot_price_increment": _canonical_decimal(
+            pair.spot_price_increment
+        ),
+        "spot_quantity_increment": _canonical_decimal(
+            pair.spot_quantity_increment
+        ),
+        "spot_min_quantity": _canonical_decimal(pair.spot_min_quantity),
+        "spot_min_notional": _canonical_decimal(pair.spot_min_notional),
+        "perp_price_increment": _canonical_decimal(
+            pair.perp_price_increment
+        ),
+        "perp_quantity_increment": _canonical_decimal(
+            pair.perp_quantity_increment
+        ),
+        "perp_min_quantity": _canonical_decimal(pair.perp_min_quantity),
+        "perp_min_notional": _canonical_decimal(pair.perp_min_notional),
+        "perp_contract_size": _canonical_decimal(pair.perp_contract_size),
+    }
+
+
 class TradeIntentStatus(StrEnum):
     PLANNED = "planned"
     EXECUTING = "executing"
@@ -499,19 +526,7 @@ class TradeLedger:
                     "maximum_slippage": _canonical_decimal(
                         maximum_slippage
                     ),
-                    "spot_symbol": pair.spot_symbol,
-                    "perp_symbol": pair.perp_symbol,
-                    "spot_quantity": _canonical_decimal(
-                        sizing.spot_quantity
-                    ),
-                    "perp_quantity": _canonical_decimal(
-                        sizing.perp_quantity
-                    ),
-                    "perp_contract_size": _canonical_decimal(
-                        pair.perp_contract_size
-                    ),
-                    "spot_limit": _canonical_decimal(spot_limit),
-                    "perp_limit": _canonical_decimal(perp_limit),
+                    "instrument_rules": _instrument_rules_payload(pair),
                     "config_version": config_version,
                 },
                 separators=(",", ":"),
@@ -528,7 +543,7 @@ class TradeLedger:
             requested_notional=notional_usdt,
             maximum_slippage=maximum_slippage,
             market_observed_at=opportunity.observed_at,
-            expires_at=opportunity.observed_at + timedelta(seconds=15),
+            expires_at=observed_now + MANUAL_PREVIEW_TTL,
             spot_symbol=pair.spot_symbol,
             spot_reference_price=opportunity.spot_ask,
             spot_limit_price=spot_limit,
@@ -686,15 +701,7 @@ class TradeLedger:
                     "environment": environment.value,
                     "base_asset": opportunity.base_asset,
                     "base_quantity": _canonical_decimal(sizing.base_quantity),
-                    "spot_symbol": pair.spot_symbol,
-                    "perp_symbol": pair.perp_symbol,
-                    "spot_quantity": _canonical_decimal(sizing.spot_quantity),
-                    "perp_quantity": _canonical_decimal(sizing.perp_quantity),
-                    "perp_contract_size": _canonical_decimal(
-                        pair.perp_contract_size
-                    ),
-                    "spot_limit": _canonical_decimal(spot_limit),
-                    "perp_limit": _canonical_decimal(perp_limit),
+                    "instrument_rules": _instrument_rules_payload(pair),
                     "config_version": config_version,
                 },
                 separators=(",", ":"),
@@ -711,7 +718,7 @@ class TradeLedger:
             emergency=emergency,
             leverage=opening_intent.leverage,
             market_observed_at=opportunity.observed_at,
-            expires_at=opportunity.observed_at + timedelta(seconds=15),
+            expires_at=observed_now + MANUAL_PREVIEW_TTL,
             maximum_slippage=maximum_slippage,
             base_quantity=sizing.base_quantity,
             spot_symbol=pair.spot_symbol,
@@ -889,6 +896,8 @@ class TradeLedger:
         environment: ExchangeEnvironment,
         leverage: int = 1,
         maximum_slippage: Decimal = Decimal("0.001"),
+        spot_limit_price: Decimal | None = None,
+        perp_limit_price: Decimal | None = None,
         now: datetime | None = None,
     ) -> tuple[TradeIntentView, bool]:
         existing = await self.database.trade_intent_by_idempotency(
@@ -918,6 +927,15 @@ class TradeLedger:
             maximum_slippage=maximum_slippage,
             now=now,
         )
+        spot_order_limit = spot_limit_price or preview.spot_limit_price
+        perp_order_limit = perp_limit_price or preview.perp_limit_price
+        if (
+            spot_order_limit < opportunity.spot_ask
+            or perp_order_limit > opportunity.perp_bid
+        ):
+            raise TradeValidationError(
+                "market moved beyond preview slippage protection"
+            )
         fees = settings.fees[opportunity.exchange]
         intent_id = str(uuid.uuid4())
         spot_client_id, perp_client_id = _live_client_order_ids(
@@ -958,7 +976,7 @@ class TradeLedger:
                     "status": OrderLegStatus.CREATED.value,
                     "quantity": preview.spot_quantity,
                     "base_multiplier": Decimal("1"),
-                    "limit_price": preview.spot_limit_price,
+                    "limit_price": spot_order_limit,
                     "filled_quantity": Decimal("0"),
                     "reduce_only": False,
                     "created_at": now_value,
@@ -975,7 +993,7 @@ class TradeLedger:
                     "status": OrderLegStatus.CREATED.value,
                     "quantity": preview.perp_quantity,
                     "base_multiplier": preview.perp_base_multiplier,
-                    "limit_price": preview.perp_limit_price,
+                    "limit_price": perp_order_limit,
                     "filled_quantity": Decimal("0"),
                     "reduce_only": False,
                     "created_at": now_value,
@@ -1000,6 +1018,8 @@ class TradeLedger:
         environment: ExchangeEnvironment,
         maximum_slippage: Decimal = Decimal("0.001"),
         emergency: bool = False,
+        spot_limit_price: Decimal | None = None,
+        perp_limit_price: Decimal | None = None,
         now: datetime | None = None,
     ) -> tuple[TradeIntentView, bool]:
         existing = await self.database.trade_intent_by_idempotency(
@@ -1027,6 +1047,15 @@ class TradeLedger:
             emergency=emergency,
             now=now,
         )
+        spot_order_limit = spot_limit_price or preview.spot_limit_price
+        perp_order_limit = perp_limit_price or preview.perp_limit_price
+        if (
+            spot_order_limit > opportunity.spot_bid
+            or perp_order_limit < opportunity.perp_ask
+        ):
+            raise TradeValidationError(
+                "market moved beyond preview slippage protection"
+            )
         fees = settings.fees[opportunity.exchange]
         intent_id = str(uuid.uuid4())
         spot_client_id, perp_client_id = _live_client_order_ids(
@@ -1050,7 +1079,7 @@ class TradeLedger:
                     "status": TradeIntentStatus.PLANNED.value,
                     "leverage": preview.leverage,
                     "requested_notional": (
-                        preview.spot_quantity * preview.spot_limit_price
+                        preview.spot_quantity * spot_order_limit
                     ),
                     "base_quantity": preview.base_quantity,
                     "spot_fee_rate": fees.spot_taker,
@@ -1073,7 +1102,7 @@ class TradeLedger:
                         "status": OrderLegStatus.CREATED.value,
                         "quantity": preview.spot_quantity,
                         "base_multiplier": Decimal("1"),
-                        "limit_price": preview.spot_limit_price,
+                        "limit_price": spot_order_limit,
                         "filled_quantity": Decimal("0"),
                         "reduce_only": False,
                         "created_at": now_value,
@@ -1090,7 +1119,7 @@ class TradeLedger:
                         "status": OrderLegStatus.CREATED.value,
                         "quantity": preview.perp_quantity,
                         "base_multiplier": preview.perp_base_multiplier,
-                        "limit_price": preview.perp_limit_price,
+                        "limit_price": perp_order_limit,
                         "filled_quantity": Decimal("0"),
                         "reduce_only": True,
                         "created_at": now_value,

@@ -558,7 +558,7 @@ function TradesView({
     {execution?.state !== "ready" && <div className="safety-callout warning"><strong>当前不可普通开仓</strong><p>全局执行状态为 {execution?.state ?? "unknown"}。紧急平仓仍由后端按独立安全规则判断。</p></div>}
     {result && <div className="success-banner">{result}</div>}
     <form className="ops-form trade-form" onSubmit={previewOpen}>
-      <div><h3>手动配对开仓</h3><p>先生成 15 秒预览票据；确认只持久化意图，由唯一 worker 提交双腿 IOC。</p></div>
+      <div><h3>手动配对开仓</h3><p>先生成 60 秒预览票据；确认时刷新盘口并保留预览中的滑点保护，由唯一 worker 提交双腿 IOC。</p></div>
       <label>交易所<select value={openForm.exchange} onChange={(event) => {
         const next = event.target.value as Exchange;
         setOpenForm({ ...openForm, exchange: next, baseAsset: healthy.find((item) => item.exchange === next)?.base_asset ?? "" });

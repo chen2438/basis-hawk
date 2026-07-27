@@ -92,11 +92,15 @@ describe("Basis Hawk dashboard", () => {
     expect(apiErrorMessage(
       "market or configuration changed after trade preview",
       "操作失败",
-    )).toBe("行情或配置已发生变化，旧预览已失效，请重新生成预览");
+    )).toBe("交易规则或配置已发生变化，旧预览已失效，请重新生成预览");
+    expect(apiErrorMessage(
+      "market moved beyond preview slippage protection",
+      "操作失败",
+    )).toBe("行情已超出预览中设置的最大滑点保护，请重新生成预览，或在确认风险后适当提高最大滑点");
     expect(apiErrorMessage(
       "trade preview has expired",
       "操作失败",
-    )).toBe("预览票据已超过 15 秒有效期，请重新生成预览");
+    )).toBe("预览票据已超过 60 秒有效期，请重新生成预览");
   });
 
   it("renders the read-only Chinese scanner", async () => {
@@ -219,7 +223,7 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByText("手动配对开仓")).toBeTruthy();
     expect(screen.getByText("真实配对持仓平仓")).toBeTruthy();
     expect((screen.getByRole("button", { name: "生成开仓预览" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText(/先生成 15 秒预览票据/)).toBeTruthy();
+    expect(screen.getByText(/先生成 60 秒预览票据/)).toBeTruthy();
   });
 
   it("lets an existing Bybit account declare its empty-account position mode", async () => {

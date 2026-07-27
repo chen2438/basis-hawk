@@ -1332,6 +1332,8 @@ def create_app(
                 "leverage": preview.leverage,
                 "maximum_slippage": preview.maximum_slippage,
                 "market_observed_at": preview.market_observed_at,
+                "spot_limit_price": preview.spot_limit_price,
+                "perp_limit_price": preview.perp_limit_price,
                 "confirmation_idempotency_key": None,
                 "created_at": created_at,
                 "expires_at": preview.expires_at,
@@ -1405,6 +1407,14 @@ def create_app(
                 status_code=409,
                 detail="current market or trading rules are not available",
             )
+        if (
+            stored.spot_limit_price is None
+            or stored.perp_limit_price is None
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="trade preview was created by an older software version",
+            )
         try:
             current_preview = trade_ledger.preview_live_open(
                 opportunity=opportunity,
@@ -1430,6 +1440,8 @@ def create_app(
                 environment=environment,
                 leverage=stored.leverage,
                 maximum_slippage=stored.maximum_slippage,
+                spot_limit_price=stored.spot_limit_price,
+                perp_limit_price=stored.perp_limit_price,
             )
         except (
             IdempotencyConflict,
@@ -1528,6 +1540,8 @@ def create_app(
                 "leverage": preview.leverage,
                 "maximum_slippage": preview.maximum_slippage,
                 "market_observed_at": preview.market_observed_at,
+                "spot_limit_price": preview.spot_limit_price,
+                "perp_limit_price": preview.perp_limit_price,
                 "confirmation_idempotency_key": None,
                 "created_at": created_at,
                 "expires_at": preview.expires_at,
@@ -1607,6 +1621,14 @@ def create_app(
                 status_code=409,
                 detail="current market or trading rules are not available",
             )
+        if (
+            stored.spot_limit_price is None
+            or stored.perp_limit_price is None
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="trade preview was created by an older software version",
+            )
         try:
             stored_slippage = stored.maximum_slippage.quantize(
                 Decimal("0.000000000001")
@@ -1647,6 +1669,8 @@ def create_app(
                 environment=environment,
                 maximum_slippage=stored_slippage,
                 emergency=stored.emergency,
+                spot_limit_price=stored.spot_limit_price,
+                perp_limit_price=stored.perp_limit_price,
             )
         except (
             IdempotencyConflict,

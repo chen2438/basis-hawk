@@ -513,6 +513,14 @@ class TradePreviewRow(Base):
     leverage: Mapped[int] = mapped_column(Integer)
     maximum_slippage: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     market_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    spot_limit_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    perp_limit_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
     confirmation_idempotency_key: Mapped[str | None] = mapped_column(
         String(36),
         unique=True,
