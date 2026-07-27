@@ -1473,8 +1473,16 @@ async def test_gate_portfolio_sets_cross_leverage_and_uses_unified_spot() -> Non
             )
         if request.url.path.endswith("/unified/unified_mode"):
             return httpx.Response(200, json={"mode": "portfolio"})
-        if request.url.path.endswith("/futures/usdt/orders"):
+        if (
+            request.url.path.endswith("/futures/usdt/orders")
+            and request.method == "GET"
+        ):
             return httpx.Response(200, json=[])
+        if request.url.path.endswith("/futures/usdt/orders"):
+            return httpx.Response(
+                201,
+                json={"id": "1102", "text": body["text"]},
+            )
         if request.url.path.endswith("/spot/orders"):
             return httpx.Response(
                 201,
@@ -1503,6 +1511,17 @@ async def test_gate_portfolio_sets_cross_leverage_and_uses_unified_spot() -> Non
             client_order_id="t-bh-portfolio",
         )
     )
+    perp_submission = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="perp",
+            symbol="ORDER_USDT",
+            side="sell",
+            quantity=Decimal("1"),
+            limit_price=Decimal("1"),
+            client_order_id="t-bh-portfolio-perp",
+            position_mode=PositionMode.ONE_WAY,
+        )
+    )
 
     assert configured.isolated is False
     assert not any(
@@ -1513,6 +1532,14 @@ async def test_gate_portfolio_sets_cross_leverage_and_uses_unified_spot() -> Non
     )
     assert spot_request[2]["account"] == "unified"
     assert submission.exchange_order_id == "1101"
+    perp_request = next(
+        item
+        for item in requests
+        if item[0] == "POST"
+        and item[1].endswith("/futures/usdt/orders")
+    )
+    assert "pos_margin_mode" not in perp_request[2]
+    assert perp_submission.exchange_order_id == "1102"
     with pytest.raises(
         PrivateRequestError,
         match="only supports conservative 1x",

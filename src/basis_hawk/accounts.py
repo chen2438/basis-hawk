@@ -42,7 +42,14 @@ class PerpMarginMode(StrEnum):
 
 
 class PrivateRequestError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class UnsupportedEnvironmentError(RuntimeError):
@@ -365,7 +372,8 @@ async def _json_request(
         raise PrivateRequestError("private account request failed") from exc
     if not response.is_success:
         raise PrivateRequestError(
-            f"private account request rejected with HTTP {response.status_code}"
+            f"private account request rejected with HTTP {response.status_code}",
+            status_code=response.status_code,
         )
     try:
         return response.json()
@@ -3341,18 +3349,23 @@ class GateAccountClient(PrivateAccountClient):
         symbol: str,
         client_order_id: str,
     ) -> RemoteOrderLookup:
-        if market == "spot":
-            item = await self._get(
-                f"/api/v4/spot/orders/{client_order_id}",
-                currency_pair=symbol,
-                account=self._spot_account(),
-            )
-            order = _gate_spot_order(item)
-        else:
-            item = await self._get(
-                f"/api/v4/futures/usdt/orders/{client_order_id}",
-            )
-            order = _gate_perp_order(item)
+        try:
+            if market == "spot":
+                item = await self._get(
+                    f"/api/v4/spot/orders/{client_order_id}",
+                    currency_pair=symbol,
+                    account=self._spot_account(),
+                )
+                order = _gate_spot_order(item)
+            else:
+                item = await self._get(
+                    f"/api/v4/futures/usdt/orders/{client_order_id}",
+                )
+                order = _gate_perp_order(item)
+        except PrivateRequestError as exc:
+            if exc.status_code == 404:
+                return RemoteOrderLookup(order=None, complete=True)
+            raise
         return RemoteOrderLookup(order=order, complete=True)
 
     async def funding_income(
@@ -3423,11 +3436,10 @@ class GateAccountClient(PrivateAccountClient):
                 "tif": "ioc",
                 "text": order.client_order_id,
                 "reduce_only": order.reduce_only,
-                "pos_margin_mode": (
-                    "cross" if self._account_mode == "portfolio" else "isolated"
-                ),
                 "action_mode": "ACK",
             }
+            if self._account_mode != "portfolio":
+                body["pos_margin_mode"] = "isolated"
         result = await self._post(path, body=body)
         if not isinstance(result, dict):
             raise PrivateRequestError("Gate order submission returned no result")

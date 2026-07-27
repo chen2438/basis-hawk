@@ -278,6 +278,29 @@ async def test_gate_and_mexc_orders_are_found_by_client_id() -> None:
     assert perp_lookup.order.reduce_only is True
     await gate_http.aclose()
 
+    missing_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                404,
+                json={"label": "ORDER_NOT_FOUND"},
+            )
+        ),
+        base_url="https://gate.test",
+    )
+    missing_gate = GateAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        client=missing_http,
+    )
+    missing = await missing_gate.order_by_client_id(
+        market="perp",
+        symbol="ORDER_USDT",
+        client_order_id="t-bh-missing",
+    )
+    assert missing.order is None
+    assert missing.complete is True
+    await missing_http.aclose()
+
     def mexc_spot_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
