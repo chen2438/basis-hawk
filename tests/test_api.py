@@ -475,6 +475,7 @@ async def test_live_close_requires_position_bound_preview_and_confirmation() -> 
         )
         assert unconfirmed.status_code == 422
         await database.set_execution_control(state="ready", reason="test")
+        service.opportunities["binance:BTC"] = opportunity()
         key = str(uuid.uuid4())
         confirmed = await client.post(
             f"/api/trades/positions/{position_id}/close/confirm",
@@ -652,6 +653,61 @@ async def test_live_confirmation_rejects_changed_market() -> None:
         )
         assert confirmed.status_code == 409
         assert "changed after trade preview" in confirmed.json()["detail"]
+    await database.close()
+
+
+async def test_live_confirmation_accepts_refreshed_market_timestamp() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    service = ScannerService(database, {})
+    await service.initialize()
+    service.opportunities["binance:BTC"] = opportunity()
+    service.pairs[Exchange.BINANCE] = [instrument_pair()]
+    credentials = CredentialService(
+        database,
+        SecretCipher(SecretCipher.generate_key()),
+    )
+    await credentials.save(
+        exchange=Exchange.BINANCE,
+        environment=ExchangeEnvironment.LIVE,
+        label="primary",
+        secrets=ExchangeSecrets(
+            api_key="test-api-key",
+            api_secret="test-api-secret",
+        ),
+        actor="test",
+    )
+    app = create_app(
+        service,
+        manage_lifecycle=False,
+        auth_required=False,
+        credential_service=credentials,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        preview = await client.post(
+            "/api/trades/open/preview",
+            json={
+                "exchange": "binance",
+                "environment": "live",
+                "base_asset": "BTC",
+                "notional_usdt": "100",
+            },
+        )
+        assert preview.status_code == 200, preview.text
+        await database.set_execution_control(state="ready", reason="test")
+        service.opportunities["binance:BTC"] = opportunity()
+        confirmed = await client.post(
+            "/api/trades/open/confirm",
+            headers={"Idempotency-Key": str(uuid.uuid4())},
+            json={
+                "preview_id": preview.json()["preview_id"],
+                "confirmed": True,
+            },
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        assert confirmed.json()["created"] is True
     await database.close()
 
 
