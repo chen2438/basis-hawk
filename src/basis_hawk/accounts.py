@@ -4601,11 +4601,14 @@ def _milliseconds(value: datetime) -> int:
 
 
 def _from_milliseconds(value: object) -> datetime:
-    return datetime.fromtimestamp(int(value or 0) / 1000, tz=UTC)
+    return datetime.fromtimestamp(
+        float(Decimal(str(value or 0)) / Decimal("1000")),
+        tz=UTC,
+    )
 
 
 def _from_seconds(value: object) -> datetime:
-    return datetime.fromtimestamp(int(value or 0), tz=UTC)
+    return datetime.fromtimestamp(float(Decimal(str(value or 0))), tz=UTC)
 
 
 def _funding_base_asset(exchange: Exchange, symbol: str) -> str:

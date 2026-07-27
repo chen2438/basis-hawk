@@ -249,7 +249,7 @@ async def test_gate_and_mexc_order_fills_are_normalized() -> None:
                         "fee": "0.001",
                         "fee_currency": "ORDER",
                         "role": "taker",
-                        "create_time_ms": "1785087000000",
+                        "create_time_ms": "1785087000000.087000",
                     }
                 ],
             )
@@ -294,6 +294,7 @@ async def test_gate_and_mexc_order_fills_are_normalized() -> None:
         since=SINCE,
     )
     assert spot_batch.fills[0].occurred_at.year == 2026
+    assert spot_batch.fills[0].occurred_at.microsecond == 87
     assert perp_batch.fills[0].side == "sell"
     assert perp_batch.fills[0].quantity == Decimal("20")
     await gate_http.aclose()
