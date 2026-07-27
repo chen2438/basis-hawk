@@ -42,6 +42,7 @@ from basis_hawk.crypto import SecretCipher
 from basis_hawk.models import Exchange, Quality, ScannerSettings
 from basis_hawk.notifications import TelegramCommandService
 from basis_hawk.service import ScannerService, default_adapters
+from basis_hawk.sizing import OrderSizingError
 from basis_hawk.storage import Database, InternalTransferRow
 from basis_hawk.trading import IdempotencyConflict, TradeLedger, TradeValidationError
 from basis_hawk.transfers import (
@@ -1281,6 +1282,23 @@ def create_app(
                 maximum_slippage=value.maximum_slippage,
             )
         except TradeValidationError as exc:
+            sizing_error = exc.__cause__
+            if (
+                isinstance(sizing_error, OrderSizingError)
+                and sizing_error.code == "notional_below_minimum"
+                and sizing_error.minimum_notional is not None
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": sizing_error.code,
+                        "message": str(sizing_error),
+                        "minimum_notional_usdt": format(
+                            sizing_error.minimum_notional,
+                            "f",
+                        ),
+                    },
+                ) from exc
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         preview_id = str(uuid4())
         actor = request_actor(request)

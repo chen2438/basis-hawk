@@ -2,6 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { apiErrorMessage } from "./api";
 
 class FakeSocket { onmessage: ((event: { data: string }) => void) | null = null; close() {} }
 
@@ -53,6 +54,16 @@ describe("Basis Hawk dashboard", () => {
         : { universe_size: 500, minimum_quote_volume: "1000000", holding_period_days: 30, retention_days: 30, fee_checked_at: "2026-07-23", fees: { binance: { spot_taker: "0.001", perp_taker: "0.0005" }, okx: { spot_taker: "0.001", perp_taker: "0.0005" }, mexc: { spot_taker: "0.0005", perp_taker: "0.0004" }, bybit: { spot_taker: "0.001", perp_taker: "0.00055" }, bitget: { spot_taker: "0.001", perp_taker: "0.0006" }, gate: { spot_taker: "0.001", perp_taker: "0.00075" } } };
       return Promise.resolve({ ok: true, json: () => Promise.resolve(value) });
     }));
+  });
+
+  it("turns a minimum-notional API error into an actionable Chinese message", () => {
+    expect(apiErrorMessage({
+      code: "notional_below_minimum",
+      message: "requested notional is below the minimum executable amount",
+      minimum_notional_usdt: "5.15500",
+    }, "操作失败")).toBe(
+      "名义金额过低；该标的当前至少需要 5.15500 USDT（受现货与永续共同数量步长及交易所最低下单规则限制）",
+    );
   });
 
   it("renders the read-only Chinese scanner", async () => {

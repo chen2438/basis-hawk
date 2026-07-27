@@ -30,6 +30,20 @@ function cookie(name: string): string | null {
   return value ? decodeURIComponent(value.slice(prefix.length)) : null;
 }
 
+export function apiErrorMessage(detail: unknown, fallback: string): string {
+  if (typeof detail === "string") return detail;
+  if (!detail || typeof detail !== "object") return fallback;
+  const value = detail as {
+    code?: string;
+    message?: string;
+    minimum_notional_usdt?: string;
+  };
+  if (value.code === "notional_below_minimum" && value.minimum_notional_usdt) {
+    return `名义金额过低；该标的当前至少需要 ${value.minimum_notional_usdt} USDT（受现货与永续共同数量步长及交易所最低下单规则限制）`;
+  }
+  return value.message || fallback;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = init?.method?.toUpperCase() ?? "GET";
   const csrf = method === "GET" || method === "HEAD" ? null : cookie("basis_hawk_csrf");
@@ -46,7 +60,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const body = await response.text();
     let detail = body || `HTTP ${response.status}`;
     try {
-      detail = (JSON.parse(body) as { detail?: string }).detail || detail;
+      const parsed = JSON.parse(body) as { detail?: unknown };
+      detail = apiErrorMessage(parsed.detail, detail);
     } catch {
       // Preserve the plain-text response.
     }

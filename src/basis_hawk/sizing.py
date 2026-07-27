@@ -8,7 +8,16 @@ from basis_hawk.models import InstrumentPair
 
 
 class OrderSizingError(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        minimum_notional: Decimal | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.minimum_notional = minimum_notional
 
 
 @dataclass(frozen=True)
@@ -63,6 +72,17 @@ def size_paired_order(
         pair.spot_quantity_increment,
         pair.perp_base_quantity_increment,
     )
+    minimum_notional = minimum_paired_order_notional(
+        pair,
+        spot_price=spot_price,
+        perp_price=perp_price,
+    )
+    if requested_notional < minimum_notional:
+        raise OrderSizingError(
+            "requested notional is below the minimum executable amount",
+            code="notional_below_minimum",
+            minimum_notional=minimum_notional,
+        )
     target_base_quantity = requested_notional / spot_price
     increments = (target_base_quantity / common_increment).to_integral_value(
         rounding=ROUND_FLOOR
@@ -96,6 +116,41 @@ def size_paired_order(
         spot_notional=spot_notional,
         perp_notional=perp_notional,
     )
+
+
+def minimum_paired_order_notional(
+    pair: InstrumentPair,
+    *,
+    spot_price: Decimal,
+    perp_price: Decimal,
+) -> Decimal:
+    if not pair.trading_rules_complete:
+        raise OrderSizingError("instrument trading rules are incomplete")
+    if spot_price <= 0 or perp_price <= 0:
+        raise OrderSizingError("prices must be positive")
+    common_increment = _decimal_lcm(
+        pair.spot_quantity_increment,
+        pair.perp_base_quantity_increment,
+    )
+    required_base_quantity = max(
+        common_increment,
+        pair.spot_min_quantity,
+        pair.perp_min_quantity * pair.perp_contract_size,
+        (
+            pair.spot_min_notional / spot_price
+            if pair.spot_min_notional > 0
+            else Decimal("0")
+        ),
+        (
+            pair.perp_min_notional / perp_price
+            if pair.perp_min_notional > 0
+            else Decimal("0")
+        ),
+    )
+    increments = (
+        required_base_quantity / common_increment
+    ).to_integral_value(rounding=ROUND_CEILING)
+    return increments * common_increment * spot_price
 
 
 def _decimal_lcm(left: Decimal, right: Decimal) -> Decimal:

@@ -5,6 +5,7 @@ import pytest
 from basis_hawk.models import Exchange, InstrumentPair
 from basis_hawk.sizing import (
     OrderSizingError,
+    minimum_paired_order_notional,
     protective_limit_price,
     size_paired_order,
 )
@@ -67,6 +68,35 @@ def test_paired_order_size_handles_fractional_contract_grids() -> None:
     assert result.perp_quantity == Decimal("9.6")
 
 
+def test_minimum_notional_accounts_for_contract_size_and_exchange_minimums() -> None:
+    pair = _pair(
+        spot_quantity_increment=Decimal("1"),
+        spot_min_quantity=Decimal("1"),
+        spot_min_notional=Decimal("3"),
+        perp_quantity_increment=Decimal("1"),
+        perp_min_quantity=Decimal("0"),
+        perp_min_notional=Decimal("0"),
+        perp_contract_size=Decimal("100"),
+    )
+
+    minimum = minimum_paired_order_notional(
+        pair,
+        spot_price=Decimal("0.05155"),
+        perp_price=Decimal("0.0516"),
+    )
+
+    assert minimum == Decimal("5.15500")
+    with pytest.raises(OrderSizingError) as exc_info:
+        size_paired_order(
+            pair,
+            requested_notional=Decimal("1"),
+            spot_price=Decimal("0.05155"),
+            perp_price=Decimal("0.0516"),
+        )
+    assert exc_info.value.code == "notional_below_minimum"
+    assert exc_info.value.minimum_notional == Decimal("5.15500")
+
+
 def test_paired_order_size_rejects_incomplete_or_below_minimum_orders() -> None:
     with pytest.raises(OrderSizingError, match="incomplete"):
         size_paired_order(
@@ -81,7 +111,7 @@ def test_paired_order_size_rejects_incomplete_or_below_minimum_orders() -> None:
             perp_price=Decimal("1"),
         )
 
-    with pytest.raises(OrderSizingError, match="spot notional"):
+    with pytest.raises(OrderSizingError, match="minimum executable"):
         size_paired_order(
             _pair(
                 spot_quantity_increment=Decimal("1"),

@@ -326,6 +326,21 @@ async def test_live_open_requires_persisted_preview_and_confirmation() -> None:
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
     ) as client:
+        too_small = await client.post(
+            "/api/trades/open/preview",
+            json={
+                "exchange": "binance",
+                "environment": "live",
+                "base_asset": "btc",
+                "notional_usdt": "1",
+            },
+        )
+        assert too_small.status_code == 409
+        assert too_small.json()["detail"] == {
+            "code": "notional_below_minimum",
+            "message": "requested notional is below the minimum executable amount",
+            "minimum_notional_usdt": "5.00",
+        }
         preview_response = await client.post(
             "/api/trades/open/preview",
             json={
@@ -338,7 +353,10 @@ async def test_live_open_requires_persisted_preview_and_confirmation() -> None:
             },
         )
         assert preview_response.status_code == 200
-        assert executable_quote_requests == [(Exchange.BINANCE, "BTC")]
+        assert executable_quote_requests == [
+            (Exchange.BINANCE, "BTC"),
+            (Exchange.BINANCE, "BTC"),
+        ]
         preview_id = preview_response.json()["preview_id"]
         preview = preview_response.json()["preview"]
         assert "request_fingerprint" not in preview
