@@ -144,7 +144,8 @@
   备份密钥，可选按 Docker 官方 apt 仓库安装 Engine/Compose 和启用 UFW；已有部署绝不覆盖配置，
   升级前停止 API/worker/backup 并生成加密备份，之后才更新服务镜像、迁移、启动并验证行情就绪与
   最新备份。远程 bootstrap 可在空 VPS 自动安装 Git、clone 到 `/opt/basis-hawk`，重复运行只允许
-  origin/分支一致的干净 checkout 并执行 fast-forward 更新。
+  origin/分支一致的干净 checkout 并执行 fast-forward 更新；管道启动时会重新连接控制终端完成部署
+  确认和首次管理员创建，真正无终端运行仍要求显式非交互选项。
 - 已完成：启动对账在全部已配置账户的余额、权限、模式、远端订单/成交/仓位关联和私有流均通过时进入
   `ready`；任一账户失败、阻断或心跳在最终确认前失效都保持 `blocked`，既有安全暂停不被覆盖。
 - 已完成：Binance、OKX、Bybit 现货/永续保护性限价 IOC 下单、撤单、逐仓和 1–10 倍杠杆私有适配。

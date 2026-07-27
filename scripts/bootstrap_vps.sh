@@ -151,6 +151,14 @@ deploy_script="${INSTALL_DIRECTORY}/scripts/deploy_vps.sh"
     || die "deployment script is missing or not executable after checkout"
 
 log "starting VPS deployment from ${INSTALL_DIRECTORY}"
+if [[ ! -t 0 && -t 1 ]] \
+    && { : </dev/tty; } 2>/dev/null; then
+    log "reconnecting deployment input to the controlling terminal"
+    exec "${deploy_script}" \
+        --project-dir "${INSTALL_DIRECTORY}" \
+        "${DEPLOY_ARGUMENTS[@]}" </dev/tty
+fi
+
 exec "${deploy_script}" \
     --project-dir "${INSTALL_DIRECTORY}" \
     "${DEPLOY_ARGUMENTS[@]}"

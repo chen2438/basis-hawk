@@ -52,7 +52,10 @@ curl -fsSL \
 执行前应先检查远程脚本内容。重复运行会验证现有 checkout 的 origin、当前分支和工作区；仅同一
 `main` 分支的干净工作区允许 `fetch` 后 fast-forward，分叉、detached HEAD、本地修改、错误远端或
 非 Git 的目标目录全部失败，不删除或强制覆盖文件。可用 `--install-dir`、`--repository` 和
-`--branch` 显式选择受信任的安装位置或 fork，其余参数原样交给部署脚本。
+`--branch` 显式选择受信任的安装位置或 fork，其余参数原样交给部署脚本。以 `curl | bash` 从交互式
+SSH 会话启动时，bootstrap 会在读取完脚本后把部署脚本的标准输入重新连接到控制终端，因此最终确认、
+管理员密码和 TOTP 创建都可以正常交互。没有控制终端的自动化环境必须传入 `--yes`，且仅在已有管理员
+或明确接受无法登录时传入 `--skip-admin`。
 
 首次运行从 `.env.example` 创建权限为 600 的 `.env`，生成 URL-safe 数据库密码、32 字节凭据主密钥
 和另一把独立的 32 字节备份密钥，全程不向终端输出秘密。已有 `.env` 时只校验域名、密钥、数据库 URL
@@ -353,8 +356,8 @@ docker compose run --rm worker basis-hawk worker --once
 VPS 出口 IP。
 
 CI 对提交信息、后端 Ruff/Pytest、VPS/bootstrap 脚本 Bash 语法和前端 Vitest/TypeScript/Vite 分别
-验收。bootstrap 测试使用临时本地 Git 远端验证首次 clone、参数传递、干净 checkout 的 fast-forward
-和脏目录拒绝。部署
+验收。bootstrap 测试使用临时本地 Git 远端验证首次 clone、参数传递、管道输入重新连接控制终端、
+干净 checkout 的 fast-forward 和脏目录拒绝。部署
 脚本测试使用伪 VPS/Docker 命令验证首次安装顺序、秘密不出现在输出、配置幂等、权限/域名拒绝及升级时
 “停 API/worker/backup → 加密备份 → 更新镜像 → 迁移”的严格先后。容器层另执行
 `docker compose --env-file .env.example config --quiet`；PostgreSQL 可用时还必须实际运行 Alembic

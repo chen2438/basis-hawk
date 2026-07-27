@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import errno
 import os
+import pty
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -37,7 +40,13 @@ def create_remote_repository(tmp_path: Path) -> tuple[Path, Path]:
     scripts.mkdir()
     deploy = scripts / "deploy_vps.sh"
     deploy.write_text(
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >\"$FAKE_DEPLOY_LOG\"\n",
+        "#!/usr/bin/env bash\n"
+        "if [[ -t 0 ]]; then\n"
+        "    printf 'stdin=tty\\n' >\"$FAKE_DEPLOY_LOG\"\n"
+        "else\n"
+        "    printf 'stdin=pipe\\n' >\"$FAKE_DEPLOY_LOG\"\n"
+        "fi\n"
+        "printf '%s\\n' \"$*\" >>\"$FAKE_DEPLOY_LOG\"\n",
         encoding="utf-8",
     )
     deploy.chmod(0o755)
@@ -126,6 +135,58 @@ def test_bootstrap_fast_forwards_existing_clean_checkout(
     assert second.returncode == 0, second.stderr
     assert git("rev-parse", "HEAD", directory=install_directory) == expected_head
     assert (install_directory / "version.txt").read_text(encoding="utf-8") == "2\n"
+
+
+def test_bootstrap_reconnects_piped_input_to_controlling_terminal(
+    tmp_path: Path,
+) -> None:
+    _, remote = create_remote_repository(tmp_path)
+    install_directory = tmp_path / "installed"
+    deploy_log = tmp_path / "deploy.log"
+    command = shlex.join(
+        [
+            "bash",
+            str(BOOTSTRAP),
+            "--repository",
+            remote.as_uri(),
+            "--install-dir",
+            str(install_directory),
+            "--domain",
+            "hawk.example.com",
+        ]
+    )
+    child_pid, master_fd = pty.fork()
+    if child_pid == 0:
+        environment = {
+            **os.environ,
+            "FAKE_DEPLOY_LOG": str(deploy_log),
+        }
+        os.execve(
+            "/bin/bash",
+            ["bash", "-c", f"printf '' | {command}"],
+            environment,
+        )
+
+    output = bytearray()
+    try:
+        while True:
+            try:
+                chunk = os.read(master_fd, 4096)
+            except OSError as error:
+                if error.errno == errno.EIO:
+                    break
+                raise
+            if not chunk:
+                break
+            output.extend(chunk)
+    finally:
+        os.close(master_fd)
+    _, status = os.waitpid(child_pid, 0)
+
+    assert os.waitstatus_to_exitcode(status) == 0, output.decode(
+        errors="replace"
+    )
+    assert "stdin=tty" in deploy_log.read_text(encoding="utf-8")
 
 
 def test_bootstrap_refuses_dirty_or_wrong_checkout(tmp_path: Path) -> None:

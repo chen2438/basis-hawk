@@ -20,7 +20,9 @@ curl -fsSL \
 
 执行远程脚本前应先在浏览器检查上述 GitHub Raw 内容。bootstrap 会安装 Git、把官方仓库 clone 到
 `/opt/basis-hawk`，然后执行部署；重复运行只接受 origin/分支一致且没有本地改动的 checkout，并只做
-fast-forward 更新。Docker 已安装时省略 `--install-docker`；非 22 SSH 端口请同时传入
+fast-forward 更新。通过 `curl | bash` 运行时，bootstrap 会把部署确认和首次管理员创建重新连接到
+当前 SSH 终端；非交互环境仍须显式使用 `--yes`，并在已有管理员或有意跳过创建时使用 `--skip-admin`。
+Docker 已安装时省略 `--install-docker`；非 22 SSH 端口请同时传入
 `--ssh-port PORT`。部署脚本首次运行
 会创建权限为 600 的 `.env`，生成互不相同的数据库、凭据和备份密钥，然后隐藏输入管理员密码并输出
 TOTP provisioning URI。应立即加入身份验证器并妥善保存恢复信息。重复运行不会覆盖 `.env`；已有
