@@ -18,6 +18,7 @@ jobs:
       - run: ruff check .
       - run: pytest -q
       - run: bash -n scripts/deploy_vps.sh
+      - run: bash -n scripts/bootstrap_vps.sh
   frontend:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: frontend } }

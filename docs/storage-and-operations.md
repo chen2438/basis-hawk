@@ -37,6 +37,23 @@ sudo ./scripts/deploy_vps.sh \
   --enable-ufw
 ```
 
+空 VPS 无需预先 clone。`scripts/bootstrap_vps.sh` 可从 GitHub Raw 远程执行，缺少 Git 时先通过系统
+apt 安装，然后把官方仓库 clone 到 `/opt/basis-hawk` 并调用上述部署脚本：
+
+```bash
+curl -fsSL \
+  https://raw.githubusercontent.com/chen2438/basis-hawk/main/scripts/bootstrap_vps.sh \
+  | sudo bash -s -- \
+  --domain hawk.example.com \
+  --install-docker \
+  --enable-ufw
+```
+
+执行前应先检查远程脚本内容。重复运行会验证现有 checkout 的 origin、当前分支和工作区；仅同一
+`main` 分支的干净工作区允许 `fetch` 后 fast-forward，分叉、detached HEAD、本地修改、错误远端或
+非 Git 的目标目录全部失败，不删除或强制覆盖文件。可用 `--install-dir`、`--repository` 和
+`--branch` 显式选择受信任的安装位置或 fork，其余参数原样交给部署脚本。
+
 首次运行从 `.env.example` 创建权限为 600 的 `.env`，生成 URL-safe 数据库密码、32 字节凭据主密钥
 和另一把独立的 32 字节备份密钥，全程不向终端输出秘密。已有 `.env` 时只校验域名、密钥、数据库 URL
 和权限，绝不覆盖或补写；域名参数与现有配置不一致会失败。管理员密码仍只经 `getpass` 的隐藏终端输入，
@@ -335,7 +352,9 @@ docker compose run --rm worker basis-hawk worker --once
 `.env.example` 只包含占位符。修改它时不得读取、输出或提交本地 `.env`；交易所 Key 必须禁止提现并绑定
 VPS 出口 IP。
 
-CI 对提交信息、后端 Ruff/Pytest、VPS 脚本 Bash 语法和前端 Vitest/TypeScript/Vite 分别验收。部署
+CI 对提交信息、后端 Ruff/Pytest、VPS/bootstrap 脚本 Bash 语法和前端 Vitest/TypeScript/Vite 分别
+验收。bootstrap 测试使用临时本地 Git 远端验证首次 clone、参数传递、干净 checkout 的 fast-forward
+和脏目录拒绝。部署
 脚本测试使用伪 VPS/Docker 命令验证首次安装顺序、秘密不出现在输出、配置幂等、权限/域名拒绝及升级时
 “停 API/worker/backup → 加密备份 → 更新镜像 → 迁移”的严格先后。容器层另执行
 `docker compose --env-file .env.example config --quiet`；PostgreSQL 可用时还必须实际运行 Alembic

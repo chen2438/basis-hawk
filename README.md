@@ -6,20 +6,32 @@ Basis Hawk 是可部署在单台 VPS 上的同所现货—USDT 永续套利平�
 
 ## VPS 基础部署
 
-要求 64 位 Linux、已解析到 VPS 的域名和稳定的系统时间。在 Ubuntu/Debian 新 VPS 的仓库目录运行：
+要求 64 位 Linux、已解析到 VPS 的域名和稳定的系统时间。Ubuntu/Debian 空 VPS 不需要手动 clone，
+直接运行：
 
 ```bash
-sudo ./scripts/deploy_vps.sh \
+curl -fsSL \
+  https://raw.githubusercontent.com/chen2438/basis-hawk/main/scripts/bootstrap_vps.sh \
+  | sudo bash -s -- \
   --domain hawk.example.com \
   --install-docker \
   --enable-ufw
 ```
 
-Docker 已安装时省略 `--install-docker`；非 22 SSH 端口请同时传入 `--ssh-port PORT`。脚本首次运行
+执行远程脚本前应先在浏览器检查上述 GitHub Raw 内容。bootstrap 会安装 Git、把官方仓库 clone 到
+`/opt/basis-hawk`，然后执行部署；重复运行只接受 origin/分支一致且没有本地改动的 checkout，并只做
+fast-forward 更新。Docker 已安装时省略 `--install-docker`；非 22 SSH 端口请同时传入
+`--ssh-port PORT`。部署脚本首次运行
 会创建权限为 600 的 `.env`，生成互不相同的数据库、凭据和备份密钥，然后隐藏输入管理员密码并输出
 TOTP provisioning URI。应立即加入身份验证器并妥善保存恢复信息。重复运行不会覆盖 `.env`；已有
 数据库会先停止 API、worker 和定时备份、创建加密备份，之后才更新镜像、迁移和启动。完整选项见
-`./scripts/deploy_vps.sh --help`。
+远程 `--help`：
+
+```bash
+curl -fsSL \
+  https://raw.githubusercontent.com/chen2438/basis-hawk/main/scripts/bootstrap_vps.sh \
+  | bash -s -- --help
+```
 
 脚本只让 Compose 对外发布 80/443，PostgreSQL 不发布主机端口。DNS、云厂商安全组、固定出口 IP、
 异地备份和交易所 API Key 仍必须由管理员配置。
