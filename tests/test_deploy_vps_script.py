@@ -219,6 +219,7 @@ def test_full_first_deployment_runs_migrations_and_health_checks(
     )
     assert result.returncode == 0, result.stderr
     commands = log_path.read_text(encoding="utf-8")
+    assert "build --pull api worker backup" in commands
     assert "run --rm api alembic upgrade head" in commands
     assert "up -d --remove-orphans" in commands
     assert "/api/health/live" in commands
@@ -251,11 +252,12 @@ def test_existing_deployment_stops_worker_and_backs_up_before_migration(
     )
     assert result.returncode == 0, result.stderr
     commands = log_path.read_text(encoding="utf-8")
+    build_index = commands.index("build --pull api worker backup")
     stop_index = commands.index("stop worker api backup")
     backup_index = commands.index("run --rm backup create")
     pull_index = commands.index("pull postgres caddy")
     migration_index = commands.index("run --rm api alembic upgrade head")
-    assert stop_index < backup_index < pull_index < migration_index
+    assert build_index < stop_index < backup_index < pull_index < migration_index
     assert "admin-create" not in commands
 
 

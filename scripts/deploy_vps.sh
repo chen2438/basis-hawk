@@ -460,8 +460,8 @@ wait_for_command() {
     done
 }
 
-log "building application and backup images"
-"${COMPOSE_COMMAND[@]}" build --pull api backup
+log "building API, worker, and backup images"
+"${COMPOSE_COMMAND[@]}" build --pull api worker backup
 
 log "ensuring PostgreSQL is running"
 "${COMPOSE_COMMAND[@]}" up -d postgres

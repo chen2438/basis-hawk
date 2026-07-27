@@ -66,9 +66,10 @@ SSH 会话启动时，bootstrap 会在读取完脚本后把部署脚本的标准
 `--skip-admin`，但在以后创建管理员前无法登录。
 `--prepare-env-only` 只生成或检查配置，不安装或启动任何服务。
 
-重复部署识别已有 Alembic schema 后，先停止 API、worker 和定时 backup，并用独立备份镜像创建认证
-加密归档；只有备份成功后才拉取 PostgreSQL/Caddy 镜像、刷新数据库容器并执行迁移。随后启动全部服务，
-依次验证 PostgreSQL、API liveness、六所行情目录 readiness 和最新加密备份；失败
+每次部署都从当前同一 Git checkout 重建 API、worker 和 backup 三个本地镜像，禁止复用较早版本的
+worker。重复部署识别已有 Alembic schema 后，先停止 API、worker 和定时 backup，并用刚重建的独立
+备份镜像创建认证加密归档；只有备份成功后才拉取 PostgreSQL/Caddy 镜像、刷新数据库容器并执行迁移。
+随后启动全部服务，依次验证 PostgreSQL、API liveness、六所行情目录 readiness 和最新加密备份；失败
 会保留容器与日志供排查，不删除数据库或卷。`--enable-ufw` 会先放行当前 SSH 服务端口及
 80/443，再启用 UFW；非 22 端口应显式传入 `--ssh-port`。Docker 官方说明发布的容器端口可能绕过
 部分 UFW 规则，因此还必须在云厂商安全组只开放 SSH、80 和 443；当前 Compose 本身只发布 80/443。
@@ -397,8 +398,9 @@ VPS 出口 IP。
 CI 对提交信息、后端 Ruff/Pytest、VPS/bootstrap 脚本 Bash 语法和前端 Vitest/TypeScript/Vite 分别
 验收。bootstrap 测试使用临时本地 Git 远端验证首次 clone、参数传递、管道输入重新连接控制终端、
 干净 checkout 的 fast-forward 和脏目录拒绝。部署
-脚本测试使用伪 VPS/Docker 命令验证首次安装顺序、秘密不出现在输出、配置幂等、权限/域名拒绝及升级时
-“停 API/worker/backup → 加密备份 → 更新镜像 → 迁移”的严格先后。容器层另执行
+脚本测试使用伪 VPS/Docker 命令验证首次安装顺序、API/worker/backup 同版本重建、秘密不出现在输出、
+配置幂等、权限/域名拒绝及升级时“重建三镜像 → 停 API/worker/backup → 加密备份 → 更新外部镜像 →
+迁移”的严格先后。容器层另执行
 `docker compose --env-file .env.example config --quiet`；PostgreSQL 可用时还必须实际运行 Alembic
 upgrade/current。
 
