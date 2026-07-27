@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import errno
 import os
+import pty
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -54,6 +57,10 @@ if [[ "$command_line" == *"to_regclass"* ]] \
     printf 'alembic_version\\n'
 elif [[ "$command_line" == *"SELECT count(*) FROM admin_users"* ]]; then
     printf '%s\\n' "${FAKE_ADMIN_COUNT:-0}"
+elif [[ "$command_line" == *"basis-hawk admin-create"* ]]; then
+    printf '%s\\n' \
+        'Administrator created. Add this URI to your authenticator:' \
+        'otpauth://totp/Basis%20Hawk:admin?secret=TESTONLY'
 fi
 """,
         encoding="utf-8",
@@ -250,3 +257,50 @@ def test_existing_deployment_stops_worker_and_backs_up_before_migration(
     migration_index = commands.index("run --rm api alembic upgrade head")
     assert stop_index < backup_index < pull_index < migration_index
     assert "admin-create" not in commands
+
+
+def test_first_deployment_prints_totp_uri_after_completion(
+    tmp_path: Path,
+) -> None:
+    project = deployment_fixture(tmp_path)
+    environment, _ = fake_vps_commands(tmp_path)
+    command = shlex.join(
+        [
+            "bash",
+            str(SCRIPT),
+            "--project-dir",
+            str(project),
+            "--domain",
+            "hawk.example.com",
+            "--yes",
+        ]
+    )
+    child_pid, master_fd = pty.fork()
+    if child_pid == 0:
+        os.execve("/bin/bash", ["bash", "-c", command], environment)
+
+    output = bytearray()
+    try:
+        while True:
+            try:
+                chunk = os.read(master_fd, 4096)
+            except OSError as error:
+                if error.errno == errno.EIO:
+                    break
+                raise
+            if not chunk:
+                break
+            output.extend(chunk)
+    finally:
+        os.close(master_fd)
+    _, status = os.waitpid(child_pid, 0)
+    text = output.decode(errors="replace")
+
+    assert os.waitstatus_to_exitcode(status) == 0, text
+    completion_index = text.index("deployment complete")
+    uri_index = text.index("otpauth://totp/")
+    assert completion_index < uri_index
+    assert text.count("otpauth://totp/") == 1
+    assert text.rstrip().endswith(
+        "IMPORTANT: this TOTP URI will not be displayed again; store it securely"
+    )

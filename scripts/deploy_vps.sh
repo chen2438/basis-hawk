@@ -16,13 +16,26 @@ SKIP_ADMIN=false
 ASSUME_YES=false
 PREPARE_ENV_ONLY=false
 TEMPORARY_ENVIRONMENT_FILE=""
+ADMIN_TOTP_URI=""
 
 cleanup() {
     if [[ -n "${TEMPORARY_ENVIRONMENT_FILE}" ]]; then
         rm -f -- "${TEMPORARY_ENVIRONMENT_FILE}"
     fi
 }
-trap cleanup EXIT
+
+finish() {
+    local status="$?"
+    cleanup
+    if [[ -n "${ADMIN_TOTP_URI}" ]]; then
+        printf '\n'
+        log "IMPORTANT: add this one-time TOTP URI to your authenticator now"
+        printf '%s\n' "${ADMIN_TOTP_URI}"
+        log "IMPORTANT: this TOTP URI will not be displayed again; store it securely"
+    fi
+    return "${status}"
+}
+trap finish EXIT
 
 usage() {
     cat <<'EOF'
@@ -480,9 +493,23 @@ if [[ "${admin_count}" == "0" ]]; then
     else
         [[ -t 0 && -t 1 ]] \
             || die "administrator creation requires a terminal; use --skip-admin only if intentional"
-        log "creating the initial administrator; save the displayed TOTP URI securely"
-        "${COMPOSE_COMMAND[@]}" run --rm api \
-            basis-hawk admin-create --username "${ADMIN_USERNAME}"
+        log "creating the initial administrator; the TOTP URI will be displayed when deployment finishes"
+        admin_output=""
+        if ! admin_output="$(
+            "${COMPOSE_COMMAND[@]}" run --rm api \
+                basis-hawk admin-create --username "${ADMIN_USERNAME}"
+        )"; then
+            printf '%s\n' "${admin_output}" >&2
+            die "administrator creation failed"
+        fi
+        while IFS= read -r output_line; do
+            if [[ "${output_line}" == otpauth://totp/* ]]; then
+                ADMIN_TOTP_URI="${output_line}"
+                break
+            fi
+        done <<<"${admin_output}"
+        [[ -n "${ADMIN_TOTP_URI}" ]] \
+            || die "administrator was created but no TOTP URI was returned"
     fi
 else
     log "administrator already exists; bootstrap step skipped"
