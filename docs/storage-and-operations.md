@@ -174,6 +174,7 @@ Classic 要求 authorities 同时含 `stow`、`coow`、`cpow`。Gate 查询主�
 worker 定期写入 `account_snapshots`、`remote_open_order_snapshots`、
 `remote_position_snapshots` 和各账户最新 `account_reconciliation` 状态；全局
 `execution_control` 在对账开始时进入 `reconciling`。余额、权益、模式、挂单与仓位已接入持久化，
+其中账户快照单独保存 `perp_margin_mode=isolated|cross`，不能只凭账户名称推断仓位保证金模式。
 分页不完整、未匹配的远端订单/仓位、成交尚未关联或私有流尚未就绪时，每轮结束都会保持 `blocked`，
 不能据此执行交易。
 `private_stream_states` 按交易所与环境保存连接、认证、订单/成交/仓位订阅和最近心跳/事件时间；

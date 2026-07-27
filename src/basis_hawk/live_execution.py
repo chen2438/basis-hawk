@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from basis_hawk.accounts import (
     AccountSnapshot,
     LimitIocOrder,
+    PerpMarginMode,
     PositionMode,
     PrivateAccountClient,
     RemotePosition,
@@ -127,10 +128,8 @@ class LiveExecutionService:
             raise RuntimeError("exchange credential is not configured")
         client = self.account_client_factory(exchange, secrets, environment)
         try:
-            snapshot, remote_state = await asyncio.gather(
-                client.snapshot(),
-                client.trading_state(),
-            )
+            snapshot = await client.snapshot()
+            remote_state = await client.trading_state()
             if (
                 snapshot.exchange != exchange
                 or snapshot.environment != environment
@@ -171,6 +170,9 @@ class LiveExecutionService:
                     intent,
                     primary,
                     remote_state.positions,
+                    expected_isolated=(
+                        snapshot.perp_margin_mode == PerpMarginMode.ISOLATED
+                    ),
                 )
             prepared = await self.database.prepare_live_submission(
                 intent_id=intent.id
@@ -378,10 +380,8 @@ class LiveCompensationService:
             environment,
         )
         try:
-            snapshot, remote_state = await asyncio.gather(
-                client.snapshot(),
-                client.trading_state(),
-            )
+            snapshot = await client.snapshot()
+            remote_state = await client.trading_state()
             if (
                 snapshot.trade_permission is not True
                 or snapshot.position_mode == PositionMode.UNKNOWN
@@ -464,7 +464,10 @@ class LiveCompensationService:
             / Decimal(intent.leverage)
         )
         if snapshot.shared_balance:
-            if snapshot.spot_usdt_available < spot_required + perp_required:
+            if (
+                snapshot.spot_usdt_available < spot_required
+                or snapshot.perp_usdt_available < spot_required + perp_required
+            ):
                 raise RuntimeError("shared USDT balance is insufficient")
         elif (
             snapshot.spot_usdt_available < spot_required
@@ -477,6 +480,8 @@ class LiveCompensationService:
         intent: TradeIntentRow,
         primary: dict[str, OrderLegRow],
         remote_positions: list[RemotePosition],
+        *,
+        expected_isolated: bool,
     ) -> None:
         if intent.paired_position_id is None:
             raise RuntimeError("live close intent has no paired position")
@@ -549,7 +554,7 @@ class LiveCompensationService:
                 actual is None
                 or not _decimal_equal(actual[0], quantity)
                 or actual[1] != Decimal(leverage)
-                or actual[2] is not True
+                or actual[2] is not expected_isolated
             ):
                 raise RuntimeError(
                     "remote short position conflicts with the local pair"

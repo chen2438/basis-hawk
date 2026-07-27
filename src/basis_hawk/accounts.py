@@ -36,6 +36,11 @@ class PositionMode(StrEnum):
     UNKNOWN = "unknown"
 
 
+class PerpMarginMode(StrEnum):
+    ISOLATED = "isolated"
+    CROSS = "cross"
+
+
 class PrivateRequestError(RuntimeError):
     pass
 
@@ -139,6 +144,7 @@ class AccountSnapshot(BaseModel):
     account_mode: str
     position_mode: PositionMode
     trade_permission: bool | None
+    perp_margin_mode: PerpMarginMode = PerpMarginMode.ISOLATED
 
     @field_serializer(
         "spot_usdt_available",
@@ -2944,6 +2950,7 @@ class GateAccountClient(PrivateAccountClient):
             timeout=timeout,
         )
         self._owned = client is None
+        self._account_mode = "classic"
 
     async def _get(self, path: str, **params: object) -> Any:
         return await self._request("GET", path, params=params)
@@ -3004,6 +3011,11 @@ class GateAccountClient(PrivateAccountClient):
             self._get("/api/v4/spot/accounts", currency="USDT"),
             self._get("/api/v4/futures/usdt/accounts"),
         )
+        margin_mode = int(perp.get("margin_mode") or 0)
+        if margin_mode not in {0, 2}:
+            raise PrivateRequestError(
+                "Gate unified account mode is not supported; use classic or portfolio"
+            )
         try:
             keys = await self._get("/api/v4/account/main_keys")
         except PrivateRequestError:
@@ -3012,7 +3024,55 @@ class GateAccountClient(PrivateAccountClient):
             trade_permission = _gate_trade_permission(
                 keys,
                 self.secrets.api_key,
+                require_unified=margin_mode == 2,
             )
+        if margin_mode == 2:
+            mode, unified = await _gather(
+                self._get("/api/v4/unified/unified_mode"),
+                self._get("/api/v4/unified/accounts"),
+            )
+            if not isinstance(mode, dict) or mode.get("mode") != "portfolio":
+                raise PrivateRequestError(
+                    "Gate portfolio margin mode could not be confirmed"
+                )
+            if not isinstance(unified, dict):
+                raise PrivateRequestError(
+                    "Gate unified account balance response is incomplete"
+                )
+            balances = unified.get("balances")
+            usdt = balances.get("USDT") if isinstance(balances, dict) else None
+            if not isinstance(usdt, dict):
+                raise PrivateRequestError(
+                    "Gate unified account did not return a USDT balance"
+                )
+            self._account_mode = "portfolio"
+            return AccountSnapshot(
+                exchange=self.exchange,
+                environment=self.environment,
+                observed_at=datetime.now(UTC),
+                spot_usdt_available=_required_non_negative_decimal(
+                    usdt.get("available"),
+                    "Gate unified USDT available balance",
+                ),
+                perp_usdt_available=_required_non_negative_decimal(
+                    unified.get("total_available_margin"),
+                    "Gate unified total available margin",
+                ),
+                perp_usdt_equity=_required_non_negative_decimal(
+                    unified.get("unified_account_total_equity"),
+                    "Gate unified account total equity",
+                ),
+                shared_balance=True,
+                account_mode="unified:portfolio",
+                position_mode=(
+                    PositionMode.HEDGE
+                    if perp.get("in_dual_mode") is True
+                    else PositionMode.ONE_WAY
+                ),
+                trade_permission=trade_permission,
+                perp_margin_mode=PerpMarginMode.CROSS,
+            )
+        self._account_mode = "classic"
         spot_usdt = next(
             (item for item in spot if item.get("currency") == "USDT"),
             {},
@@ -3036,6 +3096,7 @@ class GateAccountClient(PrivateAccountClient):
                 else PositionMode.ONE_WAY
             ),
             trade_permission=trade_permission,
+            perp_margin_mode=PerpMarginMode.ISOLATED,
         )
 
     async def submit_internal_transfer(
@@ -3122,8 +3183,14 @@ class GateAccountClient(PrivateAccountClient):
         return value
 
     async def trading_state(self) -> RemoteTradingState:
+        spot_account = self._spot_account()
         spot_groups, perp_orders, position_items = await _gather(
-            self._get("/api/v4/spot/open_orders", page=1, limit=100),
+            self._get(
+                "/api/v4/spot/open_orders",
+                page=1,
+                limit=100,
+                account=spot_account,
+            ),
             self._get(
                 "/api/v4/futures/usdt/orders",
                 status="open",
@@ -3160,9 +3227,7 @@ class GateAccountClient(PrivateAccountClient):
                     entry_price=Decimal(str(item.get("entry_price") or "0")),
                     mark_price=Decimal(str(item.get("mark_price") or "0")),
                     liquidation_price=_optional_decimal(item.get("liq_price")),
-                    leverage=Decimal(
-                        str(item.get("lever") or item.get("leverage") or "0")
-                    ),
+                    leverage=_gate_position_leverage(item, margin_mode),
                     isolated=(
                         margin_mode == "isolated"
                         if margin_mode
@@ -3206,6 +3271,7 @@ class GateAccountClient(PrivateAccountClient):
                 order_id=exchange_order_id,
                 limit=1000,
                 page=1,
+                account=self._spot_account(),
             )
         else:
             items = await self._get(
@@ -3273,6 +3339,7 @@ class GateAccountClient(PrivateAccountClient):
             item = await self._get(
                 f"/api/v4/spot/orders/{client_order_id}",
                 currency_pair=symbol,
+                account=self._spot_account(),
             )
             order = _gate_spot_order(item)
         else:
@@ -3332,7 +3399,7 @@ class GateAccountClient(PrivateAccountClient):
                 "text": order.client_order_id,
                 "currency_pair": order.symbol,
                 "type": "limit",
-                "account": "spot",
+                "account": self._spot_account(),
                 "side": order.side,
                 "amount": format(order.quantity, "f"),
                 "price": format(order.limit_price, "f"),
@@ -3350,7 +3417,9 @@ class GateAccountClient(PrivateAccountClient):
                 "tif": "ioc",
                 "text": order.client_order_id,
                 "reduce_only": order.reduce_only,
-                "pos_margin_mode": "isolated",
+                "pos_margin_mode": (
+                    "cross" if self._account_mode == "portfolio" else "isolated"
+                ),
                 "action_mode": "ACK",
             }
         result = await self._post(path, body=body)
@@ -3384,7 +3453,7 @@ class GateAccountClient(PrivateAccountClient):
             result = await self._delete(
                 f"/api/v4/spot/orders/{target}",
                 currency_pair=symbol,
-                account="spot",
+                account=self._spot_account(),
             )
         else:
             result = await self._delete(
@@ -3430,6 +3499,21 @@ class GateAccountClient(PrivateAccountClient):
             raise PrivateRequestError(
                 "Gate position mode does not match the requested configuration"
             )
+        raw_margin_mode = int(account.get("margin_mode") or 0)
+        if raw_margin_mode not in {0, 2}:
+            raise PrivateRequestError(
+                "Gate unified account mode is not supported; use classic or portfolio"
+            )
+        portfolio = raw_margin_mode == 2
+        if portfolio:
+            mode = await self._get("/api/v4/unified/unified_mode")
+            if not isinstance(mode, dict) or mode.get("mode") != "portfolio":
+                raise PrivateRequestError(
+                    "Gate portfolio margin mode could not be confirmed"
+                )
+            self._account_mode = "portfolio"
+        else:
+            self._account_mode = "classic"
         target_mode = "dual_short" if position_mode == PositionMode.HEDGE else "single"
         target = next(
             (
@@ -3440,19 +3524,23 @@ class GateAccountClient(PrivateAccountClient):
             ),
             None,
         )
-        current_leverage = Decimal(
-            str(
-                (target or {}).get("lever")
-                or (target or {}).get("leverage")
-                or "0"
-            )
+        target_margin_mode = "cross" if portfolio else "isolated"
+        current_leverage = _gate_position_leverage(
+            target or {},
+            str((target or {}).get("pos_margin_mode") or "").lower(),
         )
-        isolated = str((target or {}).get("pos_margin_mode") or "").lower() == "isolated"
-        if target is not None and isolated and current_leverage == Decimal(leverage):
+        isolated = (
+            str((target or {}).get("pos_margin_mode") or "").lower() == "isolated"
+        )
+        if (
+            target is not None
+            and isolated is (not portfolio)
+            and current_leverage == Decimal(leverage)
+        ):
             return PerpConfiguration(
                 symbol=symbol,
                 leverage=leverage,
-                isolated=True,
+                isolated=not portfolio,
                 position_mode=position_mode,
             )
         open_orders = await self._get(
@@ -3471,10 +3559,18 @@ class GateAccountClient(PrivateAccountClient):
             raise PrivateRequestError(
                 "cannot change Gate margin or leverage with open orders or positions"
             )
-        params: dict[str, object] = {
-            "leverage": str(leverage),
-            "margin_mode": "isolated",
-        }
+        params: dict[str, object] = (
+            {
+                "leverage": "0",
+                "cross_leverage_limit": str(leverage),
+                "margin_mode": "cross",
+            }
+            if portfolio
+            else {
+                "leverage": str(leverage),
+                "margin_mode": "isolated",
+            }
+        )
         if position_mode == PositionMode.HEDGE:
             params["dual_side"] = "dual_short"
         configured = await self._post(
@@ -3483,22 +3579,29 @@ class GateAccountClient(PrivateAccountClient):
         )
         if not isinstance(configured, dict):
             raise PrivateRequestError("Gate leverage configuration returned no result")
-        confirmed_leverage = Decimal(
-            str(configured.get("lever") or configured.get("leverage") or "0")
+        confirmed_margin_mode = str(
+            configured.get("pos_margin_mode") or ""
+        ).lower()
+        confirmed_leverage = _gate_position_leverage(
+            configured,
+            confirmed_margin_mode,
         )
         if (
-            str(configured.get("pos_margin_mode") or "").lower() != "isolated"
+            confirmed_margin_mode != target_margin_mode
             or confirmed_leverage != Decimal(leverage)
         ):
             raise PrivateRequestError(
-                "Gate isolated leverage configuration was not confirmed"
+                "Gate margin and leverage configuration was not confirmed"
             )
         return PerpConfiguration(
             symbol=symbol,
             leverage=leverage,
-            isolated=True,
+            isolated=not portfolio,
             position_mode=position_mode,
         )
+
+    def _spot_account(self) -> str:
+        return "unified" if self._account_mode == "portfolio" else "spot"
 
     async def close(self) -> None:
         if self._owned:
@@ -4389,6 +4492,8 @@ def _bitget_trade_permission(
 def _gate_trade_permission(
     payload: Any,
     api_key: str,
+    *,
+    require_unified: bool = False,
 ) -> bool | None:
     if not isinstance(payload, list):
         return None
@@ -4418,10 +4523,10 @@ def _gate_trade_permission(
     }
     if not permissions:
         return None
-    return (
-        permissions.get("spot") is False
-        and permissions.get("futures") is False
-    )
+    required = {"spot", "futures"}
+    if require_unified:
+        required.add("unified")
+    return all(permissions.get(name) is False for name in required)
 
 
 def _masked_key_matches(masked: str, value: str) -> bool:
@@ -4448,6 +4553,26 @@ def _optional_decimal(value: object) -> Decimal | None:
     if value in (None, ""):
         return None
     return Decimal(str(value))
+
+
+def _required_non_negative_decimal(value: object, label: str) -> Decimal:
+    if value in (None, ""):
+        raise PrivateRequestError(f"{label} is missing")
+    parsed = Decimal(str(value))
+    if not parsed.is_finite() or parsed < 0:
+        raise PrivateRequestError(f"{label} is invalid")
+    return parsed
+
+
+def _gate_position_leverage(
+    item: dict[str, Any],
+    margin_mode: str,
+) -> Decimal:
+    if margin_mode == "cross":
+        value = item.get("cross_leverage_limit")
+        if value not in (None, ""):
+            return Decimal(str(value))
+    return Decimal(str(item.get("lever") or item.get("leverage") or "0"))
 
 
 def _milliseconds(value: datetime) -> int:

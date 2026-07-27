@@ -421,6 +421,10 @@ class AccountSnapshotRow(Base):
     shared_balance: Mapped[bool] = mapped_column(Boolean)
     account_mode: Mapped[str] = mapped_column(String(100))
     position_mode: Mapped[str] = mapped_column(String(20))
+    perp_margin_mode: Mapped[str] = mapped_column(
+        String(20),
+        default="isolated",
+    )
     trade_permission: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     __table_args__ = (
         Index(
@@ -1043,6 +1047,7 @@ class Database:
                         shared_balance=snapshot.shared_balance,
                         account_mode=snapshot.account_mode,
                         position_mode=snapshot.position_mode.value,
+                        perp_margin_mode=snapshot.perp_margin_mode.value,
                         trade_permission=snapshot.trade_permission,
                     )
                 )

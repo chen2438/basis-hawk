@@ -67,6 +67,7 @@ export interface AccountSnapshot {
   shared_balance: boolean;
   account_mode: string;
   position_mode: string;
+  perp_margin_mode: "isolated" | "cross";
   trade_permission: boolean | null;
 }
 

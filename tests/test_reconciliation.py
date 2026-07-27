@@ -222,6 +222,14 @@ def test_remote_open_orders_and_positions_are_matched_exactly() -> None:
         [position.model_copy(update={"isolated": False})],
         [("ORDER-USDT-SWAP", Decimal("2"), 3)],
     ) == ["remote short position conflicts with the local pair"]
+    assert (
+        _position_reasons(
+            [position.model_copy(update={"isolated": False})],
+            [("ORDER-USDT-SWAP", Decimal("2"), 3)],
+            expected_isolated=False,
+        )
+        == []
+    )
 
 
 async def _credentials(database: Database) -> CredentialService:

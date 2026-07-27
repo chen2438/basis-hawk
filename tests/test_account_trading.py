@@ -1446,6 +1446,93 @@ async def test_gate_safely_sets_hedge_short_isolated_leverage() -> None:
     await http.aclose()
 
 
+async def test_gate_portfolio_sets_cross_leverage_and_uses_unified_spot() -> None:
+    requests: list[tuple[str, str, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        body = json.loads(request.content or b"{}")
+        requests.append((request.method, request.url.path, body or params))
+        if request.url.path.endswith("/accounts"):
+            return httpx.Response(
+                200,
+                json={"in_dual_mode": False, "margin_mode": 2},
+            )
+        if request.url.path.endswith("/positions"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "contract": "ORDER_USDT",
+                        "mode": "single",
+                        "size": "0",
+                        "pos_margin_mode": "isolated",
+                        "lever": "1",
+                    }
+                ],
+            )
+        if request.url.path.endswith("/unified/unified_mode"):
+            return httpx.Response(200, json={"mode": "portfolio"})
+        if request.url.path.endswith("/futures/usdt/orders"):
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/set_leverage"):
+            return httpx.Response(
+                200,
+                json={
+                    "contract": "ORDER_USDT",
+                    "mode": "single",
+                    "size": "0",
+                    "pos_margin_mode": "cross",
+                    "lever": "0",
+                    "cross_leverage_limit": params["cross_leverage_limit"],
+                },
+            )
+        if request.url.path.endswith("/spot/orders"):
+            return httpx.Response(
+                201,
+                json={"id": "1101", "text": body["text"]},
+            )
+        raise AssertionError(request.url.path)
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://gate.test",
+    )
+    client = GateAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    configured = await client.configure_perp(
+        symbol="ORDER_USDT",
+        leverage=3,
+        position_mode=PositionMode.ONE_WAY,
+    )
+    submission = await client.place_limit_ioc(
+        LimitIocOrder(
+            market="spot",
+            symbol="ORDER_USDT",
+            side="buy",
+            quantity=Decimal("1"),
+            limit_price=Decimal("1"),
+            client_order_id="t-bh-portfolio",
+        )
+    )
+
+    assert configured.isolated is False
+    leverage_request = next(
+        item for item in requests if item[1].endswith("/set_leverage")
+    )
+    assert leverage_request[2] == {
+        "cross_leverage_limit": "3",
+        "leverage": "0",
+        "margin_mode": "cross",
+    }
+    spot_request = next(
+        item for item in requests if item[1].endswith("/spot/orders")
+    )
+    assert spot_request[2]["account"] == "unified"
+    assert submission.exchange_order_id == "1101"
+    await http.aclose()
+
+
 async def test_gate_reuses_matching_configuration_and_refuses_exposure() -> None:
     current_leverage = "3"
     position_size = "0"

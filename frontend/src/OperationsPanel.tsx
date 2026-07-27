@@ -413,6 +413,7 @@ function AccountsView({
             <div><dt>永续可用</dt><dd>{amount(snapshot.perp_usdt_available)} USDT</dd></div>
             <div><dt>账户模式</dt><dd>{snapshot.account_mode}</dd></div>
             <div><dt>持仓模式</dt><dd>{snapshot.position_mode}</dd></div>
+            <div><dt>永续保证金</dt><dd>{snapshot.perp_margin_mode === "cross" ? "组合保证金（跨仓）" : "逐仓"}</dd></div>
             <div><dt>交易权限</dt><dd>{snapshot.trade_permission === true ? "已确认" : "未确认"}</dd></div>
           </dl>}
           {item.exchange === "bybit" && <div className="inline-actions">

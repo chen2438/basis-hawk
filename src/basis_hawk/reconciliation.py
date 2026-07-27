@@ -8,6 +8,7 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict
 
 from basis_hawk.accounts import (
+    PerpMarginMode,
     PositionMode,
     PrivateAccountClient,
     RemoteOrder,
@@ -140,10 +141,8 @@ class ReconciliationService:
                     secrets,
                     summary.environment,
                 )
-                snapshot, trading_state = await asyncio.gather(
-                    client.snapshot(),
-                    client.trading_state(),
-                )
+                snapshot = await client.snapshot()
+                trading_state = await client.trading_state()
                 funding_income_complete = False
                 funding_income_count = 0
                 latest_funding_income_at = (
@@ -330,6 +329,10 @@ class ReconciliationService:
                     _position_reasons(
                         trading_state.positions,
                         expected_positions,
+                        expected_isolated=(
+                            snapshot.perp_margin_mode
+                            == PerpMarginMode.ISOLATED
+                        ),
                     )
                 )
                 if snapshot.position_mode == PositionMode.UNKNOWN:
@@ -541,6 +544,8 @@ async def _cancel_open_orders(
 def _position_reasons(
     remote_positions: list[RemotePosition],
     expected_positions: list[tuple[str, Decimal, int]],
+    *,
+    expected_isolated: bool = True,
 ) -> list[str]:
     expected: dict[str, tuple[Decimal, int]] = {}
     reasons: list[str] = []
@@ -576,7 +581,7 @@ def _position_reasons(
         if (
             not _decimal_equal(actual[0], quantity)
             or actual[1] != Decimal(leverage)
-            or actual[2] is not True
+            or actual[2] is not expected_isolated
         ):
             reasons.append("remote short position conflicts with the local pair")
     if remote:
