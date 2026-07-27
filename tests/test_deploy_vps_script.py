@@ -221,6 +221,7 @@ def test_full_first_deployment_runs_migrations_and_health_checks(
     commands = log_path.read_text(encoding="utf-8")
     assert "build --pull api worker backup" in commands
     assert "run --rm api alembic upgrade head" in commands
+    assert "run --rm api basis-hawk update-reconcile" in commands
     assert "up -d --remove-orphans" in commands
     assert "/api/health/live" in commands
     assert "/api/health/ready" in commands
@@ -261,6 +262,38 @@ def test_existing_deployment_stops_worker_and_backs_up_before_migration(
     prune_index = commands.index("builder prune --all --force --filter until=24h")
     assert build_index < stop_index < backup_index < pull_index < migration_index < prune_index
     assert "admin-create" not in commands
+
+
+def test_update_deployment_requests_reconciliation_before_worker_start(
+    tmp_path: Path,
+) -> None:
+    project = deployment_fixture(tmp_path)
+    prepared = run_script(
+        "--project-dir",
+        str(project),
+        "--domain",
+        "hawk.example.com",
+        "--prepare-env-only",
+    )
+    assert prepared.returncode == 0, prepared.stderr
+    environment, log_path = fake_vps_commands(tmp_path)
+    environment["FAKE_EXISTING_SCHEMA"] = "1"
+    environment["FAKE_ADMIN_COUNT"] = "1"
+
+    result = run_script(
+        "--project-dir",
+        str(project),
+        "--reconcile-after-update",
+        "--yes",
+        environment=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    commands = log_path.read_text(encoding="utf-8")
+    reconciliation_index = commands.index(
+        "run --rm api basis-hawk update-reconcile --required"
+    )
+    worker_start_index = commands.index("up -d --remove-orphans")
+    assert reconciliation_index < worker_start_index
 
 
 def test_first_deployment_prints_totp_uri_after_completion(

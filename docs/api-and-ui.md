@@ -124,7 +124,9 @@
 - `POST /api/operations/update/apply`：要求 `confirmed=true`，且目标必须等于最近一次检查或失败状态
   中记录的远端提交。入口先把全局执行持久化为 `paused` 并审计，再排队更新；排队失败也保持
   安全暂停。宿主机代理会再次 fetch 并要求远端头未变化，只允许快进后调用既有部署流程；部署失败时
-  可对同一远端提交重试部署，但不能换成未检查的目标。
+  可对同一远端提交重试部署，但不能换成未检查的目标。部署迁移完成后，更新代理只把原因精确为
+  `software update requested` 的暂停切换为 `reconciling`，新 worker 自动执行全量安全对账；其他
+  人工或故障暂停保持不变，且只有对账完整通过后才会回到 `ready`。
 - `GET /api/transfers`：返回最近内部划转及提交前/预期余额、远端 ID、状态和脱敏错误码；金额均为
   十进制字符串。
 - `POST /api/transfers`：仅允许 USDT 现货↔USDT 永续，要求 `confirmed=true` 和 UUID

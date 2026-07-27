@@ -1069,6 +1069,34 @@ class Database:
             )
             await session.commit()
 
+    async def request_post_update_reconciliation(self) -> bool:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ExecutionControlRow)
+                .where(ExecutionControlRow.id == 1)
+                .with_for_update()
+            )
+            if row is None:
+                return False
+            post_update_reason = (
+                "software update completed; fresh safety reconciliation required"
+            )
+            if (
+                row.state == "reconciling"
+                and row.reason == post_update_reason
+            ):
+                return True
+            if not (
+                row.state == "paused"
+                and row.reason == "software update requested"
+            ):
+                return False
+            row.state = "reconciling"
+            row.reason = post_update_reason
+            row.updated_at = datetime.now(UTC)
+            await session.commit()
+            return True
+
     async def _request_execution_reconciliation_in_session(
         self,
         session: AsyncSession,

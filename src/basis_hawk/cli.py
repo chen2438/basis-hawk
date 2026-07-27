@@ -144,6 +144,28 @@ async def rotate_admin_totp(username: str) -> int:
     return 0
 
 
+async def request_post_update_reconciliation(*, required: bool) -> int:
+    config = get_config()
+    database = Database(config.database_url)
+    await database.initialize()
+    try:
+        accepted = await database.request_post_update_reconciliation()
+        if not accepted:
+            print(
+                "update-reconcile: no software-update safety pause was found"
+            )
+            return int(required)
+        await database.append_audit(
+            "software.update_reconciliation_requested",
+            actor="system:update-agent",
+            details={},
+        )
+    finally:
+        await database.close()
+    print("update-reconcile: fresh safety reconciliation requested")
+    return 0
+
+
 async def run_worker(*, once: bool) -> int:
     config = get_config()
     if config.credential_master_key is None:
@@ -239,6 +261,8 @@ def main() -> None:
     admin_parser.add_argument("--username", default="admin")
     rotate_totp_parser = subparsers.add_parser("admin-rotate-totp")
     rotate_totp_parser.add_argument("--username", default="admin")
+    update_reconcile_parser = subparsers.add_parser("update-reconcile")
+    update_reconcile_parser.add_argument("--required", action="store_true")
     args = parser.parse_args()
     config = get_config()
     logging.basicConfig(level=config.log_level)
@@ -249,6 +273,12 @@ def main() -> None:
         raise SystemExit(asyncio.run(create_admin(args.username)))
     if args.command == "admin-rotate-totp":
         raise SystemExit(asyncio.run(rotate_admin_totp(args.username)))
+    if args.command == "update-reconcile":
+        raise SystemExit(
+            asyncio.run(
+                request_post_update_reconciliation(required=args.required)
+            )
+        )
     if args.command == "worker":
         raise SystemExit(asyncio.run(run_worker(once=args.once)))
     uvicorn.run(

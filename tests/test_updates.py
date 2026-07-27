@@ -86,6 +86,36 @@ def test_update_status_rejects_untrusted_metadata(tmp_path: Path) -> None:
     assert status["error_code"] == "update_agent_unavailable"
 
 
+async def test_post_update_reconciliation_only_clears_the_update_pause() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    try:
+        await database.set_execution_control(
+            state="paused",
+            reason="operator requested a safety pause",
+        )
+        assert await database.request_post_update_reconciliation() is False
+        control = await database.execution_control()
+        assert control is not None
+        assert control.state == "paused"
+        assert control.reason == "operator requested a safety pause"
+
+        await database.set_execution_control(
+            state="paused",
+            reason="software update requested",
+        )
+        assert await database.request_post_update_reconciliation() is True
+        control = await database.execution_control()
+        assert control is not None
+        assert control.state == "reconciling"
+        assert control.reason == (
+            "software update completed; fresh safety reconciliation required"
+        )
+        assert await database.request_post_update_reconciliation() is True
+    finally:
+        await database.close()
+
+
 async def test_update_api_checks_and_pauses_before_apply(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

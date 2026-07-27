@@ -15,6 +15,7 @@ ENABLE_UFW=false
 SKIP_ADMIN=false
 ASSUME_YES=false
 PREPARE_ENV_ONLY=false
+RECONCILE_AFTER_UPDATE=false
 TEMPORARY_ENVIRONMENT_FILE=""
 ADMIN_TOTP_URI=""
 
@@ -60,6 +61,8 @@ Options:
   --skip-admin             Do not create an administrator when none exists.
   --yes                    Skip the final deployment confirmation.
   --prepare-env-only       Only create or validate .env; do not use Docker.
+  --reconcile-after-update Request a fresh safety reconciliation before the
+                           new worker starts. Reserved for the update agent.
   -h, --help               Show this help.
 
 The script never overwrites an existing .env and never prints generated
@@ -128,6 +131,10 @@ while (($#)); do
             ;;
         --prepare-env-only)
             PREPARE_ENV_ONLY=true
+            shift
+            ;;
+        --reconcile-after-update)
+            RECONCILE_AFTER_UPDATE=true
             shift
             ;;
         -h|--help)
@@ -520,6 +527,14 @@ wait_for_command 120 "PostgreSQL after image refresh" \
 
 log "applying database migrations"
 "${COMPOSE_COMMAND[@]}" run --rm api alembic upgrade head
+
+log "checking whether this deployment follows a software update"
+if ${RECONCILE_AFTER_UPDATE}; then
+    "${COMPOSE_COMMAND[@]}" run --rm api \
+        basis-hawk update-reconcile --required
+else
+    "${COMPOSE_COMMAND[@]}" run --rm api basis-hawk update-reconcile
+fi
 
 admin_count="$(
     # Variables intentionally expand inside the PostgreSQL container.

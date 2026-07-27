@@ -36,7 +36,7 @@ def test_host_agent_checks_and_applies_only_remote_fast_forward(
     scripts.mkdir()
     deploy = scripts / "deploy_vps.sh"
     deploy.write_text(
-        "#!/usr/bin/env bash\nprintf 'deployed\\n' >\"$FAKE_DEPLOY_LOG\"\n",
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >\"$FAKE_DEPLOY_LOG\"\n",
         encoding="utf-8",
     )
     deploy.chmod(0o755)
@@ -114,7 +114,9 @@ def test_host_agent_checks_and_applies_only_remote_fast_forward(
     )
     assert updated.returncode == 0, updated.stderr
     assert git("rev-parse", "HEAD", directory=checkout) == available
-    assert (tmp_path / "deploy.log").read_text(encoding="utf-8") == "deployed\n"
+    deploy_arguments = (tmp_path / "deploy.log").read_text(encoding="utf-8")
+    assert "--reconcile-after-update" in deploy_arguments
+    assert "--skip-admin" in deploy_arguments
     assert "state=succeeded" in (
         status_directory / "status"
     ).read_text(encoding="ascii")

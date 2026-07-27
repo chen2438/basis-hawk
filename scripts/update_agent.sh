@@ -125,6 +125,7 @@ git -C "${PROJECT_DIRECTORY}" merge --ff-only "${available_commit}" \
 "${PROJECT_DIRECTORY}/scripts/deploy_vps.sh" \
     --project-dir "${PROJECT_DIRECTORY}" \
     --skip-admin \
+    --reconcile-after-update \
     --yes \
     || fail "deployment_failed" "${available_commit}" "${available_commit}" "${request_id}"
 
