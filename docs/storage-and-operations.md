@@ -209,12 +209,17 @@ Bitget 私有流连接前复用交易适配器的只读账户代际探测：UTA 
 USDT 永续仓位及两类账户频道。模拟盘使用对应 `wspap` V2/V3 域名。所有实际请求频道逐项确认后才
 登记就绪，文本 `ping`/`pong` 用于空闲保活；代际不明、升级/切换中、登录或任一订阅失败均整条断开，
 绝不在 V2/V3 之间失败回退。常驻 worker 已装配 Bitget。
-Gate LIVE 使用现货与 USDT 永续两条私有连接。现货订阅 `spot.orders`、`spot.usertrades` 的全标的更新；
-永续先通过签名 REST 账户接口读取并验证正整数用户 ID，再订阅 `futures.orders`、
+Gate LIVE/SANDBOX 各自使用现货与 USDT 永续两条私有连接。LIVE REST 使用
+`https://api.gateio.ws`，SANDBOX REST 使用 `https://api-testnet.gateapi.io`；沙盒现货私有流连接
+`wss://ws-testnet.gate.com/v4/ws/spot`，沙盒永续私有流连接
+`wss://ws-testnet.gate.com/v4/ws/futures/usdt`，绝不回退到实盘地址。现货订阅
+`spot.orders`、`spot.usertrades` 的全标的更新；永续先通过对应环境的签名 REST 账户接口读取并验证
+正整数用户 ID，再订阅 `futures.orders`、
 `futures.usertrades`、`futures.positions` 的全合约更新，连接显式发送
 `X-Gate-Size-Decimal: 1` 以保留十进制合约数量。两条连接都必须通过 WebSocket 协议 ping/pong；
-任一通道断开即使整个 Gate 连接失败并由监督器重连。Gate 沙盒不满足同所现货和 USDT 永续要求，
-因此明确拒绝且不得回退到实盘。常驻 worker 已装配 Gate。
+任一通道断开即使整个 Gate 连接失败并由监督器重连。Gate LIVE 与 SANDBOX 凭据以
+`(exchange, environment)` 分别保存，worker 可同时热重载两套连接；账户快照、私有流状态、订单、
+仓位和交易意图始终携带环境，禁止跨环境组成套利双腿。常驻 worker 已装配 Gate。
 MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
 `spot@private.orders.v3.api.pb`、`spot@private.deals.v3.api.pb` 和
 `spot@private.account.v3.api.pb` 三个 Protobuf 频道；每 30 分钟续期，续期失败或返回不同 key 即断线，
@@ -264,7 +269,8 @@ MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
 `strategy_versions` 以 UUID 和单调版本号保存完整 JSON 配置、环境、创建者和时间；版本写入后不可修改。
 `automation_control` 是 ID=1 的独立单例，初始状态固定为 `disabled`，保存当前策略 UUID、
 `disabled/enabled/paused`、原因和操作者。启用前 API 必须重新读取账户执行 `ready`、策略内容和目标
-凭据；MEXC/Gate 不允许出现在 sandbox 策略。暂停不会覆盖账户级 `execution_control`，因此后续仍可
+凭据；MEXC 不允许出现在 sandbox 策略，Gate sandbox 策略必须具有独立 Gate TestNet 凭据。暂停不会
+覆盖账户级 `execution_control`，因此后续仍可
 对账和人工平仓。每次创建版本、启用、暂停、恢复和禁用都写审计事件。
 `latest_opportunities` 以 `exchange:base_asset` 为主键保存最新完整机会 JSON、交易所、标的、行情时间和
 写入时间。API 行情进程每轮覆盖更新，不追加高频历史；`opportunity_snapshots` 继续承担 5 分钟级历史，

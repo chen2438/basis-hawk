@@ -57,9 +57,9 @@ sudo docker compose --env-file .env run --rm api \
 
 代码与隔离容器验收完成后，生产交付仍需由管理员在目标环境完成：配置域名、TLS、防火墙、固定出口
 IP 和异地备份；保存禁止提现且绑定出口 IP 的交易所 Key；验证 Telegram/SMTP；连续运行 72 小时纸面
-模式；在 Binance、OKX、Bybit、Bitget 的受支持沙盒重复开平仓；最后由管理员明确确认最小名义金额的
-实盘开仓并立即平仓。Gate/MEXC 没有满足同所现货与 USDT 永续要求的受支持沙盒，MEXC 合约写权限还
-必须通过真实账户能力探测，否则系统保持只读。
+模式；在 Binance、OKX、Bybit、Bitget、Gate 的受支持沙盒重复开平仓；最后由管理员明确确认最小
+名义金额的实盘开仓并立即平仓。Gate TestNet 使用与实盘完全独立的 API Key 和连接；MEXC 没有满足
+同所现货与 USDT 永续要求的受支持沙盒，且其合约写权限还必须通过真实账户能力探测，否则系统保持只读。
 
 ## 本地开发
 

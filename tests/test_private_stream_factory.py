@@ -36,6 +36,16 @@ async def test_factory_builds_implemented_private_stream_connections() -> None:
             ),
             actor="test",
         )
+    await credentials.save(
+        exchange=Exchange.GATE,
+        environment=ExchangeEnvironment.SANDBOX,
+        label="sandbox",
+        secrets=ExchangeSecrets(
+            api_key="gate-sandbox-api-key",
+            api_secret="gate-sandbox-api-secret",
+        ),
+        actor="test",
+    )
 
     connections = await create_private_stream_connections(
         credentials,
@@ -47,11 +57,22 @@ async def test_factory_builds_implemented_private_stream_connections() -> None:
         Exchange.BITGET,
         Exchange.BYBIT,
         Exchange.GATE,
+        Exchange.GATE,
         Exchange.MEXC,
         Exchange.OKX,
     ]
+    assert [
+        item.environment
+        for item in connections
+        if item.exchange == Exchange.GATE
+    ] == [
+        ExchangeEnvironment.LIVE,
+        ExchangeEnvironment.SANDBOX,
+    ]
     assert all(
-        item.environment == ExchangeEnvironment.LIVE for item in connections
+        item.environment == ExchangeEnvironment.LIVE
+        for item in connections
+        if item.exchange != Exchange.GATE
     )
     assert all(item.timeout_seconds == 7 for item in connections)
     await database.close()

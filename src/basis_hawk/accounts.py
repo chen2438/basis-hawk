@@ -26,6 +26,7 @@ from pydantic import (
 )
 
 from basis_hawk.credentials import ExchangeEnvironment, ExchangeSecrets
+from basis_hawk.gate_endpoints import gate_endpoints
 from basis_hawk.models import Exchange
 
 
@@ -2935,15 +2936,11 @@ class GateAccountClient(PrivateAccountClient):
         clock_s: Callable[[], int] | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        if environment == ExchangeEnvironment.SANDBOX:
-            raise UnsupportedEnvironmentError(
-                "Gate sandbox does not provide the required spot and USDT futures pair"
-            )
         self.secrets = secrets
         self.environment = environment
         self.clock_s = clock_s or (lambda: int(time.time()))
         self.http = client or httpx.AsyncClient(
-            base_url="https://api.gateio.ws",
+            base_url=gate_endpoints(environment).rest,
             timeout=timeout,
         )
         self._owned = client is None

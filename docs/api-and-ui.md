@@ -138,8 +138,10 @@ AES-GCM 关联数据加密；响应、审计事件和日志均不得包含 API S
 `paper` 环境不接受交易所凭据。
 
 账户快照使用各所官方只读接口和签名规则。签名错误、超时及 HTTP 错误统一映射为不带请求 URL、
-签名参数或响应原文的脱敏错误。MEXC 和 Gate 没有满足同所现货+USDT 永续完整验收要求的沙盒，
-其 `sandbox` 快照明确返回不支持，不会回退到实盘地址。Bybit V5 使用 `settleCoin=USDT` 时不会返回
+签名参数或响应原文的脱敏错误。Gate `sandbox` 使用独立 TestNet API Key 和
+`https://api-testnet.gateapi.io`，可与 Gate `live` 凭据同时保存及对账，任一环境都不会回退到另一
+环境；MEXC 没有满足同所现货+USDT 永续完整验收要求的沙盒，其 `sandbox` 快照仍明确返回不支持。
+Bybit V5 使用 `settleCoin=USDT` 时不会返回
 空仓标的，因此聚合结果无法识别模式时会再以 `symbol=BTCUSDT` 只读查询有效 `positionIdx`；若该空
 子账户仍返回空列表，快照只使用管理员明确保存的模式声明，未声明则继续返回 `unknown` 并阻断。
 声明不修改 Bybit 设置，目标标的在配置杠杆前还会重新读取自身模式，不能仅凭声明直接发单。
@@ -177,7 +179,8 @@ Bybit 游标会读取到末页；其余接口一旦达到单页上限或交易�
 `GET /api/system/execution` 的账户项包含 `fill_reconciliation_complete` 和 `fill_count`；分页不完整
 或缺少必需的交易所订单 ID 时前者为 `false`。账户项同时包含 `private_stream_ready`；它只在认证完成、
 订单/成交/仓位三类订阅全部成功且最近心跳不超过 30 秒时为 `true`。Binance、OKX、Bybit、Bitget、
-Gate LIVE 与 MEXC LIVE 的认证连接均已装配到常驻 worker。任一私有事件会合并唤醒同一执行器锁内的
+Gate LIVE/SANDBOX 与 MEXC LIVE 的认证连接均已装配到常驻 worker。任一私有事件会合并唤醒同一
+执行器锁内的
 严格 REST 对账，快速更新订单、成交和仓位账本；固定周期对账仍作为漏事件与断线恢复路径。
 worker 还会每秒比较当前凭据的交易所、环境和更新时间：新凭据启动新连接，替换凭据先关闭旧连接再用
 新密钥建立连接，删除凭据关闭并移除连接。凭据变化先把非暂停状态置为 `reconciling`，连接成功或断开

@@ -46,9 +46,11 @@ OKX、Gate、MEXC 等交易所返回的合约张数。
 最低可接受价。最大滑点必须位于 `[0, 1)`，无效价格或未知步长直接阻断。
 真实开仓计划复用这两项计算，先将共同基础币数量、现货原生数量、永续原生张数、乘数和两条保护价写入
 订单腿，再允许 worker 接触交易所。计划只接受 15 秒内的健康机会、完整且与机会严格匹配的标的规则、
-当前最优档容量以内的名义金额和 1–10 倍杠杆；Gate/MEXC 因无受支持沙盒而拒绝沙盒计划。
+当前最优档容量以内的名义金额和 1–10 倍杠杆；Gate 支持使用独立 TestNet 凭据生成沙盒计划，
+MEXC 因无受支持合约沙盒仍拒绝沙盒计划。
 
-私有交易统一限定为限价 IOC。当前 Binance、OKX、Bybit、Bitget Classic V2/UTA V3、Gate LIVE 及有特批
+私有交易统一限定为限价 IOC。当前 Binance、OKX、Bybit、Bitget Classic V2/UTA V3、Gate
+LIVE/SANDBOX 及有特批
 Standard V1 权限的 MEXC 适配器已实现现货及 USDT 永续下单和按交易所/客户端订单 ID 撤单；永续仅
 允许“卖出开空”或“reduce-only 买回空仓”。
 单向模式显式发送

@@ -472,8 +472,16 @@ async def test_gate_account_snapshot_and_signature() -> None:
     assert await client.user_id() == "20011"
     await http.aclose()
 
-    with pytest.raises(UnsupportedEnvironmentError):
-        GateAccountClient(SECRETS, ExchangeEnvironment.SANDBOX)
+
+async def test_gate_sandbox_uses_the_testnet_rest_endpoint() -> None:
+    sandbox = GateAccountClient(SECRETS, ExchangeEnvironment.SANDBOX)
+    live = GateAccountClient(SECRETS, ExchangeEnvironment.LIVE)
+
+    assert str(sandbox.http.base_url) == "https://api-testnet.gateapi.io"
+    assert str(live.http.base_url) == "https://api.gateio.ws"
+
+    await sandbox.close()
+    await live.close()
 
 
 async def test_mexc_account_snapshot_and_signature() -> None:

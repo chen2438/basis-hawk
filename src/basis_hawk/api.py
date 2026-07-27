@@ -1057,11 +1057,11 @@ def create_app(
         config = AutoStrategyConfig.model_validate(json.loads(row.payload))
         if (
             config.environment == ExchangeEnvironment.SANDBOX.value
-            and config.enabled_exchanges & {Exchange.MEXC, Exchange.GATE}
+            and Exchange.MEXC in config.enabled_exchanges
         ):
             raise HTTPException(
                 status_code=409,
-                detail="MEXC and Gate do not provide a supported paired sandbox",
+                detail="MEXC does not provide a supported paired sandbox",
             )
         execution = await scanner.database.execution_control()
         if execution is None or execution.state != "ready":

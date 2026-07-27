@@ -12,6 +12,7 @@ from websockets.asyncio.client import connect as websocket_connect
 
 from basis_hawk.accounts import GateAccountClient
 from basis_hawk.credentials import ExchangeEnvironment, ExchangeSecrets
+from basis_hawk.gate_endpoints import gate_endpoints
 from basis_hawk.models import Exchange
 
 
@@ -46,10 +47,7 @@ class GatePrivateStreamConnection:
         await self.close()
         while not self._events.empty():
             self._events.get_nowait()
-        if self.environment != ExchangeEnvironment.LIVE:
-            raise RuntimeError(
-                "Gate private stream requires the live environment"
-            )
+        endpoints = gate_endpoints(self.environment)
         try:
             user_id = await self._user_id_resolver()
             if not user_id.isdigit() or int(user_id) <= 0:
@@ -57,12 +55,12 @@ class GatePrivateStreamConnection:
                     "Gate futures account user identifier is invalid"
                 )
             self._spot_socket = await self._connector(
-                "wss://api.gateio.ws/ws/v4/",
+                endpoints.spot_private_websocket,
                 ping_interval=None,
                 close_timeout=5,
             )
             self._futures_socket = await self._connector(
-                "wss://fx-ws.gateio.ws/v4/ws/usdt",
+                endpoints.futures_private_websocket,
                 ping_interval=None,
                 close_timeout=5,
                 additional_headers={"X-Gate-Size-Decimal": "1"},

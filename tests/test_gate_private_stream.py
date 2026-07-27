@@ -140,24 +140,40 @@ async def test_gate_subscribes_spot_and_futures_private_channels() -> None:
     assert futures.closed is True
 
 
-async def test_gate_rejects_sandbox_before_network_access() -> None:
-    connected = False
+async def test_gate_sandbox_uses_spot_and_futures_testnet_channels() -> None:
+    spot = FakeSocket()
+    futures = FakeSocket()
+    sockets = iter((spot, futures))
+    calls: list[tuple[str, dict[str, object]]] = []
 
     async def connector(url: str, **options: object) -> FakeSocket:
-        nonlocal connected
-        connected = True
-        return FakeSocket()
+        calls.append((url, options))
+        return next(sockets)
 
     connection = GatePrivateStreamConnection(
         SECRETS,
         ExchangeEnvironment.SANDBOX,
+        user_id_resolver=lambda: asyncio.sleep(0, result="20011"),
         connector=connector,
     )
 
-    with pytest.raises(RuntimeError, match="live environment"):
-        await connection.connect()
+    await connection.connect()
 
-    assert connected is False
+    assert calls == [
+        (
+            "wss://ws-testnet.gate.com/v4/ws/spot",
+            {"ping_interval": None, "close_timeout": 5},
+        ),
+        (
+            "wss://ws-testnet.gate.com/v4/ws/futures/usdt",
+            {
+                "ping_interval": None,
+                "close_timeout": 5,
+                "additional_headers": {"X-Gate-Size-Decimal": "1"},
+            },
+        ),
+    ]
+    await connection.close()
 
 
 async def test_gate_closes_both_channels_when_one_reader_fails() -> None:

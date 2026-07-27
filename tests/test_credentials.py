@@ -87,6 +87,53 @@ async def test_credential_changes_request_reconciliation_without_clearing_pause(
     await database.close()
 
 
+async def test_gate_live_and_sandbox_credentials_are_stored_independently() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    service = CredentialService(
+        database,
+        SecretCipher(SecretCipher.generate_key()),
+    )
+    live = ExchangeSecrets(
+        api_key="gate-live-key",
+        api_secret="gate-live-secret",
+    )
+    sandbox = ExchangeSecrets(
+        api_key="gate-sandbox-key",
+        api_secret="gate-sandbox-secret",
+    )
+
+    await service.save(
+        exchange=Exchange.GATE,
+        environment=ExchangeEnvironment.LIVE,
+        label="live",
+        secrets=live,
+        actor="admin",
+    )
+    await service.save(
+        exchange=Exchange.GATE,
+        environment=ExchangeEnvironment.SANDBOX,
+        label="sandbox",
+        secrets=sandbox,
+        actor="admin",
+    )
+
+    assert await service.load(Exchange.GATE, ExchangeEnvironment.LIVE) == live
+    assert (
+        await service.load(Exchange.GATE, ExchangeEnvironment.SANDBOX)
+        == sandbox
+    )
+    summaries = await service.list()
+    assert {
+        (item.exchange, item.environment, item.label)
+        for item in summaries
+    } == {
+        (Exchange.GATE, ExchangeEnvironment.LIVE, "live"),
+        (Exchange.GATE, ExchangeEnvironment.SANDBOX, "sandbox"),
+    }
+    await database.close()
+
+
 async def test_credential_api_never_echoes_plaintext() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     scanner = ScannerService(database, {})

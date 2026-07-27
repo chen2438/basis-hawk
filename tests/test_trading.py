@@ -192,6 +192,40 @@ def test_live_client_order_ids_satisfy_gate_and_generic_constraints() -> None:
     )
 
 
+def test_gate_sandbox_open_preview_is_supported_but_mexc_remains_blocked() -> None:
+    ledger = TradeLedger(Database("sqlite+aiosqlite:///:memory:"))
+    gate_opportunity = _opportunity().model_copy(
+        update={
+            "exchange": Exchange.GATE,
+            "spot_symbol": "ORDER-USDT",
+            "perp_symbol": "ORDER_USDT",
+        }
+    )
+
+    preview = ledger.preview_live_open(
+        opportunity=gate_opportunity,
+        pair=_pair(Exchange.GATE),
+        notional_usdt=Decimal("100"),
+        settings=ScannerSettings(),
+        environment=ExchangeEnvironment.SANDBOX,
+    )
+
+    assert preview.exchange == Exchange.GATE
+    assert preview.environment == ExchangeEnvironment.SANDBOX
+
+    mexc_opportunity = _opportunity().model_copy(
+        update={"exchange": Exchange.MEXC}
+    )
+    with pytest.raises(TradeValidationError, match="supported sandbox"):
+        ledger.preview_live_open(
+            opportunity=mexc_opportunity,
+            pair=_pair(Exchange.MEXC),
+            notional_usdt=Decimal("100"),
+            settings=ScannerSettings(),
+            environment=ExchangeEnvironment.SANDBOX,
+        )
+
+
 async def test_trade_state_machine_uses_optimistic_versions() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()

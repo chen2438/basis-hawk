@@ -419,7 +419,7 @@ class TradeLedger:
             )
         if (
             environment == ExchangeEnvironment.SANDBOX
-            and opportunity.exchange in {Exchange.MEXC, Exchange.GATE}
+            and opportunity.exchange == Exchange.MEXC
         ):
             raise TradeValidationError(
                 f"{opportunity.exchange.value} does not provide a supported sandbox"
@@ -566,7 +566,7 @@ class TradeLedger:
             )
         if (
             environment == ExchangeEnvironment.SANDBOX
-            and opportunity.exchange in {Exchange.MEXC, Exchange.GATE}
+            and opportunity.exchange == Exchange.MEXC
         ):
             raise TradeValidationError(
                 f"{opportunity.exchange.value} does not provide a supported sandbox"

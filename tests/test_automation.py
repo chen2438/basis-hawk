@@ -189,6 +189,56 @@ async def test_automation_rejects_incomplete_limits_and_missing_credentials() ->
     await database.close()
 
 
+async def test_gate_sandbox_strategy_can_be_enabled_with_sandbox_credentials() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    service = ScannerService(database, {})
+    await service.initialize()
+    credentials = CredentialService(
+        database,
+        SecretCipher(SecretCipher.generate_key()),
+    )
+    await credentials.save(
+        exchange=Exchange.GATE,
+        environment=ExchangeEnvironment.SANDBOX,
+        label="sandbox",
+        secrets=ExchangeSecrets(
+            api_key="gate-sandbox-key",
+            api_secret="gate-sandbox-secret",
+        ),
+        actor="test",
+    )
+    app = create_app(
+        service,
+        manage_lifecycle=False,
+        auth_required=False,
+        credential_service=credentials,
+    )
+    config = {
+        **strategy_config(),
+        "environment": "sandbox",
+        "enabled_exchanges": ["gate"],
+    }
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        saved = await client.put("/api/automation/config", json=config)
+        assert saved.status_code == 200, saved.text
+        await database.set_execution_control(state="ready", reason="test")
+        enabled = await client.post(
+            "/api/automation/enable",
+            json={
+                "strategy_id": saved.json()["strategy"]["id"],
+                "confirmed": True,
+            },
+        )
+
+    assert enabled.status_code == 200, enabled.text
+    assert enabled.json()["state"] == "enabled"
+    await database.close()
+
+
 async def test_global_execution_pause_requires_confirmation_and_fresh_resume() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     service = ScannerService(database, {})
