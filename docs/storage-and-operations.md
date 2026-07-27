@@ -413,7 +413,9 @@ VPS 出口 IP。
 
 CI 对提交信息、后端 Ruff/Pytest、VPS/bootstrap 脚本 Bash 语法和前端 Vitest/TypeScript/Vite 分别
 验收。bootstrap 测试使用临时本地 Git 远端验证首次 clone、参数传递、管道输入重新连接控制终端、
-干净 checkout 的 fast-forward 和脏目录拒绝。部署
+干净 checkout 的 fast-forward 和脏目录拒绝。15 秒交易预览票据测试在每个用例实际开始时生成时间，
+而不是在 Pytest 收集阶段固定时间，避免较慢 runner 把原本验证管理员或行情指纹冲突的样本误判为过期。
+部署
 脚本测试使用伪 VPS/Docker 命令验证首次安装顺序、API/worker/backup 同版本重建、秘密不出现在输出、
 配置幂等、权限/域名拒绝及升级时“重建三镜像 → 停 API/worker/backup → 加密备份 → 更新外部镜像 →
 迁移”的严格先后。容器层另执行

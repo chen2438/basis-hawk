@@ -65,26 +65,30 @@ async def test_trade_preview_reserves_one_confirmation_idempotently() -> None:
 
 
 @pytest.mark.parametrize(
-    ("preview", "actor", "fingerprint", "message"),
+    ("preview_actor", "actor", "fingerprint", "expired", "message"),
     [
-        (_preview(actor="first"), "second", "a" * 64, "another administrator"),
-        (_preview(), "admin", "b" * 64, "changed after trade preview"),
-        (
-            _preview(expires_at=datetime.now(UTC) - timedelta(seconds=1)),
-            "admin",
-            "a" * 64,
-            "expired",
-        ),
+        ("first", "second", "a" * 64, False, "another administrator"),
+        ("admin", "admin", "b" * 64, False, "changed after trade preview"),
+        ("admin", "admin", "a" * 64, True, "expired"),
     ],
 )
 async def test_trade_preview_rejects_unsafe_confirmation(
-    preview: dict[str, object],
+    preview_actor: str,
     actor: str,
     fingerprint: str,
+    expired: bool,
     message: str,
 ) -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()
+    preview = _preview(
+        actor=preview_actor,
+        expires_at=(
+            datetime.now(UTC) - timedelta(seconds=1)
+            if expired
+            else None
+        ),
+    )
     created = await database.create_trade_preview(preview=preview)
 
     with pytest.raises(ValueError, match=message):
