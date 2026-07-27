@@ -66,6 +66,16 @@ describe("Basis Hawk dashboard", () => {
     );
   });
 
+  it("turns a top-book capacity error into an actionable Chinese message", () => {
+    expect(apiErrorMessage({
+      code: "notional_exceeds_top_book",
+      message: "notional exceeds current top-book capacity",
+      capacity_notional_usdt: "2.0553",
+    }, "操作失败")).toBe(
+      "名义金额超过当前一档双腿可执行容量；当前最多可下 2.0553 USDT，盘口会实时变化，建议输入略低于该值的金额后重试",
+    );
+  });
+
   it("renders the read-only Chinese scanner", async () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("资金费机会，一眼看清。")).toBeTruthy());

@@ -37,10 +37,23 @@ export function apiErrorMessage(detail: unknown, fallback: string): string {
     code?: string;
     message?: string;
     minimum_notional_usdt?: string;
+    capacity_notional_usdt?: string;
   };
   if (value.code === "notional_below_minimum" && value.minimum_notional_usdt) {
     return `名义金额过低；该标的当前至少需要 ${value.minimum_notional_usdt} USDT（受现货与永续共同数量步长及交易所最低下单规则限制）`;
   }
+  if (value.code === "notional_exceeds_top_book" && value.capacity_notional_usdt) {
+    return `名义金额超过当前一档双腿可执行容量；当前最多可下 ${value.capacity_notional_usdt} USDT，盘口会实时变化，建议输入略低于该值的金额后重试`;
+  }
+  const translations: Record<string, string> = {
+    "exchange credential is not configured": "尚未配置该交易所的账户凭据",
+    "executable top-of-book data is unavailable": "无法读取当前可执行一档盘口，请稍后重试",
+    "opportunity is not available": "当前找不到该标的的有效机会",
+    "instrument trading rules are not available": "当前无法读取该标的的交易规则",
+    "only healthy opportunities can be planned": "该机会当前不是有效状态，不能生成开仓预览",
+    "market quote is stale": "行情已经陈旧，请等待下一次刷新后重试",
+  };
+  if (value.message && translations[value.message]) return translations[value.message];
   return value.message || fallback;
 }
 

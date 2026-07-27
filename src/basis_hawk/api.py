@@ -1282,6 +1282,21 @@ def create_app(
                 maximum_slippage=value.maximum_slippage,
             )
         except TradeValidationError as exc:
+            if (
+                exc.code == "notional_exceeds_top_book"
+                and exc.capacity_notional is not None
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": exc.code,
+                        "message": str(exc),
+                        "capacity_notional_usdt": format(
+                            exc.capacity_notional.normalize(),
+                            "f",
+                        ),
+                    },
+                ) from exc
             sizing_error = exc.__cause__
             if (
                 isinstance(sizing_error, OrderSizingError)

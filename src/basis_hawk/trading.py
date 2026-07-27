@@ -59,7 +59,16 @@ class OrderLegStatus(StrEnum):
 
 
 class TradeValidationError(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        capacity_notional: Decimal | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.capacity_notional = capacity_notional
 
 
 class IdempotencyConflict(RuntimeError):
@@ -434,7 +443,11 @@ class TradeLedger:
         if notional_usdt <= 0:
             raise TradeValidationError("notional must be positive")
         if notional_usdt > opportunity.top_book_notional:
-            raise TradeValidationError("notional exceeds current top-book capacity")
+            raise TradeValidationError(
+                "notional exceeds current top-book capacity",
+                code="notional_exceeds_top_book",
+                capacity_notional=opportunity.top_book_notional,
+            )
         try:
             sizing = size_paired_order(
                 pair,

@@ -68,6 +68,9 @@
   返回双腿参考价/保护价、原生数量、合约乘数、预计费用、现货余额需求、永续保证金需求及最坏基差。
   名义金额小于当前共同数量网格和两腿交易所最低规则所要求的动态金额时返回
   `notional_below_minimum` 及 `minimum_notional_usdt`；前端把它显示为带精确建议值的中文提示。
+  名义金额超过当前双腿一档取小容量时返回 `notional_exceeds_top_book` 及
+  `capacity_notional_usdt`；前端显示当前最大金额并提示盘口会实时变化。常见的凭据、行情、机会状态和
+  交易规则预览错误也由前端映射为中文。
   Gate 因批量 ticker 不返回现货最优档数量，会在预览和确认时只为当前所选标的即时读取现货与
   USDT 永续一档订单簿；两腿较小容量不足、订单簿为空或读取失败时不会创建或确认票据。
 - `POST /api/trades/open/confirm`：请求体必须对预览票据显式发送 `confirmed=true`，同时提供 UUID
