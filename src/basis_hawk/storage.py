@@ -94,10 +94,7 @@ class LatestOpportunityRow(Base):
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
     exchange: Mapped[str] = mapped_column(String(20), index=True)
     base_asset: Mapped[str] = mapped_column(String(40))
-    observed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        index=True,
-    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     payload: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

@@ -460,6 +460,31 @@ wait_for_command() {
     done
 }
 
+configure_journal_limits() {
+    local drop_in_directory="/etc/systemd/journald.conf.d"
+    local drop_in_file="${drop_in_directory}/basis-hawk.conf"
+    local candidate
+
+    [[ -d /run/systemd/system ]] || return 0
+    candidate="$(mktemp)"
+    printf '%s\n' \
+        '[Journal]' \
+        'SystemMaxUse=200M' \
+        'SystemKeepFree=1G' \
+        'MaxRetentionSec=7day' >"${candidate}"
+    if [[ -f "${drop_in_file}" ]] && cmp -s "${candidate}" "${drop_in_file}"; then
+        rm -f -- "${candidate}"
+    else
+        run_as_root install -d -m 0755 "${drop_in_directory}" \
+            || { rm -f -- "${candidate}"; return 1; }
+        run_as_root install -m 0644 "${candidate}" "${drop_in_file}" \
+            || { rm -f -- "${candidate}"; return 1; }
+        rm -f -- "${candidate}"
+        run_as_root systemctl restart systemd-journald || return 1
+    fi
+    run_as_root journalctl --vacuum-size=200M >/dev/null
+}
+
 log "building API, worker, and backup images"
 "${COMPOSE_COMMAND[@]}" build --pull api worker backup
 
@@ -550,6 +575,15 @@ wait_for_command 120 "first encrypted backup" \
 "${COMPOSE_COMMAND[@]}" exec -T backup sh -ec \
     'latest="$(ls -1t /backups/basis-hawk-*.bhbk | head -n 1)"; \
     python3 -m basis_hawk.backup verify "$latest"'
+
+log "pruning unused Docker build cache older than 24 hours"
+if ! "${DOCKER_COMMAND[@]}" builder prune --all --force --filter "until=24h"; then
+    warn "Docker build cache cleanup failed; deployment remains healthy"
+fi
+log "applying a 200 MB system journal limit"
+if ! configure_journal_limits; then
+    warn "system journal limit could not be applied; deployment remains healthy"
+fi
 
 "${COMPOSE_COMMAND[@]}" ps
 log "deployment complete: https://${DOMAIN}"

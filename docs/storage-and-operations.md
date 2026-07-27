@@ -71,7 +71,11 @@ SSH 会话启动时，bootstrap 会在读取完脚本后把部署脚本的标准
 worker。重复部署识别已有 Alembic schema 后，先停止 API、worker 和定时 backup，并用刚重建的独立
 备份镜像创建认证加密归档；只有备份成功后才拉取 PostgreSQL/Caddy 镜像、刷新数据库容器并执行迁移。
 随后启动全部服务，依次验证 PostgreSQL、API liveness、六所行情目录 readiness 和最新加密备份；失败
-会保留容器与日志供排查，不删除数据库或卷。`--enable-ufw` 会先放行当前 SSH 服务端口及
+会保留容器与日志供排查，不删除数据库或卷。全部健康检查成功后，脚本清理超过 24 小时且未使用的
+Docker build cache；清理失败只告警，不把健康部署误报为失败。使用 systemd-journald 的宿主机还会安装
+`/etc/systemd/journald.conf.d/basis-hawk.conf`，把持久日志上限设为 200 MB、至少保留 1 GB 空闲空间并
+限制为 7 天，然后压缩既有 journal。该设置不改变 SSH 密码登录，也不启用或修改 UFW。
+`--enable-ufw` 会先放行当前 SSH 服务端口及
 80/443，再启用 UFW；非 22 端口应显式传入 `--ssh-port`。Docker 官方说明发布的容器端口可能绕过
 部分 UFW 规则，因此还必须在云厂商安全组只开放 SSH、80 和 443；当前 Compose 本身只发布 80/443。
 脚本不修改 DNS、云安全组、交易所 Key 或异地备份目标。
@@ -261,7 +265,11 @@ MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
 凭据；MEXC/Gate 不允许出现在 sandbox 策略。暂停不会覆盖账户级 `execution_control`，因此后续仍可
 对账和人工平仓。每次创建版本、启用、暂停、恢复和禁用都写审计事件。
 `latest_opportunities` 以 `exchange:base_asset` 为主键保存最新完整机会 JSON、交易所、标的、行情时间和
-写入时间。API 行情进程每轮覆盖更新，不追加高频历史；`opportunity_snapshots` 继续承担分钟级历史。
+写入时间。API 行情进程每轮覆盖更新，不追加高频历史；`opportunity_snapshots` 继续承担 5 分钟级历史，
+默认保留 7 天。最新机会的行情时间不再单独建索引，表使用 70% fillfactor 和更积极的表级 autovacuum
+阈值，让约 5 秒一次的覆盖更新使用 HOT 更新并及时回收旧版本。引入该策略的迁移会在服务停止的升级
+窗口对 `latest_opportunities` 执行一次 `VACUUM FULL`，归还已经膨胀的磁盘空间；升级前加密备份仍先于
+该迁移完成。
 唯一 worker 通过该表和 `instruments` 目录获得跨进程一致的机会与精度，仍以行情 `observed_at` 而不是
 `updated_at` 判断 15 秒新鲜度。
 `pnl_realizations` 为每个已完成的平仓意图保存一条不可重复的实现事件，包括共同平仓数量、毛盈亏、

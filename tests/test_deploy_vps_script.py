@@ -225,6 +225,7 @@ def test_full_first_deployment_runs_migrations_and_health_checks(
     assert "/api/health/live" in commands
     assert "/api/health/ready" in commands
     assert "basis_hawk.backup verify" in commands
+    assert "builder prune --all --force --filter until=24h" in commands
     assert "stop worker api backup" not in commands
 
 
@@ -257,7 +258,8 @@ def test_existing_deployment_stops_worker_and_backs_up_before_migration(
     backup_index = commands.index("run --rm backup create")
     pull_index = commands.index("pull postgres caddy")
     migration_index = commands.index("run --rm api alembic upgrade head")
-    assert build_index < stop_index < backup_index < pull_index < migration_index
+    prune_index = commands.index("builder prune --all --force --filter until=24h")
+    assert build_index < stop_index < backup_index < pull_index < migration_index < prune_index
     assert "admin-create" not in commands
 
 

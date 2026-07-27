@@ -30,6 +30,13 @@ from basis_hawk.storage import Database
 
 logger = logging.getLogger(__name__)
 
+HISTORY_SNAPSHOT_INTERVAL_MINUTES = 5
+
+
+def history_snapshot_bucket(value: datetime) -> datetime:
+    minute = value.minute - (value.minute % HISTORY_SNAPSHOT_INTERVAL_MINUTES)
+    return value.replace(minute=minute, second=0, microsecond=0)
+
 
 def default_adapters(timeout: float = 10) -> dict[Exchange, ExchangeAdapter]:
     return {
@@ -338,12 +345,12 @@ class ScannerService:
         return settings
 
     async def _snapshot_loop(self) -> None:
-        saved_minute: datetime | None = None
+        saved_bucket: datetime | None = None
         while not self._stopping.is_set():
-            now = datetime.now(UTC).replace(second=0, microsecond=0)
-            if saved_minute != now and self.opportunities:
+            bucket = history_snapshot_bucket(datetime.now(UTC))
+            if saved_bucket != bucket and self.opportunities:
                 await self.database.save_snapshots(self.list_opportunities())
-                saved_minute = now
+                saved_bucket = bucket
             await self._wait(1)
 
     async def _prune_loop(self) -> None:

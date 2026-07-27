@@ -4,8 +4,14 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from basis_hawk.exchanges.base import ExchangeAdapter
-from basis_hawk.models import Exchange, FundingObservation, InstrumentPair, MarketQuote
-from basis_hawk.service import ScannerService
+from basis_hawk.models import (
+    Exchange,
+    FundingObservation,
+    InstrumentPair,
+    MarketQuote,
+    ScannerSettings,
+)
+from basis_hawk.service import ScannerService, history_snapshot_bucket
 from basis_hawk.storage import Database, InstrumentRow
 
 
@@ -83,6 +89,19 @@ class FakeAdapter(ExchangeAdapter):
 
     async def close(self):
         return None
+
+
+def test_history_snapshot_bucket_uses_five_minute_intervals() -> None:
+    value = datetime(2026, 7, 27, 14, 58, 41, 123456, tzinfo=UTC)
+    assert history_snapshot_bucket(value) == datetime(
+        2026,
+        7,
+        27,
+        14,
+        55,
+        tzinfo=UTC,
+    )
+    assert ScannerSettings().retention_days == 7
 
 
 async def test_refreshes_and_recalculates() -> None:
