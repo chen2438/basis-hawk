@@ -23,7 +23,8 @@ UTA 不自动修改账户级模式，只在目标标的没有挂单和仓位时�
 Docker Compose 当前提供 PostgreSQL、FastAPI、唯一交易 worker 和 Caddy。Caddy 自动管理 TLS，只暴露 80/443；
 数据库只在 Compose 网络可见。生产启动顺序为数据库健康检查、`alembic upgrade head`、API 健康检查、
 worker 启动对账、Caddy 接入。worker 使用 PostgreSQL advisory lock；同一数据库已有执行器时第二个
-worker 会拒绝运行。
+worker 会拒绝运行。隔离容器验收在启动竞争 worker 前会轮询同一 advisory lock，直到 PostgreSQL
+明确报告主 worker 已持锁；主 worker 提前退出或超时未持锁会单独失败，不能用固定延时制造 CI 竞态。
 
 仓库根目录的 `scripts/deploy_vps.sh` 把首次安装和后续幂等升级固化为一个入口。Ubuntu/Debian 新机可
 显式使用 `--install-docker`，脚本按

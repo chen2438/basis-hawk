@@ -266,7 +266,44 @@ def main() -> int:
             "worker",
             capture=True,
         )
-        time.sleep(1)
+        advisory_lock_key = "7284217119035423281"
+        for _ in range(120):
+            lock_probe = docker(
+                "exec",
+                postgres,
+                "psql",
+                "-At",
+                "-U",
+                "basis_hawk",
+                "-d",
+                "basis_hawk",
+                "-c",
+                f"SELECT pg_try_advisory_lock({advisory_lock_key});",
+                check=False,
+                capture=True,
+            )
+            if lock_probe.returncode == 0 and lock_probe.stdout.strip() == "f":
+                break
+            worker_running = docker(
+                "inspect",
+                "-f",
+                "{{.State.Running}}",
+                worker_container,
+                check=False,
+                capture=True,
+            )
+            if (
+                worker_running.returncode != 0
+                or worker_running.stdout.strip() != "true"
+            ):
+                raise RuntimeError(
+                    "the primary execution worker exited before acquiring its lock"
+                )
+            time.sleep(0.25)
+        else:
+            raise RuntimeError(
+                "the primary execution worker did not acquire its lock in time"
+            )
         competing_worker = docker(
             "run",
             "--rm",
