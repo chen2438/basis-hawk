@@ -337,7 +337,10 @@ Bitget UTA 的当前交易账户共享现货和永续余额，因此明确返回
 真实意图额外固化 1–10 倍请求杠杆，旧记录迁移为安全默认值 1；
 `order_legs` 同一意图固定一条现货腿和一条永续腿，并在提交交易所前生成唯一客户端订单 ID；每条腿还
 保存严格为正的 `base_multiplier`，使交易所原生数量及成交量可以无歧义换算成基础币。已有纸面订单腿
-迁移时乘数为 1；后续真实永续腿必须使用标的目录的合约乘数。
+迁移时乘数为 1；后续真实永续腿必须使用标的目录的合约乘数。创建意图的事务显式先 flush
+`trade_intents` 父记录，再插入两条 `order_legs`，不能依赖未声明 ORM relationship 时不稳定的 flush
+排序。SQLite 测试连接始终启用 `PRAGMA foreign_keys=ON`，容器验收还会直接在 PostgreSQL 17 上创建
+父意图及双腿，防止本地测试绕过生产外键。
 非终态意图可由 worker 按创建时间恢复。纸面 worker 在单一数据库事务中更新双腿、写入 `fills` 并创建
 `paired_positions`；唯一交易 ID 和开仓意图约束保证重复运行不会重复成交。真实成交仍必须以交易所
 私有流或 REST 查询为准。
@@ -430,9 +433,10 @@ upgrade/current。
 
 该命令只生成一次性数据库密码、凭据主密钥和备份密钥，使用随机后缀创建临时网络、PostgreSQL 17
 容器和备份卷；构建正式 API/前端镜像与专用备份镜像后，实际执行全部 Alembic 迁移、API ready 检查、
-API 进程重启、PostgreSQL 重启及连接池恢复、advisory lock 排他 worker、单轮 worker、AES-GCM 归档
-验证、空库恢复和非空库拒绝覆盖。应用及备份运行均使用只读根文件系统和 `/tmp` tmpfs。无论成功或
-失败都只按本次随机名称清理资源，不会连接 Compose 项目、读取真实凭据或接触交易所。CI 的
+真实意图父记录与双订单腿外键写入、API 进程重启、PostgreSQL 重启及连接池恢复、advisory lock 排他
+worker、单轮 worker、AES-GCM 归档验证、空库恢复和非空库拒绝覆盖。应用及备份运行均使用只读根文件
+系统和 `/tmp` tmpfs。无论成功或失败都只按本次随机名称清理资源，不会连接 Compose 项目、读取真实
+凭据或接触交易所。CI 的
 `container-acceptance` job 会执行同一命令。
 
 更新相关 shell 文件还必须通过：

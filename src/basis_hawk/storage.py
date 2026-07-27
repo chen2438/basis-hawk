@@ -21,6 +21,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     delete,
+    event,
     func,
     select,
     text,
@@ -46,6 +47,17 @@ if TYPE_CHECKING:
 
 class Base(DeclarativeBase):
     pass
+
+
+def _enable_sqlite_foreign_keys(
+    dbapi_connection: Any,
+    _connection_record: Any,
+) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
 
 
 class InstrumentRow(Base):
@@ -873,6 +885,12 @@ def _compensation_pnl(
 class Database:
     def __init__(self, url: str) -> None:
         self.engine: AsyncEngine = create_async_engine(url, pool_pre_ping=True)
+        if self.engine.url.get_backend_name() == "sqlite":
+            event.listen(
+                self.engine.sync_engine,
+                "connect",
+                _enable_sqlite_foreign_keys,
+            )
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def initialize(self) -> None:
@@ -1408,9 +1426,10 @@ class Database:
                 return existing, existing_legs, False
             row = TradeIntentRow(**intent)
             leg_rows = [OrderLegRow(**value) for value in legs]
-            session.add(row)
-            session.add_all(leg_rows)
             try:
+                session.add(row)
+                await session.flush()
+                session.add_all(leg_rows)
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
@@ -1465,11 +1484,12 @@ class Database:
                 raise ValueError("paired position is not open")
             row = TradeIntentRow(**intent)
             leg_rows = [OrderLegRow(**value) for value in legs]
-            position.status = "closing"
-            position.closing_intent_id = row.id
-            session.add(row)
-            session.add_all(leg_rows)
             try:
+                session.add(row)
+                await session.flush()
+                position.status = "closing"
+                position.closing_intent_id = row.id
+                session.add_all(leg_rows)
                 await session.commit()
             except IntegrityError:
                 await session.rollback()

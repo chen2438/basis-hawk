@@ -148,6 +148,83 @@ def main() -> int:
         if revision != "20260727_0024":
             raise RuntimeError(f"unexpected Alembic revision: {revision}")
 
+        intent_persistence_probe = f"""
+import asyncio
+import uuid
+from datetime import UTC, datetime
+from decimal import Decimal
+
+from basis_hawk.storage import Database
+
+DATABASE_URL = {database_url!r}
+
+
+async def main():
+    database = Database(DATABASE_URL)
+    now = datetime.now(UTC)
+    intent_id = str(uuid.uuid4())
+    intent, legs, created = await database.create_trade_intent(
+        intent={{
+            "id": intent_id,
+            "idempotency_key": str(uuid.uuid4()),
+            "request_fingerprint": "a" * 64,
+            "exchange": "gate",
+            "environment": "live",
+            "base_asset": "ACCEPTANCE",
+            "action": "open",
+            "status": "failed",
+            "leverage": 1,
+            "requested_notional": Decimal("10"),
+            "base_quantity": Decimal("1"),
+            "spot_fee_rate": Decimal("0.001"),
+            "perp_fee_rate": Decimal("0.0005"),
+            "market_observed_at": now,
+            "config_version": "b" * 64,
+            "version": 1,
+            "created_at": now,
+            "updated_at": now,
+        }},
+        legs=[
+            {{
+                "id": str(uuid.uuid4()),
+                "trade_intent_id": intent_id,
+                "leg": market,
+                "market": market,
+                "symbol": "ACCEPTANCE_USDT",
+                "side": side,
+                "client_order_id": f"acceptance-{{market}}-{{intent_id}}",
+                "status": "created",
+                "quantity": Decimal("1"),
+                "base_multiplier": Decimal("1"),
+                "limit_price": Decimal("10"),
+                "filled_quantity": Decimal("0"),
+                "reduce_only": False,
+                "created_at": now,
+                "updated_at": now,
+            }}
+            for market, side in (("spot", "buy"), ("perp", "sell"))
+        ],
+    )
+    assert created and intent.id == intent_id and len(legs) == 2
+    await database.close()
+
+
+asyncio.run(main())
+"""
+        docker(
+            "run",
+            "--rm",
+            "--read-only",
+            "--tmpfs",
+            "/tmp",
+            "--network",
+            network,
+            api_image,
+            "python",
+            "-c",
+            intent_persistence_probe,
+        )
+
         docker(
             "run",
             "-d",
@@ -483,6 +560,7 @@ def main() -> int:
 
         print("container image build: ok")
         print("PostgreSQL 17 migration: ok")
+        print("PostgreSQL parent-before-leg persistence: ok")
         print("API readiness: ok")
         print("API process restart recovery: ok")
         print("PostgreSQL restart recovery: ok")
