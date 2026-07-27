@@ -74,7 +74,9 @@ Bitget Classic 与 UTA 在下单前通过只读账户接口识别并在进程内
 依靠已持久化的客户端订单 ID 找回，不能重发。Gate 客户端订单 ID 必须以 `t-` 开头，后缀最多 28 字节；永续订单按目录合约乘数换算
 后的十进制张数发送，卖出开空为负、买入平空为正，并显式发送 `X-Gate-Size-Decimal: 1`。Gate 经典
 账户继续使用 `account=spot` 与逐仓永续；已双重确认的组合保证金账户改用 `account=unified`，永续
-显式发送 `pos_margin_mode=cross`，跨仓杠杆使用 `leverage=0` 与 `cross_leverage_limit`，且共享余额
+显式发送 `pos_margin_mode=cross`。Gate 会以 `USER_PORTFOLIO_MARGIN` 拒绝组合保证金账户的逐合约
+杠杆接口，因此该模式只接受保守的 1x 策略记账且不发送杠杆修改请求；远端组合保证金仓位在本地统一
+归一化为 1x 跨仓，配置大于 1x 时发单前阻断。共享余额
 预检同时要求现货 USDT 足够支付现货腿、统一总可用保证金足以覆盖两腿保守需求，不自动借币。MEXC 合约
 使用 `side=3` 开空、`side=2` 平空及 `type=3` IOC；单向平空额外发送 `reduceOnly=true`。
 返回统一的接受回执，只证明交易所接受请求；最终订单状态与成交仍以私有成交流或 REST 查单/成交明细

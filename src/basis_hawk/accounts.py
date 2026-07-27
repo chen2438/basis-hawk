@@ -3227,9 +3227,15 @@ class GateAccountClient(PrivateAccountClient):
                     entry_price=Decimal(str(item.get("entry_price") or "0")),
                     mark_price=Decimal(str(item.get("mark_price") or "0")),
                     liquidation_price=_optional_decimal(item.get("liq_price")),
-                    leverage=_gate_position_leverage(item, margin_mode),
+                    leverage=(
+                        Decimal("1")
+                        if self._account_mode == "portfolio"
+                        else _gate_position_leverage(item, margin_mode)
+                    ),
                     isolated=(
-                        margin_mode == "isolated"
+                        False
+                        if self._account_mode == "portfolio"
+                        else margin_mode == "isolated"
                         if margin_mode
                         else None
                         if item.get("leverage") in (None, "")
@@ -3512,6 +3518,17 @@ class GateAccountClient(PrivateAccountClient):
                     "Gate portfolio margin mode could not be confirmed"
                 )
             self._account_mode = "portfolio"
+            if leverage != 1:
+                raise PrivateRequestError(
+                    "Gate portfolio margin automation only supports "
+                    "conservative 1x accounting"
+                )
+            return PerpConfiguration(
+                symbol=symbol,
+                leverage=1,
+                isolated=False,
+                position_mode=position_mode,
+            )
         else:
             self._account_mode = "classic"
         target_mode = "dual_short" if position_mode == PositionMode.HEDGE else "single"
@@ -3524,7 +3541,7 @@ class GateAccountClient(PrivateAccountClient):
             ),
             None,
         )
-        target_margin_mode = "cross" if portfolio else "isolated"
+        target_margin_mode = "isolated"
         current_leverage = _gate_position_leverage(
             target or {},
             str((target or {}).get("pos_margin_mode") or "").lower(),
@@ -3534,13 +3551,13 @@ class GateAccountClient(PrivateAccountClient):
         )
         if (
             target is not None
-            and isolated is (not portfolio)
+            and isolated
             and current_leverage == Decimal(leverage)
         ):
             return PerpConfiguration(
                 symbol=symbol,
                 leverage=leverage,
-                isolated=not portfolio,
+                isolated=True,
                 position_mode=position_mode,
             )
         open_orders = await self._get(
@@ -3559,18 +3576,10 @@ class GateAccountClient(PrivateAccountClient):
             raise PrivateRequestError(
                 "cannot change Gate margin or leverage with open orders or positions"
             )
-        params: dict[str, object] = (
-            {
-                "leverage": "0",
-                "cross_leverage_limit": str(leverage),
-                "margin_mode": "cross",
-            }
-            if portfolio
-            else {
-                "leverage": str(leverage),
-                "margin_mode": "isolated",
-            }
-        )
+        params: dict[str, object] = {
+            "leverage": str(leverage),
+            "margin_mode": "isolated",
+        }
         if position_mode == PositionMode.HEDGE:
             params["dual_side"] = "dual_short"
         configured = await self._post(
@@ -3596,7 +3605,7 @@ class GateAccountClient(PrivateAccountClient):
         return PerpConfiguration(
             symbol=symbol,
             leverage=leverage,
-            isolated=not portfolio,
+            isolated=True,
             position_mode=position_mode,
         )
 

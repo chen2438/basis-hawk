@@ -1475,18 +1475,6 @@ async def test_gate_portfolio_sets_cross_leverage_and_uses_unified_spot() -> Non
             return httpx.Response(200, json={"mode": "portfolio"})
         if request.url.path.endswith("/futures/usdt/orders"):
             return httpx.Response(200, json=[])
-        if request.url.path.endswith("/set_leverage"):
-            return httpx.Response(
-                200,
-                json={
-                    "contract": "ORDER_USDT",
-                    "mode": "single",
-                    "size": "0",
-                    "pos_margin_mode": "cross",
-                    "lever": "0",
-                    "cross_leverage_limit": params["cross_leverage_limit"],
-                },
-            )
         if request.url.path.endswith("/spot/orders"):
             return httpx.Response(
                 201,
@@ -1502,7 +1490,7 @@ async def test_gate_portfolio_sets_cross_leverage_and_uses_unified_spot() -> Non
 
     configured = await client.configure_perp(
         symbol="ORDER_USDT",
-        leverage=3,
+        leverage=1,
         position_mode=PositionMode.ONE_WAY,
     )
     submission = await client.place_limit_ioc(
@@ -1517,19 +1505,23 @@ async def test_gate_portfolio_sets_cross_leverage_and_uses_unified_spot() -> Non
     )
 
     assert configured.isolated is False
-    leverage_request = next(
-        item for item in requests if item[1].endswith("/set_leverage")
+    assert not any(
+        item[1].endswith("/set_leverage") for item in requests
     )
-    assert leverage_request[2] == {
-        "cross_leverage_limit": "3",
-        "leverage": "0",
-        "margin_mode": "cross",
-    }
     spot_request = next(
         item for item in requests if item[1].endswith("/spot/orders")
     )
     assert spot_request[2]["account"] == "unified"
     assert submission.exchange_order_id == "1101"
+    with pytest.raises(
+        PrivateRequestError,
+        match="only supports conservative 1x",
+    ):
+        await client.configure_perp(
+            symbol="ORDER_USDT",
+            leverage=2,
+            position_mode=PositionMode.ONE_WAY,
+        )
     await http.aclose()
 
 
