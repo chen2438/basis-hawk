@@ -157,21 +157,34 @@ def backup_status(directory: Path) -> dict[str, object]:
     }
 
 
-def delete_backup(directory: Path, archive_name: str) -> None:
-    if not ARCHIVE_NAME_PATTERN.fullmatch(archive_name):
-        raise BackupError("invalid backup archive name")
+def delete_backups(directory: Path, archive_names: list[str]) -> list[str]:
+    if not archive_names:
+        raise BackupError("at least one backup archive is required")
+    if len(archive_names) != len(set(archive_names)):
+        raise BackupError("duplicate backup archive name")
     status = backup_status(directory)
     latest = status["latest"]
-    if isinstance(latest, dict) and latest.get("name") == archive_name:
-        raise BackupError("the latest backup cannot be deleted")
-    path = directory / archive_name
-    if path.is_symlink() or not path.is_file():
-        raise BackupError("backup archive does not exist")
-    checksum_path = path.with_suffix(path.suffix + ".sha256")
-    if checksum_path.is_symlink():
-        raise BackupError("backup checksum path is invalid")
-    path.unlink()
-    checksum_path.unlink(missing_ok=True)
+    targets: list[tuple[Path, Path]] = []
+    for archive_name in archive_names:
+        if not ARCHIVE_NAME_PATTERN.fullmatch(archive_name):
+            raise BackupError("invalid backup archive name")
+        if isinstance(latest, dict) and latest.get("name") == archive_name:
+            raise BackupError("the latest backup cannot be deleted")
+        path = directory / archive_name
+        if path.is_symlink() or not path.is_file():
+            raise BackupError("backup archive does not exist")
+        checksum_path = path.with_suffix(path.suffix + ".sha256")
+        if checksum_path.is_symlink():
+            raise BackupError("backup checksum path is invalid")
+        targets.append((path, checksum_path))
+    for path, checksum_path in targets:
+        path.unlink()
+        checksum_path.unlink(missing_ok=True)
+    return archive_names
+
+
+def delete_backup(directory: Path, archive_name: str) -> None:
+    delete_backups(directory, [archive_name])
 
 
 def _prune(directory: Path, suffix: str, keep: int) -> None:

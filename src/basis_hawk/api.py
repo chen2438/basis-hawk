@@ -31,7 +31,7 @@ from basis_hawk.accounts import (
 )
 from basis_hawk.auth import AuthenticationError, AuthService, LoginAttemptLimiter
 from basis_hawk.automation import AutoStrategyConfig
-from basis_hawk.backup import BackupError, backup_status, delete_backup
+from basis_hawk.backup import BackupError, backup_status, delete_backup, delete_backups
 from basis_hawk.config import get_config
 from basis_hawk.credentials import (
     CredentialService,
@@ -149,6 +149,14 @@ class NotificationTestRequest(BaseModel):
 
 
 class BackupDeleteRequest(BaseModel):
+    confirmed: Literal[True]
+
+
+class BackupBatchDeleteRequest(BaseModel):
+    archive_names: list[Annotated[str, Field(min_length=1, max_length=80)]] = Field(
+        min_length=1,
+        max_length=100,
+    )
     confirmed: Literal[True]
 
 
@@ -760,6 +768,37 @@ def create_app(
             details={"archive_name": archive_name},
         )
         return {"deleted": True, "archive_name": archive_name}
+
+    @app.post("/api/operations/backups/batch-delete")
+    async def operation_batch_delete_backups(
+        value: BackupBatchDeleteRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        actor = request_actor(request)
+        await scanner.database.append_audit(
+            "backup.batch_delete_requested",
+            actor=actor,
+            details={
+                "archive_count": len(value.archive_names),
+                "archive_names": value.archive_names,
+            },
+        )
+        try:
+            deleted = delete_backups(config.backup_directory, value.archive_names)
+        except BackupError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await scanner.database.append_audit(
+            "backup.batch_deleted",
+            actor=actor,
+            details={
+                "archive_count": len(deleted),
+                "archive_names": deleted,
+            },
+        )
+        return {
+            "deleted_count": len(deleted),
+            "archive_names": deleted,
+        }
 
     @app.post("/api/operations/logs/prune")
     async def operation_prune_logs(

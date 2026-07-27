@@ -16,6 +16,7 @@ from basis_hawk.backup import (
     backup_status,
     decrypt_stream,
     delete_backup,
+    delete_backups,
     encrypt_stream,
 )
 
@@ -104,6 +105,37 @@ def test_manual_backup_deletion_rejects_latest_and_removes_old_pair(
         delete_backup(tmp_path, "../latest.bhbk")
 
     delete_backup(tmp_path, older.name)
+    assert not older.exists()
+    assert not older.with_suffix(".bhbk.sha256").exists()
+
+
+def test_batch_backup_deletion_validates_every_target_before_removing_any(
+    tmp_path: Path,
+) -> None:
+    oldest = tmp_path / "basis-hawk-20260724T000000Z-daily.bhbk"
+    older = tmp_path / "basis-hawk-20260725T000000Z-daily.bhbk"
+    latest = tmp_path / "basis-hawk-20260726T000000Z-daily.bhbk"
+    for index, path in enumerate((oldest, older, latest), start=1):
+        path.write_bytes(b"archive")
+        path.with_suffix(".bhbk.sha256").write_text("checksum", encoding="ascii")
+        os.utime(path, (index, index))
+
+    with pytest.raises(BackupError, match="latest backup"):
+        delete_backups(tmp_path, [oldest.name, latest.name])
+    assert oldest.exists()
+    assert latest.exists()
+
+    with pytest.raises(BackupError, match="duplicate backup"):
+        delete_backups(tmp_path, [oldest.name, oldest.name])
+    assert oldest.exists()
+
+    assert delete_backups(tmp_path, [oldest.name, older.name]) == [
+        oldest.name,
+        older.name,
+    ]
+    assert latest.exists()
+    assert not oldest.exists()
+    assert not oldest.with_suffix(".bhbk.sha256").exists()
     assert not older.exists()
     assert not older.with_suffix(".bhbk.sha256").exists()
 

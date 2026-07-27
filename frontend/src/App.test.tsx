@@ -91,6 +91,21 @@ describe("Basis Hawk dashboard", () => {
     expect((screen.getByRole("button", { name: "立即更新" }) as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getAllByRole("button", { name: "删除旧备份" })[0] as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getAllByRole("button", { name: "删除旧备份" })[1] as HTMLButtonElement).disabled).toBe(false);
+    const batchDelete = screen.getByRole("button", { name: "批量删除已选（0）" }) as HTMLButtonElement;
+    expect(batchDelete.disabled).toBe(true);
+    expect((screen.getByRole("checkbox", { name: /20260727/ }) as HTMLInputElement).disabled).toBe(true);
+    await user.click(screen.getByRole("checkbox", { name: /20260726/ }));
+    await user.click(screen.getByRole("button", { name: "批量删除已选（1）" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      "/api/operations/backups/batch-delete",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          archive_names: ["basis-hawk-20260726T000000Z-daily.bhbk"],
+          confirmed: true,
+        }),
+      }),
+    ));
     const reconcile = screen.getByRole("button", { name: "重新对账" }) as HTMLButtonElement;
     expect(reconcile.disabled).toBe(false);
     await user.click(reconcile);

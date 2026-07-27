@@ -94,6 +94,14 @@ export const api = {
         body: JSON.stringify({ confirmed: true }),
       },
     ),
+  deleteBackups: (archiveNames: string[]) =>
+    request<{ deleted_count: number; archive_names: string[] }>(
+      "/api/operations/backups/batch-delete",
+      {
+        method: "POST",
+        body: JSON.stringify({ archive_names: archiveNames, confirmed: true }),
+      },
+    ),
   pruneLogs: (retentionDays: number) =>
     request<{ deleted_count: number; cutoff: string }>("/api/operations/logs/prune", {
       method: "POST",

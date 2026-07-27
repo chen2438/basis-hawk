@@ -241,7 +241,11 @@ function SystemView({
   busy: boolean;
   action: (operation: () => Promise<unknown>) => Promise<void>;
 }) {
+  const [selectedBackups, setSelectedBackups] = useState<string[]>([]);
   if (!execution) return <p className="loading-note">正在读取 worker 状态…</p>;
+  const oldBackups = backup?.archives.filter((item) => !item.latest) ?? [];
+  const allOldBackupsSelected = oldBackups.length > 0
+    && oldBackups.every((item) => selectedBackups.includes(item.name));
   const updateCanApply = Boolean(
     update?.available_commit
     && (update.state === "update_available" || update.state === "failed"),
@@ -285,15 +289,38 @@ function SystemView({
       {!update?.enabled && <p className="warning-note">宿主机更新代理尚未安装；请先通过远程部署命令升级一次。</p>}
     </section>
     <section className="backup-manager">
-      <header><div><h3>加密备份管理</h3><p>最新备份受保护；删除旧归档时会同时删除对应校验文件。</p></div></header>
-      <div className="ops-table-wrap"><table><thead><tr><th>归档</th><th>时间</th><th>大小</th><th>校验</th><th>操作</th></tr></thead>
+      <header>
+        <div><h3>加密备份管理</h3><p>最新备份受保护；删除旧归档时会同时删除对应校验文件。</p></div>
+        <button className="button danger" disabled={busy || selectedBackups.length === 0} onClick={() => {
+          if (window.confirm(`确认永久删除选中的 ${selectedBackups.length} 个旧备份及其校验文件？最新备份会保留。`)) {
+            void action(async () => {
+              await api.deleteBackups(selectedBackups);
+              setSelectedBackups([]);
+            });
+          }
+        }}>批量删除已选（{selectedBackups.length}）</button>
+      </header>
+      <div className="ops-table-wrap"><table><thead><tr>
+        <th><input type="checkbox" aria-label="全选旧备份" checked={allOldBackupsSelected}
+          disabled={busy || oldBackups.length === 0}
+          onChange={(event) => setSelectedBackups(event.target.checked ? oldBackups.map((item) => item.name) : [])} /></th>
+        <th>归档</th><th>时间</th><th>大小</th><th>校验</th><th>操作</th>
+      </tr></thead>
         <tbody>{backup?.archives.map((item) => <tr key={item.name}>
+          <td><input type="checkbox" aria-label={`选择备份 ${item.name}`} checked={selectedBackups.includes(item.name)}
+            disabled={busy || item.latest}
+            onChange={(event) => setSelectedBackups((current) => event.target.checked
+              ? [...current, item.name]
+              : current.filter((name) => name !== item.name))} /></td>
           <td><code>{item.name}</code>{item.latest && <span className="status-pill ready">最新</span>}</td>
           <td>{time(item.modified_at)}</td><td>{(item.size_bytes / 1024 / 1024).toFixed(2)} MB</td>
           <td>{item.checksum_present ? "存在" : "缺失"}</td><td>
             <button className="button danger ghost" disabled={busy || item.latest} onClick={() => {
               if (window.confirm(`确认永久删除旧备份 ${item.name} 及其校验文件？`)) {
-                void action(() => api.deleteBackup(item.name));
+                void action(async () => {
+                  await api.deleteBackup(item.name);
+                  setSelectedBackups((current) => current.filter((name) => name !== item.name));
+                });
               }
             }}>删除旧备份</button>
           </td>

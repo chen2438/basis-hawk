@@ -193,3 +193,68 @@ async def test_notification_test_and_backup_status_are_operator_safe(
     finally:
         await database.close()
         get_config.cache_clear()
+
+
+async def test_batch_backup_deletion_preserves_latest_and_is_audited(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_names = [
+        "basis-hawk-20260725T000000Z-daily.bhbk",
+        "basis-hawk-20260726T000000Z-daily.bhbk",
+        "basis-hawk-20260727T000000Z-daily.bhbk",
+    ]
+    paths = [tmp_path / name for name in archive_names]
+    for index, path in enumerate(paths, start=1):
+        path.write_bytes(b"encrypted")
+        path.with_suffix(".bhbk.sha256").write_text("checksum", encoding="ascii")
+        os.utime(path, (index, index))
+    monkeypatch.setenv("BASIS_HAWK_BACKUP_DIRECTORY", str(tmp_path))
+    get_config.cache_clear()
+    database = Database("sqlite+aiosqlite:///:memory:")
+    service = ScannerService(database, {})
+    await service.initialize()
+    try:
+        app = create_app(service, manage_lifecycle=False, auth_required=False)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            rejected = await client.post(
+                "/api/operations/backups/batch-delete",
+                json={
+                    "archive_names": [archive_names[0], archive_names[2]],
+                    "confirmed": True,
+                },
+            )
+            assert rejected.status_code == 409
+            assert all(path.exists() for path in paths)
+
+            deleted = await client.post(
+                "/api/operations/backups/batch-delete",
+                json={
+                    "archive_names": archive_names[:2],
+                    "confirmed": True,
+                },
+            )
+            assert deleted.status_code == 200
+            assert deleted.json() == {
+                "deleted_count": 2,
+                "archive_names": archive_names[:2],
+            }
+            assert not paths[0].exists()
+            assert not paths[1].exists()
+            assert paths[2].exists()
+
+            audit = await client.get(
+                "/api/operations/audit",
+                params={"event_type": "backup.batch_deleted"},
+            )
+            [event] = audit.json()["items"]
+            assert event["details"] == {
+                "archive_count": 2,
+                "archive_names": archive_names[:2],
+            }
+    finally:
+        await database.close()
+        get_config.cache_clear()

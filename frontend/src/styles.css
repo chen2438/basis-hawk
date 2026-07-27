@@ -187,10 +187,12 @@ button, input, select { font: inherit; }
 .button.danger.ghost { color: var(--red); background: #fff; }
 .button:disabled { opacity: 0.6; }
 .backup-manager { margin: 16px 0; overflow: hidden; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
-.backup-manager > header { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.backup-manager > header { display: flex; gap: 16px; padding: 14px 16px; border-bottom: 1px solid var(--line); align-items: center; justify-content: space-between; }
 .backup-manager h3, .backup-manager p { margin: 0; }
 .backup-manager p { margin-top: 5px; color: var(--muted); font-size: 11px; }
-.backup-manager td:first-child { display: flex; align-items: center; gap: 8px; }
+.backup-manager th:first-child, .backup-manager td:first-child { width: 42px; text-align: center; }
+.backup-manager td:nth-child(2) { display: flex; align-items: center; gap: 8px; }
+.backup-manager input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent); }
 .inline-retention { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
 .inline-retention input { width: 66px; }
 .update-manager { margin: 16px 0; padding: 16px; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
