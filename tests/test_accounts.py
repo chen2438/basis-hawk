@@ -526,7 +526,13 @@ async def test_gate_portfolio_snapshot_uses_unified_margin_and_permissions() -> 
                 ],
             )
         if request.url.path.endswith("/unified/unified_mode"):
-            return httpx.Response(200, json={"mode": "portfolio"})
+            return httpx.Response(
+                200,
+                json={
+                    "mode": "portfolio",
+                    "settings": {"usdt_futures": True},
+                },
+            )
         if request.url.path.endswith("/unified/accounts"):
             return httpx.Response(
                 200,
@@ -553,6 +559,66 @@ async def test_gate_portfolio_snapshot_uses_unified_margin_and_permissions() -> 
     assert snapshot.perp_usdt_available == Decimal("18.25")
     assert snapshot.perp_usdt_equity == Decimal("23.75")
     assert snapshot.trade_permission is True
+    await http.aclose()
+
+
+async def test_gate_portfolio_snapshot_blocks_disabled_usdt_futures() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/spot/accounts"):
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/futures/usdt/accounts"):
+            return httpx.Response(
+                200,
+                json={"margin_mode": 2, "in_dual_mode": False},
+            )
+        if request.url.path.endswith("/account/main_keys"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "state": 1,
+                        "key": "test-api-*****",
+                        "currency_pairs": [],
+                        "perms": [
+                            {"name": "spot", "read_only": False},
+                            {"name": "futures", "read_only": False},
+                            {"name": "unified", "read_only": False},
+                        ],
+                    }
+                ],
+            )
+        if request.url.path.endswith("/unified/unified_mode"):
+            return httpx.Response(
+                200,
+                json={
+                    "mode": "portfolio",
+                    "settings": {"spot_hedge": True},
+                },
+            )
+        if request.url.path.endswith("/unified/accounts"):
+            return httpx.Response(
+                200,
+                json={
+                    "balances": {"USDT": {"available": "21.5"}},
+                    "total_available_margin": "18.25",
+                    "unified_account_total_equity": "23.75",
+                },
+            )
+        raise AssertionError(request.url.path)
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://gate.test",
+    )
+    client = GateAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    snapshot = await client.snapshot()
+
+    assert snapshot.trade_permission is False
+    assert snapshot.trade_block_reason == (
+        "Gate 组合保证金账户尚未启用 USDT 永续；"
+        "请先在统一账户设置中开启 USDT 永续"
+    )
     await http.aclose()
 
 

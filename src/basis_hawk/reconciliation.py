@@ -347,7 +347,10 @@ class ReconciliationService:
                 if snapshot.position_mode == PositionMode.UNKNOWN:
                     reasons.append("position mode is unknown")
                 if snapshot.trade_permission is not True:
-                    reasons.append("two-leg trade permission is not confirmed")
+                    reasons.append(
+                        snapshot.trade_block_reason
+                        or "two-leg trade permission is not confirmed"
+                    )
                 account_ready = not reasons
                 await self.database.record_account_reconciliation(
                     exchange=summary.exchange.value,

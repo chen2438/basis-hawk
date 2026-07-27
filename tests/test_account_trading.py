@@ -1472,7 +1472,13 @@ async def test_gate_portfolio_sets_cross_leverage_and_uses_unified_spot() -> Non
                 ],
             )
         if request.url.path.endswith("/unified/unified_mode"):
-            return httpx.Response(200, json={"mode": "portfolio"})
+            return httpx.Response(
+                200,
+                json={
+                    "mode": "portfolio",
+                    "settings": {"usdt_futures": True},
+                },
+            )
         if (
             request.url.path.endswith("/futures/usdt/orders")
             and request.method == "GET"

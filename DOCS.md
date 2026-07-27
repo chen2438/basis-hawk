@@ -12,7 +12,9 @@
   Key 清单唯一匹配当前 Key 并要求无限定交易对的 spot/futures 读写权限；MEXC 组合现货 `canTrade`
   与官方标明需要 Trading 权限的合约持仓模式查询。只读、缺权限或停用明确阻断，字段缺失保持未知。
 - 已完成：Gate 经典账户与统一账户组合保证金模式并存支持。组合保证金必须由期货账户
-  `margin_mode=2` 和统一账户 `mode=portfolio` 双重确认，读取共享 USDT/总可用保证金，要求
+  `margin_mode=2`、统一账户 `mode=portfolio` 和 `settings.usdt_futures=true` 三重确认；未开启
+  USDT 永续时账户直接阻断并显示中文原因，不会在永续必然被拒绝的情况下先买入现货。读取共享
+  USDT/总可用保证金，要求
   spot/futures/unified 三项写权限，现货使用 unified 账户、永续使用跨仓。组合保证金不调用 Gate 明确
   拒绝的逐合约杠杆接口，只允许保守的 1x 策略记账，并把组合保证金远端仓位统一归一化为 1x 跨仓；
   永续订单省略只适用于简单分仓模式的 `pos_margin_mode`。按客户端订单号查询返回 Gate `404` 时

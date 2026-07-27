@@ -151,6 +151,7 @@ class AccountSnapshot(BaseModel):
     account_mode: str
     position_mode: PositionMode
     trade_permission: bool | None
+    trade_block_reason: str | None = None
     perp_margin_mode: PerpMarginMode = PerpMarginMode.ISOLATED
 
     @field_serializer(
@@ -3043,6 +3044,7 @@ class GateAccountClient(PrivateAccountClient):
                 raise PrivateRequestError(
                     "Gate portfolio margin mode could not be confirmed"
                 )
+            futures_enabled = _gate_portfolio_futures_enabled(mode)
             if not isinstance(unified, dict):
                 raise PrivateRequestError(
                     "Gate unified account balance response is incomplete"
@@ -3077,7 +3079,17 @@ class GateAccountClient(PrivateAccountClient):
                     if perp.get("in_dual_mode") is True
                     else PositionMode.ONE_WAY
                 ),
-                trade_permission=trade_permission,
+                trade_permission=(
+                    False if not futures_enabled else trade_permission
+                ),
+                trade_block_reason=(
+                    None
+                    if futures_enabled
+                    else (
+                        "Gate 组合保证金账户尚未启用 USDT 永续；"
+                        "请先在统一账户设置中开启 USDT 永续"
+                    )
+                ),
                 perp_margin_mode=PerpMarginMode.CROSS,
             )
         self._account_mode = "classic"
@@ -3528,6 +3540,10 @@ class GateAccountClient(PrivateAccountClient):
             if not isinstance(mode, dict) or mode.get("mode") != "portfolio":
                 raise PrivateRequestError(
                     "Gate portfolio margin mode could not be confirmed"
+                )
+            if not _gate_portfolio_futures_enabled(mode):
+                raise PrivateRequestError(
+                    "Gate portfolio USDT futures trading is disabled"
                 )
             self._account_mode = "portfolio"
             if leverage != 1:
@@ -4559,6 +4575,14 @@ def _masked_key_matches(masked: str, value: str) -> bool:
         bool(prefix or suffix)
         and value.startswith(prefix)
         and value.endswith(suffix)
+    )
+
+
+def _gate_portfolio_futures_enabled(mode: dict[str, object]) -> bool:
+    settings = mode.get("settings")
+    return (
+        isinstance(settings, dict)
+        and settings.get("usdt_futures") is True
     )
 
 

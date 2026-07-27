@@ -173,7 +173,9 @@ Bitget UTA 从 `/api/v3/account/info` 要求 `permType=read-and-write`，并同�
 `uta_mgt`；Classic 从 `/api/v2/spot/account/info` 同时要求现货交易、合约订单和合约持仓写权限。
 Gate 从 `/api/v4/account/main_keys` 对当前 Key 做唯一的完整或脱敏前缀匹配，要求 Key 正常、没有
 交易对白名单且 spot/futures 均非只读；Gate 组合保证金还要求 unified 非只读。组合保证金必须同时由
-期货账户 `margin_mode=2` 与 `/api/v4/unified/unified_mode` 的 `portfolio` 确认，余额来自
+期货账户 `margin_mode=2`、`/api/v4/unified/unified_mode` 的 `portfolio` 与其
+`settings.usdt_futures=true` 确认。缺少 USDT 永续开关时仍返回可审计余额，但交易权限明确为 false，
+对账页显示中文修复提示，并在任何现货腿下单前阻断。余额来自
 `/api/v4/unified/accounts` 的 USDT available、总可用保证金和统一账户总权益；多币种或单币种统一
 保证金模式暂不受支持。无法读取主 Key 清单、匹配不唯一或存在交易对白名单时保持
 `unknown`，不会把失败的权限探测扩大成余额接口失败。MEXC 只有在现货账户明确 `canTrade=true`，且
