@@ -308,7 +308,7 @@ function SystemView({
             void action(() => api.pauseExecution("execution paused from web console"));
           }
         }}>暂停执行</button>
-        <button className="button primary" disabled={busy || execution.state !== "paused"} onClick={() => {
+        <button className="button primary" disabled={busy || execution.state === "reconciling"} onClick={() => {
           if (window.confirm("确认请求全量安全对账？该操作不会直接把状态改为 ready。")) {
             void action(api.resumeExecution);
           }

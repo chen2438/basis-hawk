@@ -71,6 +71,7 @@ describe("Basis Hawk dashboard", () => {
   it("opens the operational console with safety state", async () => {
     render(<App />);
     const user = userEvent.setup();
+    const confirmation = vi.spyOn(window, "confirm").mockReturnValue(true);
     await user.click(await screen.findByRole("button", { name: "运营控制台" }));
     await waitFor(() => expect(screen.getByRole("region", { name: "运营控制台" })).toBeTruthy());
     expect(screen.getByText("实盘运营控制台")).toBeTruthy();
@@ -81,6 +82,14 @@ describe("Basis Hawk dashboard", () => {
     expect((screen.getByRole("button", { name: "立即更新" }) as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getAllByRole("button", { name: "删除旧备份" })[0] as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getAllByRole("button", { name: "删除旧备份" })[1] as HTMLButtonElement).disabled).toBe(false);
+    const reconcile = screen.getByRole("button", { name: "重新对账" }) as HTMLButtonElement;
+    expect(reconcile.disabled).toBe(false);
+    await user.click(reconcile);
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      "/api/system/execution/resume",
+      expect.objectContaining({ method: "POST" }),
+    ));
+    confirmation.mockRestore();
   });
 
   it("shows bounded manual paired-trade controls", async () => {
