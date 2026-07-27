@@ -72,6 +72,8 @@ def test_builds_executable_opportunity() -> None:
         now=now,
     )
     assert result.executable_basis == Decimal("0.01")
+    assert result.spot_ask_notional == Decimal("200")
+    assert result.perp_bid_notional == Decimal("101")
     assert result.top_book_notional == Decimal("101")
     assert result.close_top_book_notional == Decimal("204")
     assert result.quality == Quality.HEALTHY

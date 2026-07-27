@@ -535,6 +535,28 @@ def create_app(
             "items": values,
         }
 
+    @app.get("/api/opportunities/{exchange}/{base_asset}/top-book")
+    async def opportunity_top_book(
+        exchange: Exchange,
+        base_asset: str,
+    ) -> dict[str, object]:
+        try:
+            opportunity = await scanner.executable_opportunity(
+                exchange,
+                base_asset,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="executable top-of-book data is unavailable",
+            ) from exc
+        if opportunity is None:
+            raise HTTPException(
+                status_code=404,
+                detail="opportunity is not available",
+            )
+        return opportunity.model_dump(mode="json")
+
     @app.get("/api/exchanges/status")
     async def statuses() -> dict[str, object]:
         return {"items": [item.model_dump(mode="json") for item in scanner.statuses.values()]}

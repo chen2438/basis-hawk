@@ -164,6 +164,8 @@ class Opportunity(DecimalModel):
     spot_taker_fee: Decimal
     perp_taker_fee: Decimal
     quality: Quality
+    spot_ask_notional: Decimal = Decimal("0")
+    perp_bid_notional: Decimal = Decimal("0")
 
     @property
     def key(self) -> str:

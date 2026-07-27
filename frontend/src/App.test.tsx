@@ -66,6 +66,58 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getAllByText("Gate").length).toBeGreaterThan(0);
   });
 
+  it("loads and shows each opening-leg top-book capacity", async () => {
+    const opportunity = {
+      exchange: "gate",
+      base_asset: "龙虾",
+      spot_symbol: "龙虾_USDT",
+      perp_symbol: "龙虾_USDT",
+      observed_at: "2026-07-27T14:00:00Z",
+      spot_ask: "0.020439",
+      perp_bid: "0.020553",
+      executable_basis: "0.0055",
+      top_book_notional: "0",
+      spot_ask_notional: "0",
+      perp_bid_notional: "2.0553",
+      current_funding_rate: "0.0001",
+      funding_interval_hours: "4",
+      next_funding_at: null,
+      current_apr: "0.219",
+      apr_24h: "0.2",
+      apr_7d: "0.2",
+      net_return: "0.01",
+      spot_quote_volume_24h: "1000000",
+      perp_quote_volume_24h: "1000000",
+      spot_taker_fee: "0.001",
+      perp_taker_fee: "0.00075",
+      quality: "healthy",
+    };
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      const value = url.includes("auth/session") ? { username: "admin" }
+        : url.includes("/top-book") ? {
+          ...opportunity,
+          top_book_notional: "2.0553",
+          spot_ask_notional: "46.684676",
+        }
+        : url.includes("/history") ? { items: [] }
+        : url.includes("opportunities?") ? { items: [opportunity], sequence: 1 }
+        : url.includes("exchanges/status") ? { items: [] }
+        : { universe_size: 500, minimum_quote_volume: "1000000", holding_period_days: 30, retention_days: 7, fee_checked_at: "2026-07-23", fees: {} };
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(value) });
+    }));
+
+    render(<App />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("龙虾"));
+    await waitFor(() => expect(screen.getByText("现货卖一容量")).toBeTruthy());
+    expect(screen.getByText("46.6847 USDT")).toBeTruthy();
+    expect(screen.getAllByText("2.0553 USDT").length).toBe(2);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/opportunities/gate/%E9%BE%99%E8%99%BE/top-book",
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
   it("shows the administrator login when no session exists", async () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({
       ok: false,

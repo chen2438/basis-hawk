@@ -330,7 +330,7 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
 .detail-metrics { display: grid; grid-template-columns: 1fr 1fr; margin: 0 20px; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; }
 .detail-metrics div { padding: 12px; background: #fbfdfc; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .detail-metrics div:nth-child(2n) { border-right: 0; }
-.detail-metrics div:nth-child(n + 3) { border-bottom: 0; }
+.detail-metrics div:nth-child(n + 5) { border-bottom: 0; }
 .detail-metrics span, .detail-metrics strong { display: block; }
 .detail-metrics span { color: var(--muted); font-size: 10px; }
 .detail-metrics strong { margin-top: 5px; color: #243b4e; font-size: 11px; }

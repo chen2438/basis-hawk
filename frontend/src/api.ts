@@ -70,6 +70,10 @@ export const api = {
   saveSettings: (value: Settings) => request<Settings>("/api/settings", { method: "PUT", body: JSON.stringify(value) }),
   history: (item: Opportunity, range: string) =>
     request<{ items: Opportunity[] }>(`/api/opportunities/${item.exchange}/${item.base_asset}/history?range=${range}`),
+  topBook: (item: Opportunity) =>
+    request<Opportunity>(
+      `/api/opportunities/${item.exchange}/${encodeURIComponent(item.base_asset)}/top-book`,
+    ),
   execution: () => request<ExecutionStatus>("/api/system/execution"),
   auditHistory: () => request<{ items: AuditEvent[] }>("/api/operations/audit?limit=100"),
   notificationHistory: () =>

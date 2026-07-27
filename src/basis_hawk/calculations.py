@@ -60,7 +60,9 @@ def build_opportunity(
     if min(quote.spot_bid, quote.spot_ask, quote.perp_bid, quote.perp_ask) <= 0:
         raise ValueError("quote prices must be positive")
     basis = quote.perp_bid / quote.spot_ask - Decimal("1")
-    capacity = min(quote.spot_ask * quote.spot_ask_qty, quote.perp_bid * quote.perp_bid_qty)
+    spot_ask_notional = quote.spot_ask * quote.spot_ask_qty
+    perp_bid_notional = quote.perp_bid * quote.perp_bid_qty
+    capacity = min(spot_ask_notional, perp_bid_notional)
     close_capacity = min(
         quote.spot_bid * quote.spot_bid_qty,
         quote.perp_ask * quote.perp_ask_qty,
@@ -100,4 +102,6 @@ def build_opportunity(
         spot_taker_fee=fee.spot_taker,
         perp_taker_fee=fee.perp_taker,
         quality=quality,
+        spot_ask_notional=spot_ask_notional,
+        perp_bid_notional=perp_bid_notional,
     )

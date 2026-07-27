@@ -23,6 +23,9 @@ const operationNavigation: { key: OperationsTab; label: string; icon: string }[]
 const percent = (value: string | null, digits = 2) => value == null ? "—" : `${(Number(value) * 100).toFixed(digits)}%`;
 const money = (value: string) => Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value));
 const price = (value: string) => Number(value).toLocaleString("en-US", { maximumFractionDigits: 8 });
+const capacity = (value: string) => Number(value) > 0
+  ? `${Number(value).toLocaleString("zh-CN", { maximumFractionDigits: 4 })} USDT`
+  : "—";
 
 function Sparkline({ values }: { values: number[] }) {
   if (values.length < 2) return <div className="empty-chart">历史快照正在积累</div>;
@@ -52,6 +55,8 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
   const [statuses, setStatuses] = useState<ExchangeStatus[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [selected, setSelected] = useState<Opportunity | null>(null);
+  const [selectedTopBook, setSelectedTopBook] = useState<Opportunity | null>(null);
+  const [topBookLoading, setTopBookLoading] = useState(false);
   const [history, setHistory] = useState<Opportunity[]>([]);
   const [range, setRange] = useState("24h");
   const [exchange, setExchange] = useState<Exchange | "all">("all");
@@ -61,6 +66,7 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
   const [activePage, setActivePage] = useState<DashboardPage>("market");
   const [error, setError] = useState<string | null>(null);
   const lastSequence = useRef<number | null>(null);
+  const topBookRequest = useRef(0);
 
   useEffect(() => {
     Promise.all([api.opportunities(), api.statuses(), api.settings()])
@@ -122,6 +128,29 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
 
   const healthy = items.filter((item) => item.quality === "healthy");
   const best = healthy.reduce<Opportunity | null>((current, item) => !current || Number(item.net_return ?? -999) > Number(current.net_return ?? -999) ? item : current, null);
+  const selectOpportunity = (item: Opportunity) => {
+    const requestId = ++topBookRequest.current;
+    setSelected(item);
+    setSelectedTopBook(null);
+    setTopBookLoading(true);
+    api.topBook(item)
+      .then((value) => {
+        if (topBookRequest.current === requestId) setSelectedTopBook(value);
+      })
+      .catch((reason: Error) => {
+        if (topBookRequest.current === requestId) setError(reason.message);
+      })
+      .finally(() => {
+        if (topBookRequest.current === requestId) setTopBookLoading(false);
+      });
+  };
+  const closeOpportunity = () => {
+    topBookRequest.current += 1;
+    setSelected(null);
+    setSelectedTopBook(null);
+    setTopBookLoading(false);
+  };
+  const detail = selectedTopBook ?? selected;
   return <div className="dashboard-shell">
     <aside className="sidebar">
       <div className="sidebar-brand">
@@ -179,7 +208,7 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
             <select value={quality} onChange={(e) => setQuality(e.target.value as Quality | "all")}><option value="healthy">仅有效</option><option value="all">全部状态</option><option value="warming">预热中</option><option value="stale">已陈旧</option></select>
           </div>
           <div className="table-wrap"><table><thead><tr><th>标的</th><th>当前费率 / 周期</th><th>当前年化</th><th>24h 年化</th><th>7d 年化</th><th>30d 净收益</th><th>可执行基差</th><th>两腿成交额</th><th>状态</th></tr></thead>
-            <tbody>{filtered.map((item) => <tr key={`${item.exchange}:${item.base_asset}`} className={selected?.exchange === item.exchange && selected.base_asset === item.base_asset ? "selected" : ""} onClick={() => setSelected(item)}>
+            <tbody>{filtered.map((item) => <tr key={`${item.exchange}:${item.base_asset}`} className={selected?.exchange === item.exchange && selected.base_asset === item.base_asset ? "selected" : ""} onClick={() => selectOpportunity(item)}>
               <td><div className="asset"><strong>{item.base_asset}</strong><span>{exchangeNames[item.exchange]}</span></div></td>
               <td><strong className={Number(item.current_funding_rate) >= 0 ? "positive" : "negative"}>{percent(item.current_funding_rate, 4)}</strong><small className="cell-note">每 {item.funding_interval_hours}h</small></td>
               <td>{percent(item.current_apr)}</td><td>{percent(item.apr_24h)}</td><td>{percent(item.apr_7d)}</td>
@@ -191,11 +220,18 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
         </div>
 
         <aside className={`detail-card ${selected ? "open" : ""}`}>
-          {selected ? <>
-            <header><div><p className="eyebrow">OPPORTUNITY DETAIL</p><h2>{selected.base_asset} <span>{exchangeNames[selected.exchange]}</span></h2></div><button className="icon-button" onClick={() => setSelected(null)}>×</button></header>
+          {detail ? <>
+            <header><div><p className="eyebrow">OPPORTUNITY DETAIL</p><h2>{detail.base_asset} <span>{exchangeNames[detail.exchange]}</span></h2></div><button className="icon-button" onClick={closeOpportunity}>×</button></header>
             <div className="range-tabs">{["24h", "7d", "30d"].map((value) => <button className={range === value ? "active" : ""} onClick={() => setRange(value)} key={value}>{value}</button>)}</div>
             <Sparkline values={history.map((item) => Number(item.net_return ?? item.current_apr))} />
-            <div className="detail-metrics"><div><span>现货买一</span><strong>{price(selected.spot_ask)}</strong></div><div><span>永续卖一</span><strong>{price(selected.perp_bid)}</strong></div><div><span>最优档容量</span><strong>{Number(selected.top_book_notional) ? `${money(selected.top_book_notional)} USDT` : "—"}</strong></div><div><span>下次结算</span><strong>{selected.next_funding_at ? new Date(selected.next_funding_at).toLocaleString("zh-CN") : "交易所未批量提供"}</strong></div></div>
+            <div className="detail-metrics">
+              <div><span>现货卖一</span><strong>{price(detail.spot_ask)}</strong></div>
+              <div><span>永续买一</span><strong>{price(detail.perp_bid)}</strong></div>
+              <div><span>现货卖一容量</span><strong>{topBookLoading ? "读取中…" : capacity(detail.spot_ask_notional)}</strong></div>
+              <div><span>永续买一容量</span><strong>{topBookLoading ? "读取中…" : capacity(detail.perp_bid_notional)}</strong></div>
+              <div><span>双腿可执行容量</span><strong>{topBookLoading ? "读取中…" : capacity(detail.top_book_notional)}</strong></div>
+              <div><span>下次结算</span><strong>{detail.next_funding_at ? new Date(detail.next_funding_at).toLocaleString("zh-CN") : "交易所未批量提供"}</strong></div>
+            </div>
             <div className="formula"><span>30 天净收益估算</span><code>7d 日均资金费 × {settings?.holding_period_days ?? 30} 天 − 开平双边 Taker 费</code><p>不包含基差收敛、滑点、税费、借贷与保证金机会成本。</p></div>
           </> : <div className="detail-placeholder"><div className="radar-icon" /><h3>选择一个机会</h3><p>查看价格、费用假设和历史趋势。</p></div>}
         </aside>

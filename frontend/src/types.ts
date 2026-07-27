@@ -11,6 +11,8 @@ export interface Opportunity {
   perp_bid: string;
   executable_basis: string;
   top_book_notional: string;
+  spot_ask_notional: string;
+  perp_bid_notional: string;
   current_funding_rate: string;
   funding_interval_hours: string;
   next_funding_at: string | null;

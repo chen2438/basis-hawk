@@ -132,6 +132,10 @@ async def test_rest_contract_and_settings() -> None:
         response = await client.get("/api/opportunities", params={"exchange": "binance"})
         assert response.status_code == 200
         assert response.json()["items"][0]["spot_ask"] == "100"
+        top_book = await client.get("/api/opportunities/binance/BTC/top-book")
+        assert top_book.status_code == 200
+        assert top_book.json()["spot_ask_notional"] == "0"
+        assert top_book.json()["perp_bid_notional"] == "0"
         settings = (await client.get("/api/settings")).json()
         settings["holding_period_days"] = 14
         saved = await client.put("/api/settings", json=settings)
