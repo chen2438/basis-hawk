@@ -2,12 +2,24 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { LoginPage } from "./LoginPage";
 import { OperationsPanel } from "./OperationsPanel";
+import type { OperationsTab } from "./OperationsPanel";
 import { SettingsPanel } from "./SettingsPanel";
 import type { Exchange, ExchangeStatus, Opportunity, Quality, Settings } from "./types";
 
 const exchangeNames: Record<Exchange, string> = { binance: "Binance", okx: "OKX", mexc: "MEXC", bybit: "Bybit", bitget: "Bitget", gate: "Gate" };
 const exchanges = Object.keys(exchangeNames) as Exchange[];
 const qualityNames: Record<Quality, string> = { healthy: "有效", warming: "预热中", stale: "已陈旧" };
+type DashboardPage = "market" | OperationsTab;
+const operationNavigation: { key: OperationsTab; label: string; icon: string }[] = [
+  { key: "system", label: "执行状态", icon: "◉" },
+  { key: "accounts", label: "交易所账户", icon: "◇" },
+  { key: "trades", label: "手动交易", icon: "⇄" },
+  { key: "positions", label: "配对持仓", icon: "◆" },
+  { key: "ledger", label: "交易账本", icon: "▤" },
+  { key: "transfers", label: "内部划转", icon: "⇆" },
+  { key: "automation", label: "自动策略", icon: "⌁" },
+  { key: "history", label: "审计与通知", icon: "◎" },
+];
 const percent = (value: string | null, digits = 2) => value == null ? "—" : `${(Number(value) * 100).toFixed(digits)}%`;
 const money = (value: string) => Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value));
 const price = (value: string) => Number(value).toLocaleString("en-US", { maximumFractionDigits: 8 });
@@ -46,7 +58,7 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
   const [quality, setQuality] = useState<Quality | "all">("healthy");
   const [search, setSearch] = useState("");
   const [showSettings, setShowSettings] = useState(false);
-  const [showOperations, setShowOperations] = useState(false);
+  const [activePage, setActivePage] = useState<DashboardPage>("market");
   const [error, setError] = useState<string | null>(null);
   const lastSequence = useRef<number | null>(null);
 
@@ -110,13 +122,36 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
 
   const healthy = items.filter((item) => item.quality === "healthy");
   const best = healthy.reduce<Opportunity | null>((current, item) => !current || Number(item.net_return ?? -999) > Number(current.net_return ?? -999) ? item : current, null);
-  return <div className="app-shell">
+  return <div className="dashboard-shell">
+    <aside className="sidebar">
+      <div className="sidebar-brand">
+        <div className="mark"><span /></div>
+        <div><strong>BASIS HAWK</strong><small>FUNDING STRATEGY</small></div>
+      </div>
+      <nav className="sidebar-nav" aria-label="主菜单">
+        <span className="nav-group-label">MARKET</span>
+        <button aria-label="市场总览" className={activePage === "market" ? "active" : ""} onClick={() => setActivePage("market")}>
+          <span className="nav-icon">⌁</span><span>市场总览</span>
+        </button>
+        <span className="nav-group-label">OPERATIONS</span>
+        {operationNavigation.map((item) => <button aria-label={item.label} key={item.key} className={activePage === item.key ? "active" : ""} onClick={() => setActivePage(item.key)}>
+          <span className="nav-icon">{item.icon}</span><span>{item.label}</span>
+        </button>)}
+      </nav>
+      <div className="sidebar-bottom">
+        <button aria-label="扫描设置" onClick={() => setShowSettings(true)}><span className="nav-icon">⚙</span><span>扫描设置</span></button>
+        <div className="sidebar-user"><span className="user-avatar">{username.slice(0, 1).toUpperCase()}</span><div><strong>{username}</strong><small>ADMINISTRATOR</small></div></div>
+        <button aria-label="退出登录" onClick={() => void api.logout().finally(onLogout)}><span className="nav-icon">↪</span><span>退出登录</span></button>
+      </div>
+    </aside>
+    <div className="dashboard-main">
     <header className="topbar">
-      <div className="brand"><div className="mark"><span /></div><div><strong>BASIS HAWK</strong><small>FUNDING ARBITRAGE RADAR</small></div></div>
-      <div className="top-actions"><span className="read-only"><i /> {username}</span><button className="button primary" onClick={() => setShowOperations(true)}>运营控制台</button><button className="button secondary" onClick={() => setShowSettings(true)}>扫描设置</button><button className="button secondary" onClick={() => void api.logout().finally(onLogout)}>退出</button></div>
+      <div className="breadcrumb"><span>Basis Hawk</span><b>/</b><strong>{activePage === "market" ? "市场总览" : operationNavigation.find((item) => item.key === activePage)?.label}</strong></div>
+      <div className="top-actions"><span className="read-only"><i /> LIVE</span><span className="top-time">{new Date().toLocaleDateString("zh-CN")}</span></div>
     </header>
 
-    <main>
+    {activePage === "market" ? <>
+    <main className="market-main">
       <section className="hero">
         <div><p className="eyebrow">LIVE MARKET OVERVIEW</p><h1>资金费机会，一眼看清。</h1><p>同所现货多头 × USDT 永续空头。基差与资金费分开衡量，收益估算透明可核。</p></div>
         <div className="hero-grid">
@@ -167,7 +202,8 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
       </section>
     </main>
     <footer className="page-footer"><span>Basis Hawk · Paired execution & audit-first</span><span>收益估算不构成投资建议</span></footer>
+    </> : <OperationsPanel opportunities={items} activeTab={activePage} />}
+    </div>
     {showSettings && settings && <SettingsPanel value={settings} onClose={() => setShowSettings(false)} onSave={async (value) => setSettings(await api.saveSettings(value))} />}
-    {showOperations && <OperationsPanel opportunities={items} onClose={() => setShowOperations(false)} />}
   </div>;
 }

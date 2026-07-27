@@ -33,7 +33,18 @@ const exchangeNames: Record<Exchange, string> = {
   gate: "Gate",
 };
 const exchanges = Object.keys(exchangeNames) as Exchange[];
-type Tab = "system" | "accounts" | "trades" | "positions" | "ledger" | "transfers" | "automation" | "history";
+export type OperationsTab = "system" | "accounts" | "trades" | "positions" | "ledger" | "transfers" | "automation" | "history";
+
+const tabDetails: Record<OperationsTab, { eyebrow: string; title: string; description: string }> = {
+  system: { eyebrow: "SYSTEM / EXECUTION", title: "执行状态", description: "核对交易执行、账户连接、备份与软件版本。" },
+  accounts: { eyebrow: "CREDENTIALS / ACCOUNTS", title: "交易所账户", description: "管理加密 API 凭据并验证账户余额与交易权限。" },
+  trades: { eyebrow: "EXECUTION / MANUAL", title: "手动交易", description: "先预览、再确认；所有真实订单仍由唯一 worker 执行。" },
+  positions: { eyebrow: "PORTFOLIO / POSITIONS", title: "配对持仓", description: "查看同所现货多头与永续空头的真实配对仓位。" },
+  ledger: { eyebrow: "LEDGER / ACTIVITY", title: "交易账本", description: "审阅交易意图、订单腿、成交、盈亏与实际资金费。" },
+  transfers: { eyebrow: "TREASURY / TRANSFERS", title: "内部划转", description: "仅限同一交易所现货与 USDT 永续账户之间划转。" },
+  automation: { eyebrow: "STRATEGY / AUTOMATION", title: "自动策略", description: "创建不可变策略版本并控制自动交易生命周期。" },
+  history: { eyebrow: "AUDIT / NOTIFICATIONS", title: "审计与通知", description: "查看脱敏管理员审计与 Telegram、邮件投递记录。" },
+};
 
 const time = (value: string | null) =>
   value ? new Date(value).toLocaleString("zh-CN") : "—";
@@ -52,13 +63,12 @@ const updateStateNames: Record<UpdateStatus["state"], string> = {
 };
 
 export function OperationsPanel({
-  onClose,
   opportunities,
+  activeTab,
 }: {
-  onClose: () => void;
   opportunities: Opportunity[];
+  activeTab: OperationsTab;
 }) {
-  const [tab, setTab] = useState<Tab>("system");
   const [execution, setExecution] = useState<ExecutionStatus | null>(null);
   const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
   const [positions, setPositions] = useState<PairedPosition[]>([]);
@@ -151,82 +161,71 @@ export function OperationsPanel({
     }
   };
 
-  return <div className="operations-backdrop">
-    <section className="operations-panel" aria-label="运营控制台">
+  const currentTab = tabDetails[activeTab];
+
+  return <section className="operations-panel embedded" aria-label="运营控制台">
       <header className="operations-header">
-        <div><p className="eyebrow">OPERATIONS CONSOLE</p><h2>实盘运营控制台</h2></div>
+        <div>
+          <p className="eyebrow">{currentTab.eyebrow}</p>
+          <h1>{currentTab.title}</h1>
+          <p className="page-description">{currentTab.description}</p>
+        </div>
         <div className="operations-header-actions">
           {execution?.state === "paused" && <span className="live-badge danger">交易已暂停</span>}
           {execution?.state === "ready" && <span className="live-badge">执行就绪</span>}
-          <button className="icon-button" onClick={onClose} aria-label="关闭">×</button>
         </div>
       </header>
-      <nav className="operations-tabs">
-        {([
-          ["system", "执行状态"],
-          ["accounts", "交易所账户"],
-          ["trades", "手动交易"],
-          ["positions", "配对持仓"],
-          ["ledger", "交易账本"],
-          ["transfers", "内部划转"],
-          ["automation", "自动策略"],
-          ["history", "审计与通知"],
-        ] as [Tab, string][]).map(([key, label]) =>
-          <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{label}</button>
-        )}
-      </nav>
       {error && <div className="error-banner">{error}<button onClick={() => setError(null)}>×</button></div>}
       <div className="operations-content">
-        {tab === "system" && <SystemView
+        {activeTab === "system" && <SystemView
           execution={execution}
           backup={backup}
           update={update}
           busy={busy}
           action={action}
         />}
-        {tab === "accounts" && <AccountsView
+        {activeTab === "accounts" && <AccountsView
           credentials={credentials}
           snapshots={snapshots}
           setSnapshots={setSnapshots}
           busy={busy}
           action={action}
         />}
-        {tab === "trades" && <TradesView
+        {activeTab === "trades" && <TradesView
           opportunities={opportunities}
           positions={positions}
           execution={execution}
           busy={busy}
           action={action}
         />}
-        {tab === "positions" && <PositionsView positions={positions} />}
-        {tab === "ledger" && <TradeLedgerView
+        {activeTab === "positions" && <PositionsView positions={positions} />}
+        {activeTab === "ledger" && <TradeLedgerView
           intents={tradeIntents}
           orders={orders}
           fills={fills}
           pnlRealizations={pnlRealizations}
           fundingIncome={fundingIncome}
         />}
-        {tab === "transfers" && <TransfersView
+        {activeTab === "transfers" && <TransfersView
           transfers={transfers}
           execution={execution}
           busy={busy}
           action={action}
         />}
-        {tab === "automation" && <AutomationView
+        {activeTab === "automation" && <AutomationView
           automation={automation}
           execution={execution}
           busy={busy}
           action={action}
         />}
-        {tab === "history" && <HistoryView
+        {activeTab === "history" && <HistoryView
           auditEvents={auditEvents}
           notifications={notifications}
           busy={busy}
           action={action}
         />}
       </div>
-    </section>
-  </div>;
+    </section>;
 }
 
 function SystemView({

@@ -60,6 +60,8 @@ describe("Basis Hawk dashboard", () => {
     await waitFor(() => expect(screen.getByText("资金费机会，一眼看清。")).toBeTruthy());
     expect(screen.getByText("机会排行榜")).toBeTruthy();
     expect(screen.getByText("admin")).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "主菜单" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "市场总览" })).toBeTruthy();
     expect(screen.getAllByText("Bitget").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Gate").length).toBeGreaterThan(0);
   });
@@ -79,9 +81,9 @@ describe("Basis Hawk dashboard", () => {
     render(<App />);
     const user = userEvent.setup();
     const confirmation = vi.spyOn(window, "confirm").mockReturnValue(true);
-    await user.click(await screen.findByRole("button", { name: "运营控制台" }));
+    await user.click(await screen.findByRole("button", { name: "执行状态" }));
     await waitFor(() => expect(screen.getByRole("region", { name: "运营控制台" })).toBeTruthy());
-    expect(screen.getByText("实盘运营控制台")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "执行状态" })).toBeTruthy();
     expect(screen.getByText("worker pending")).toBeTruthy();
     expect(screen.getByRole("button", { name: "交易所账户" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "软件更新" })).toBeTruthy();
@@ -102,7 +104,6 @@ describe("Basis Hawk dashboard", () => {
   it("shows bounded manual paired-trade controls", async () => {
     render(<App />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "运营控制台" }));
     await user.click(await screen.findByRole("button", { name: "手动交易" }));
     expect(screen.getByText("手动配对开仓")).toBeTruthy();
     expect(screen.getByText("真实配对持仓平仓")).toBeTruthy();
@@ -114,7 +115,6 @@ describe("Basis Hawk dashboard", () => {
     render(<App />);
     const user = userEvent.setup();
     const confirmation = vi.spyOn(window, "confirm").mockReturnValue(true);
-    await user.click(await screen.findByRole("button", { name: "运营控制台" }));
     await user.click(await screen.findByRole("button", { name: "交易所账户" }));
     expect(screen.getByRole("combobox", { name: "Bybit 持仓模式" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "保存模式声明" }));
@@ -129,7 +129,6 @@ describe("Basis Hawk dashboard", () => {
     render(<App />);
     const user = userEvent.setup();
     const confirmation = vi.spyOn(window, "confirm").mockReturnValue(true);
-    await user.click(await screen.findByRole("button", { name: "运营控制台" }));
     await user.click(await screen.findByRole("button", { name: "自动策略" }));
     expect(screen.getByText("自动策略完整配置")).toBeTruthy();
     expect(screen.getByText("资金与仓位")).toBeTruthy();
@@ -150,7 +149,6 @@ describe("Basis Hawk dashboard", () => {
   it("shows redacted audit and notification history workspaces", async () => {
     render(<App />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "运营控制台" }));
     await user.click(await screen.findByRole("button", { name: "审计与通知" }));
     expect(screen.getByText("管理员审计")).toBeTruthy();
     expect(screen.getByText("通知投递")).toBeTruthy();
@@ -164,7 +162,6 @@ describe("Basis Hawk dashboard", () => {
   it("shows bounded trade, fill, pnl, and funding ledgers", async () => {
     render(<App />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "运营控制台" }));
     await user.click(await screen.findByRole("button", { name: "交易账本" }));
     expect(screen.getByRole("heading", { name: "交易意图" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "订单腿" })).toBeTruthy();
