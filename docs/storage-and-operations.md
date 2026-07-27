@@ -95,7 +95,9 @@ Compose 还提供独立非 root `backup` 服务。它使用与 PostgreSQL 17 服
 立即生成一次 custom archive，之后默认每 86400 秒生成一次。归档在写入命名卷时直接使用独立
 `BASIS_HAWK_BACKUP_KEY` 做 AES-256-GCM 认证加密，明文数据库不会落盘；每份归档另有 SHA-256 文件，
 恢复验证还会校验 GCM tag 并让 `pg_restore --list` 解析完整归档。每日归档只保留最新 7 份，每周日
-另保留一份周归档并只保留最新 4 份。备份密钥必须独立于凭据主密钥生成：
+另保留一份周归档并只保留最新 4 份。构建镜像时运行时代码显式归属固定的非 root 用户，即使远程
+checkout 因严格 umask 使用 0600 文件也能读取，不会在升级前安全备份阶段中断。备份密钥必须独立于
+凭据主密钥生成：
 
 ```bash
 python3 -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())'

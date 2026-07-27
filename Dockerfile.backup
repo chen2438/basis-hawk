@@ -7,7 +7,7 @@ RUN apk add --no-cache python3 py3-cryptography \
     && chown basis-hawk:basis-hawk /backups
 
 WORKDIR /app
-COPY src/basis_hawk /app/basis_hawk
+COPY --chown=basis-hawk:basis-hawk src/basis_hawk /app/basis_hawk
 VOLUME ["/backups"]
 USER basis-hawk
 ENTRYPOINT ["python3", "-m", "basis_hawk.backup"]
