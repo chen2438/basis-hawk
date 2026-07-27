@@ -49,6 +49,79 @@ class Base(DeclarativeBase):
     pass
 
 
+@dataclass(frozen=True)
+class TransferLimitSettings:
+    per_request_limit_usdt: Decimal
+    daily_limit_usdt: Decimal
+    updated_by: str
+    updated_at: datetime
+
+    @property
+    def enabled(self) -> bool:
+        return (
+            self.per_request_limit_usdt > 0
+            and self.daily_limit_usdt > 0
+        )
+
+
+def _validate_transfer_limits(
+    per_request_limit: Decimal,
+    daily_limit: Decimal,
+) -> None:
+    if per_request_limit < 0 or daily_limit < 0:
+        raise ValueError("internal transfer limits cannot be negative")
+    if (per_request_limit == 0) != (daily_limit == 0):
+        raise ValueError(
+            "internal transfer limits must both be zero or both be positive"
+        )
+    if per_request_limit > daily_limit:
+        raise ValueError(
+            "per-request transfer limit cannot exceed daily limit"
+        )
+
+
+def _transfer_limit_settings(
+    *,
+    per_request_limit: Decimal,
+    daily_limit: Decimal,
+    updated_by: str,
+    updated_at: datetime,
+) -> TransferLimitSettings:
+    _validate_transfer_limits(per_request_limit, daily_limit)
+    return TransferLimitSettings(
+        per_request_limit_usdt=per_request_limit,
+        daily_limit_usdt=daily_limit,
+        updated_by=updated_by,
+        updated_at=updated_at,
+    )
+
+
+def _transfer_limit_payload(value: TransferLimitSettings) -> str:
+    return json.dumps(
+        {
+            "per_request_limit_usdt": format(
+                value.per_request_limit_usdt,
+                "f",
+            ),
+            "daily_limit_usdt": format(value.daily_limit_usdt, "f"),
+            "updated_by": value.updated_by,
+            "updated_at": value.updated_at.isoformat(),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _parse_transfer_limit_payload(payload: str) -> TransferLimitSettings:
+    value = json.loads(payload)
+    return _transfer_limit_settings(
+        per_request_limit=Decimal(value["per_request_limit_usdt"]),
+        daily_limit=Decimal(value["daily_limit_usdt"]),
+        updated_by=str(value["updated_by"]),
+        updated_at=datetime.fromisoformat(value["updated_at"]),
+    )
+
+
 def _enable_sqlite_foreign_keys(
     dbapi_connection: Any,
     _connection_record: Any,
@@ -3676,6 +3749,91 @@ class Database:
                 session.add(SettingRow(key="scanner", payload=payload))
             await session.commit()
 
+    async def transfer_limits(
+        self,
+        *,
+        default_per_request_limit: Decimal,
+        default_daily_limit: Decimal,
+    ) -> TransferLimitSettings:
+        defaults = _transfer_limit_settings(
+            per_request_limit=default_per_request_limit,
+            daily_limit=default_daily_limit,
+            updated_by="environment",
+            updated_at=datetime.now(UTC),
+        )
+        async with self.sessions() as session:
+            async with session.begin():
+                row = await session.get(
+                    SettingRow,
+                    "transfer_limits",
+                    with_for_update=True,
+                )
+                if row is None:
+                    row = SettingRow(
+                        key="transfer_limits",
+                        payload=_transfer_limit_payload(defaults),
+                    )
+                    session.add(row)
+                    await session.flush()
+                    return defaults
+                return _parse_transfer_limit_payload(row.payload)
+
+    async def save_transfer_limits(
+        self,
+        *,
+        per_request_limit: Decimal,
+        daily_limit: Decimal,
+        actor: str,
+        now: datetime | None = None,
+    ) -> TransferLimitSettings:
+        observed_at = now or datetime.now(UTC)
+        value = _transfer_limit_settings(
+            per_request_limit=per_request_limit,
+            daily_limit=daily_limit,
+            updated_by=actor,
+            updated_at=observed_at,
+        )
+        async with self.sessions() as session:
+            async with session.begin():
+                row = await session.get(
+                    SettingRow,
+                    "transfer_limits",
+                    with_for_update=True,
+                )
+                if row is None:
+                    session.add(
+                        SettingRow(
+                            key="transfer_limits",
+                            payload=_transfer_limit_payload(value),
+                        )
+                    )
+                else:
+                    row.payload = _transfer_limit_payload(value)
+                session.add(
+                    AuditEventRow(
+                        id=str(uuid.uuid4()),
+                        occurred_at=observed_at,
+                        event_type="transfer.limits_updated",
+                        actor=actor,
+                        details=json.dumps(
+                            {
+                                "enabled": value.enabled,
+                                "per_request_limit_usdt": format(
+                                    per_request_limit,
+                                    "f",
+                                ),
+                                "daily_limit_usdt": format(
+                                    daily_limit,
+                                    "f",
+                                ),
+                            },
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                    )
+                )
+        return value
+
     async def admin_count(self) -> int:
         async with self.sessions() as session:
             return int(await session.scalar(select(func.count(AdminUserRow.id))) or 0)
@@ -4233,8 +4391,8 @@ class Database:
         environment: str,
         direction: str,
         amount: Decimal,
-        per_request_limit: Decimal,
-        daily_limit: Decimal,
+        default_per_request_limit: Decimal,
+        default_daily_limit: Decimal,
         actor: str,
         now: datetime | None = None,
     ) -> tuple[InternalTransferRow, bool]:
@@ -4244,12 +4402,6 @@ class Database:
             raise ValueError("internal transfer environment must be sandbox or live")
         if amount <= 0:
             raise ValueError("internal transfer amount must be positive")
-        if per_request_limit <= 0 or daily_limit <= 0:
-            raise ValueError("internal transfers are disabled by zero limits")
-        if amount > per_request_limit:
-            raise ValueError("internal transfer exceeds the per-request limit")
-        if per_request_limit > daily_limit:
-            raise ValueError("per-request transfer limit cannot exceed daily limit")
         observed_at = now or datetime.now(UTC)
         day_start = observed_at.replace(hour=0, minute=0, second=0, microsecond=0)
         async with self.sessions() as session:
@@ -4264,6 +4416,37 @@ class Database:
                         "internal transfer idempotency key conflicts with another request"
                     )
                 return existing, False
+            settings_row = await session.get(
+                SettingRow,
+                "transfer_limits",
+                with_for_update=True,
+            )
+            if settings_row is None:
+                limits = _transfer_limit_settings(
+                    per_request_limit=default_per_request_limit,
+                    daily_limit=default_daily_limit,
+                    updated_by="environment",
+                    updated_at=observed_at,
+                )
+                session.add(
+                    SettingRow(
+                        key="transfer_limits",
+                        payload=_transfer_limit_payload(limits),
+                    )
+                )
+                await session.flush()
+            else:
+                limits = _parse_transfer_limit_payload(
+                    settings_row.payload
+                )
+            if not limits.enabled:
+                raise ValueError(
+                    "internal transfers are disabled by zero limits"
+                )
+            if amount > limits.per_request_limit_usdt:
+                raise ValueError(
+                    "internal transfer exceeds the per-request limit"
+                )
             control = await session.scalar(
                 select(ExecutionControlRow)
                 .where(ExecutionControlRow.id == 1)
@@ -4288,7 +4471,7 @@ class Database:
                     InternalTransferRow.status.not_in({"failed"}),
                 )
             )
-            if Decimal(used or 0) + amount > daily_limit:
+            if Decimal(used or 0) + amount > limits.daily_limit_usdt:
                 raise ValueError("internal transfer exceeds the UTC daily limit")
             row = InternalTransferRow(
                 id=transfer_id,

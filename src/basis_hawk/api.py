@@ -43,7 +43,11 @@ from basis_hawk.models import Exchange, Quality, ScannerSettings
 from basis_hawk.notifications import TelegramCommandService
 from basis_hawk.service import ScannerService, default_adapters
 from basis_hawk.sizing import OrderSizingError
-from basis_hawk.storage import Database, InternalTransferRow
+from basis_hawk.storage import (
+    Database,
+    InternalTransferRow,
+    TransferLimitSettings,
+)
 from basis_hawk.trading import IdempotencyConflict, TradeLedger, TradeValidationError
 from basis_hawk.transfers import (
     InternalTransferDirection,
@@ -141,6 +145,20 @@ class InternalTransferConfirmRequest(BaseModel):
     environment: ExchangeEnvironment
     direction: InternalTransferDirection
     amount_usdt: Decimal = Field(gt=0, decimal_places=18)
+    confirmed: Literal[True]
+
+
+class TransferLimitUpdateRequest(BaseModel):
+    per_request_limit_usdt: Decimal = Field(
+        ge=0,
+        le=Decimal("1000000000000"),
+        decimal_places=18,
+    )
+    daily_limit_usdt: Decimal = Field(
+        ge=0,
+        le=Decimal("1000000000000"),
+        decimal_places=18,
+    )
     confirmed: Literal[True]
 
 
@@ -317,6 +335,23 @@ def create_app(
                 if row.completed_at is not None
                 else None
             ),
+        }
+
+    def transfer_limits_payload(
+        value: TransferLimitSettings,
+    ) -> dict[str, object]:
+        return {
+            "per_request_limit_usdt": format(
+                value.per_request_limit_usdt.normalize(),
+                "f",
+            ),
+            "daily_limit_usdt": format(
+                value.daily_limit_usdt.normalize(),
+                "f",
+            ),
+            "enabled": value.enabled,
+            "updated_by": value.updated_by,
+            "updated_at": value.updated_at.isoformat(),
         }
 
     @app.middleware("http")
@@ -922,6 +957,31 @@ def create_app(
     ) -> dict[str, object]:
         rows = await scanner.database.list_internal_transfers(limit=limit)
         return {"items": [transfer_payload(row) for row in rows]}
+
+    @app.get("/api/transfers/limits")
+    async def internal_transfer_limits() -> dict[str, object]:
+        value = await scanner.database.transfer_limits(
+            default_per_request_limit=(
+                config.transfer_per_request_limit_usdt
+            ),
+            default_daily_limit=config.transfer_daily_limit_usdt,
+        )
+        return transfer_limits_payload(value)
+
+    @app.put("/api/transfers/limits")
+    async def update_internal_transfer_limits(
+        value: TransferLimitUpdateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        try:
+            saved = await scanner.database.save_transfer_limits(
+                per_request_limit=value.per_request_limit_usdt,
+                daily_limit=value.daily_limit_usdt,
+                actor=request_actor(request),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return transfer_limits_payload(saved)
 
     @app.post("/api/transfers")
     async def plan_internal_transfer(

@@ -93,6 +93,11 @@ async def test_transfer_limits_default_to_disabled_and_are_bounded() -> None:
             actor="admin",
         )
 
+    await database.save_transfer_limits(
+        per_request_limit=Decimal("10"),
+        daily_limit=Decimal("10"),
+        actor="admin",
+    )
     bounded = InternalTransferLedger(
         database,
         per_request_limit_usdt=Decimal("10"),
@@ -120,8 +125,8 @@ async def test_transfer_daily_limit_uses_utc_day_and_counts_pending_money() -> N
         environment="live",
         direction="spot_to_perp",
         amount=Decimal("70"),
-        per_request_limit=Decimal("100"),
-        daily_limit=Decimal("100"),
+        default_per_request_limit=Decimal("100"),
+        default_daily_limit=Decimal("100"),
         actor="admin",
         now=now,
     )
@@ -134,8 +139,8 @@ async def test_transfer_daily_limit_uses_utc_day_and_counts_pending_money() -> N
             environment="live",
             direction="spot_to_perp",
             amount=Decimal("31"),
-            per_request_limit=Decimal("100"),
-            daily_limit=Decimal("100"),
+            default_per_request_limit=Decimal("100"),
+            default_daily_limit=Decimal("100"),
             actor="admin",
             now=now,
         )
@@ -147,8 +152,8 @@ async def test_transfer_daily_limit_uses_utc_day_and_counts_pending_money() -> N
         environment="live",
         direction="perp_to_spot",
         amount=Decimal("100"),
-        per_request_limit=Decimal("100"),
-        daily_limit=Decimal("100"),
+        default_per_request_limit=Decimal("100"),
+        default_daily_limit=Decimal("100"),
         actor="admin",
         now=now + timedelta(minutes=1),
     )

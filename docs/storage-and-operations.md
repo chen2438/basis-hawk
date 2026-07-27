@@ -336,10 +336,13 @@ Telegram 入站固定为 `POST /api/integrations/telegram/webhook`，这是唯�
 最近已结束日期的基线，不补发可能已经人工处理的历史日报。
 `internal_transfers` 保存 USDT 同所现货↔USDT 永续划转的 UUID 幂等键、请求指纹、方向、金额、远端
 划转 ID、提交前来源/目标余额、预期目标余额及状态时间。数据库约束不允许其他资产、方向或任意目标；
-模型完全不存在地址、链、UID、邮箱或提现字段。`BASIS_HAWK_TRANSFER_PER_REQUEST_LIMIT_USDT` 和
-`BASIS_HAWK_TRANSFER_DAILY_LIMIT_USDT` 默认均为 0，即功能关闭；两者都必须为正且单次限额不得超过
-日限额。计划事务锁定全局执行控制，按 UTC 日累计所有非明确 failed 金额，超限则不落库；成功计划会
-立即暂停新交易并写入不含凭据的审计事件。私有适配层现已支持 Binance、Bitget Classic、Gate 和
+模型完全不存在地址、链、UID、邮箱或提现字段。`settings.transfer_limits` 是运行时全局限额的唯一
+事实来源；首次访问尚无该设置时，才用 `BASIS_HAWK_TRANSFER_PER_REQUEST_LIMIT_USDT` 和
+`BASIS_HAWK_TRANSFER_DAILY_LIMIT_USDT` 初始化，默认均为 0。管理员可在 Web 内部划转页修改，两项
+必须同时为 0（禁用）或同时为正且单次不得超过日限额；更新人、更新时间随值持久化，并在同一事务写入
+`transfer.limits_updated` 脱敏审计。计划事务锁定该设置行及全局执行控制，按 UTC 日累计所有非明确
+failed 金额，超限则不落库；因此运行中修改会立即生效且不能与新计划并发绕过。成功计划会立即暂停
+新交易并写入不含凭据的审计事件。私有适配层现已支持 Binance、Bitget Classic、Gate 和
 MEXC LIVE 的提交与远端状态查询；Bitget 和 Gate 还把本地 UUID 作为交易所防重 ID。OKX、Bybit 与
 Bitget UTA 的当前交易账户共享现货和永续余额，因此明确返回无需划转。
 唯一 worker 每轮先处理最早的一笔 `submitted`/`pending`，没有待确认记录时才认领一笔 `planned`。

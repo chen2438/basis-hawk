@@ -21,6 +21,7 @@ import type {
   PairedPosition,
   PnlRealization,
   TradeIntent,
+  TransferLimits,
   UpdateStatus,
 } from "./types";
 
@@ -78,6 +79,7 @@ export function OperationsPanel({
   const [pnlRealizations, setPnlRealizations] = useState<PnlRealization[]>([]);
   const [fundingIncome, setFundingIncome] = useState<FundingIncome[]>([]);
   const [transfers, setTransfers] = useState<InternalTransfer[]>([]);
+  const [transferLimits, setTransferLimits] = useState<TransferLimits | null>(null);
   const [automation, setAutomation] = useState<AutomationStatus | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [notifications, setNotifications] = useState<NotificationHistoryItem[]>([]);
@@ -98,6 +100,7 @@ export function OperationsPanel({
       pnlValue,
       fundingIncomeValue,
       transferValue,
+      transferLimitsValue,
       automationValue,
       auditValue,
       notificationValue,
@@ -114,6 +117,7 @@ export function OperationsPanel({
         api.pnlRealizations(),
         api.fundingIncome(),
         api.transfers(),
+        api.transferLimits(),
         api.automation(),
         api.auditHistory(),
         api.notificationHistory(),
@@ -129,6 +133,7 @@ export function OperationsPanel({
     setPnlRealizations(pnlValue.items);
     setFundingIncome(fundingIncomeValue.items);
     setTransfers(transferValue.items);
+    setTransferLimits(transferLimitsValue);
     setAutomation(automationValue);
     setAuditEvents(auditValue.items);
     setNotifications(notificationValue.items);
@@ -208,6 +213,7 @@ export function OperationsPanel({
         />}
         {activeTab === "transfers" && <TransfersView
           transfers={transfers}
+          limits={transferLimits}
           execution={execution}
           busy={busy}
           action={action}
@@ -709,11 +715,13 @@ function TradeLedgerView({
 
 function TransfersView({
   transfers,
+  limits,
   execution,
   busy,
   action,
 }: {
   transfers: InternalTransfer[];
+  limits: TransferLimits | null;
   execution: ExecutionStatus | null;
   busy: boolean;
   action: (operation: () => Promise<unknown>) => Promise<void>;
@@ -725,9 +733,20 @@ function TransfersView({
     amount: "",
   });
   const [snapshot, setSnapshot] = useState<AccountSnapshot | null>(null);
+  const [limitForm, setLimitForm] = useState({
+    perRequest: "",
+    daily: "",
+  });
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [snapshotLoading, setSnapshotLoading] = useState(true);
   const snapshotRequest = useRef(0);
+  useEffect(() => {
+    if (!limits) return;
+    setLimitForm({
+      perRequest: limits.per_request_limit_usdt,
+      daily: limits.daily_limit_usdt,
+    });
+  }, [limits]);
   const loadSnapshot = useCallback(async () => {
     const requestId = snapshotRequest.current + 1;
     snapshotRequest.current = requestId;
@@ -759,7 +778,54 @@ function TransfersView({
       confirmed: true,
     }, crypto.randomUUID()));
   };
+  const saveLimits = (event: FormEvent) => {
+    event.preventDefault();
+    const disabled = Number(limitForm.perRequest) === 0 && Number(limitForm.daily) === 0;
+    const message = disabled
+      ? "确认把单次和每日限额都设为 0，并禁用新的内部划转？"
+      : `确认把内部划转单次限额设为 ${limitForm.perRequest} USDT、每日累计限额设为 ${limitForm.daily} USDT？`;
+    if (!window.confirm(message)) return;
+    void action(() => api.saveTransferLimits({
+      per_request_limit_usdt: limitForm.perRequest,
+      daily_limit_usdt: limitForm.daily,
+      confirmed: true,
+    }));
+  };
+  const limitValuesValid = (
+    limitForm.perRequest !== ""
+    && limitForm.daily !== ""
+    && Number(limitForm.perRequest) >= 0
+    && Number(limitForm.daily) >= 0
+    && (
+      (Number(limitForm.perRequest) === 0 && Number(limitForm.daily) === 0)
+      || (
+        Number(limitForm.perRequest) > 0
+        && Number(limitForm.daily) >= Number(limitForm.perRequest)
+      )
+    )
+  );
   return <>
+    <section className="transfer-limit-panel" aria-label="内部划转限额">
+      <header>
+        <div>
+          <h3>内部划转限额</h3>
+          <p>全局适用于所有交易所和环境；任一新划转都按 UTC 自然日累计。两项同时设为 0 可禁用。</p>
+        </div>
+        <span className={`status-pill ${limits?.enabled ? "ready" : "blocked"}`}>
+          {limits?.enabled ? "已启用" : "已禁用"}
+        </span>
+      </header>
+      <form onSubmit={saveLimits}>
+        <label>单次最高 USDT
+          <input required type="number" min="0" step="any" value={limitForm.perRequest} onChange={(event) => setLimitForm({ ...limitForm, perRequest: event.target.value })} />
+        </label>
+        <label>每日累计最高 USDT
+          <input required type="number" min="0" step="any" value={limitForm.daily} onChange={(event) => setLimitForm({ ...limitForm, daily: event.target.value })} />
+        </label>
+        <button className="button secondary" disabled={busy || !limitValuesValid}>确认并保存限额</button>
+      </form>
+      {limits && <p className="transfer-limit-meta">最近更新：{time(limits.updated_at)} · {limits.updated_by}</p>}
+    </section>
     <section className="transfer-balance-panel" aria-label="划转账户余额">
       <header>
         <div>
@@ -808,8 +874,9 @@ function TransfersView({
       <select value={form.environment} onChange={(event) => setForm({ ...form, environment: event.target.value as Environment })}><option value="live">LIVE</option><option value="sandbox">SANDBOX</option></select>
       <select value={form.direction} onChange={(event) => setForm({ ...form, direction: event.target.value as typeof form.direction })}><option value="spot_to_perp">现货 → 永续</option><option value="perp_to_spot">永续 → 现货</option></select>
       <input required min="0" step="any" placeholder="USDT 金额" value={form.amount} onChange={(event) => setForm({ ...form, amount: event.target.value })} />
-      <button className="button primary" disabled={busy || execution?.state !== "ready"}>确认并暂停执行</button>
+      <button className="button primary" disabled={busy || execution?.state !== "ready" || !limits?.enabled}>确认并暂停执行</button>
     </form>
+    {!limits?.enabled && <p className="loading-note">当前内部划转已禁用；请先把单次和每日限额设置为大于 0 的有效值。</p>}
     {execution?.state !== "ready" && <p className="loading-note">只有全局执行为 ready 时才能新建划转；同一幂等请求仍可由 API 安全重试。</p>}
     <div className="ops-table-wrap"><table><thead><tr><th>交易所</th><th>方向</th><th>金额</th><th>状态</th><th>目标余额</th><th>错误码</th><th>更新时间</th></tr></thead>
       <tbody>{transfers.map((item) => <tr key={item.id}>

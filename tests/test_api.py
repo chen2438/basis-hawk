@@ -855,6 +855,46 @@ async def test_internal_transfer_api_requires_confirmation_and_is_idempotent(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
         ) as client:
+            initial_limits = await client.get("/api/transfers/limits")
+            assert initial_limits.status_code == 200
+            assert initial_limits.json() == {
+                "per_request_limit_usdt": "100",
+                "daily_limit_usdt": "200",
+                "enabled": True,
+                "updated_by": "environment",
+                "updated_at": initial_limits.json()["updated_at"],
+            }
+            missing_confirmation = await client.put(
+                "/api/transfers/limits",
+                json={
+                    "per_request_limit_usdt": "50",
+                    "daily_limit_usdt": "150",
+                    "confirmed": False,
+                },
+            )
+            assert missing_confirmation.status_code == 422
+            updated_limits = await client.put(
+                "/api/transfers/limits",
+                json={
+                    "per_request_limit_usdt": "50",
+                    "daily_limit_usdt": "150",
+                    "confirmed": True,
+                },
+            )
+            assert updated_limits.status_code == 200
+            assert updated_limits.json()["per_request_limit_usdt"] == "50"
+            assert updated_limits.json()["daily_limit_usdt"] == "150"
+            assert updated_limits.json()["updated_by"] == "local"
+            over_new_limit = await client.post(
+                "/api/transfers",
+                headers={"Idempotency-Key": str(uuid.uuid4())},
+                json={**payload, "amount_usdt": "51"},
+            )
+            assert over_new_limit.status_code == 409
+            assert (
+                over_new_limit.json()["detail"]
+                == "internal transfer exceeds the per-request limit"
+            )
             created = await client.post(
                 "/api/transfers",
                 headers={"Idempotency-Key": key},
@@ -874,6 +914,15 @@ async def test_internal_transfer_api_requires_confirmation_and_is_idempotent(
             assert listed.json()["items"][0]["amount_usdt"] == "25"
         control = await database.execution_control()
         assert control is not None and control.state == "paused"
+        audits = await database.audit_events(
+            event_type="transfer.limits_updated",
+        )
+        assert len(audits) == 1
+        assert audits[0].details == {
+            "daily_limit_usdt": "150",
+            "enabled": True,
+            "per_request_limit_usdt": "50",
+        }
     finally:
         await database.close()
         get_config.cache_clear()

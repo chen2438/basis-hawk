@@ -61,6 +61,13 @@ describe("Basis Hawk dashboard", () => {
         : url.includes("trades/fills") ? { items: [] }
         : url.includes("trades/pnl") ? { items: [] }
         : url.includes("trades/funding-income") ? { items: [] }
+        : url.includes("transfers/limits") ? {
+          per_request_limit_usdt: "0",
+          daily_limit_usdt: "0",
+          enabled: false,
+          updated_by: "environment",
+          updated_at: "2026-07-27T00:00:00Z",
+        }
         : url.includes("transfers") ? { items: [] }
         : url.includes("automation") ? { state: "disabled", reason: "disabled", updated_by: "system", updated_at: "2026-07-26T00:00:00Z", active_strategy: null, latest_strategy: null }
         : { universe_size: 500, minimum_quote_volume: "1000000", holding_period_days: 30, retention_days: 30, fee_checked_at: "2026-07-23", fees: { binance: { spot_taker: "0.001", perp_taker: "0.0005" }, okx: { spot_taker: "0.001", perp_taker: "0.0005" }, mexc: { spot_taker: "0.0005", perp_taker: "0.0004" }, bybit: { spot_taker: "0.001", perp_taker: "0.00055" }, bitget: { spot_taker: "0.001", perp_taker: "0.0006" }, gate: { spot_taker: "0.001", perp_taker: "0.00075" } } };
@@ -243,7 +250,26 @@ describe("Basis Hawk dashboard", () => {
   it("shows the selected exchange spot and perpetual balances on the transfer page", async () => {
     render(<App />);
     const user = userEvent.setup();
+    const confirmation = vi.spyOn(window, "confirm").mockReturnValue(true);
     await user.click(await screen.findByRole("button", { name: "内部划转" }));
+    expect(await screen.findByRole("region", { name: "内部划转限额" })).toBeTruthy();
+    expect(screen.getByText("已禁用")).toBeTruthy();
+    await user.clear(screen.getByRole("spinbutton", { name: "单次最高 USDT" }));
+    await user.type(screen.getByRole("spinbutton", { name: "单次最高 USDT" }), "100");
+    await user.clear(screen.getByRole("spinbutton", { name: "每日累计最高 USDT" }));
+    await user.type(screen.getByRole("spinbutton", { name: "每日累计最高 USDT" }), "500");
+    await user.click(screen.getByRole("button", { name: "确认并保存限额" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      "/api/transfers/limits",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({
+          per_request_limit_usdt: "100",
+          daily_limit_usdt: "500",
+          confirmed: true,
+        }),
+      }),
+    ));
     expect(await screen.findByRole("region", { name: "划转账户余额" })).toBeTruthy();
     await waitFor(() => expect(screen.getByText("11.25 USDT")).toBeTruthy());
     expect(screen.getByText("8.5 USDT")).toBeTruthy();
@@ -254,6 +280,7 @@ describe("Basis Hawk dashboard", () => {
       "/api/accounts/binance/live/snapshot",
       expect.objectContaining({ credentials: "same-origin" }),
     );
+    confirmation.mockRestore();
   });
 
   it("shows every automatic strategy risk group without enabling by default", async () => {

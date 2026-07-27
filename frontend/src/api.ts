@@ -10,6 +10,7 @@ import type {
   ExchangeStatus,
   ExecutionStatus,
   InternalTransfer,
+  TransferLimits,
   LiveClosePreview,
   LiveOpenPreview,
   FillHistoryItem,
@@ -46,6 +47,11 @@ export function apiErrorMessage(detail: unknown, fallback: string): string {
     "trade preview was not found": "找不到该预览票据，请重新生成预览",
     "trade preview belongs to another administrator": "该预览票据不属于当前管理员，请重新生成预览",
     "trade preview was already confirmed with another idempotency key": "该预览票据已经确认，不能重复提交",
+    "internal transfers are disabled by zero limits": "内部划转额度为 0，当前已禁用；请先在本页设置单次和每日限额",
+    "internal transfer exceeds the per-request limit": "划转金额超过当前单次限额",
+    "internal transfer exceeds the UTC daily limit": "划转金额会超过当前 UTC 自然日累计限额",
+    "internal transfer limits must both be zero or both be positive": "单次和每日限额必须同时为 0（禁用）或同时大于 0",
+    "per-request transfer limit cannot exceed daily limit": "单次限额不能超过每日累计限额",
   };
   if (typeof detail === "string") return translations[detail] || detail;
   if (!detail || typeof detail !== "object") return fallback;
@@ -196,6 +202,17 @@ export const api = {
   pnlRealizations: () => request<{ items: PnlRealization[] }>("/api/trades/pnl?limit=100"),
   fundingIncome: () => request<{ items: FundingIncome[] }>("/api/trades/funding-income?limit=100"),
   transfers: () => request<{ items: InternalTransfer[] }>("/api/transfers"),
+  transferLimits: () => request<TransferLimits>("/api/transfers/limits"),
+  saveTransferLimits: (
+    value: {
+      per_request_limit_usdt: string;
+      daily_limit_usdt: string;
+      confirmed: true;
+    },
+  ) => request<TransferLimits>("/api/transfers/limits", {
+    method: "PUT",
+    body: JSON.stringify(value),
+  }),
   createTransfer: (
     value: {
       exchange: Exchange;

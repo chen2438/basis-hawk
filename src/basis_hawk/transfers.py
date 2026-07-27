@@ -47,8 +47,8 @@ class InternalTransferLedger:
         daily_limit_usdt: Decimal,
     ) -> None:
         self.database = database
-        self.per_request_limit_usdt = per_request_limit_usdt
-        self.daily_limit_usdt = daily_limit_usdt
+        self.default_per_request_limit_usdt = per_request_limit_usdt
+        self.default_daily_limit_usdt = daily_limit_usdt
 
     async def plan(
         self,
@@ -79,8 +79,10 @@ class InternalTransferLedger:
             environment=request.environment.value,
             direction=request.direction.value,
             amount=request.amount_usdt,
-            per_request_limit=self.per_request_limit_usdt,
-            daily_limit=self.daily_limit_usdt,
+            default_per_request_limit=(
+                self.default_per_request_limit_usdt
+            ),
+            default_daily_limit=self.default_daily_limit_usdt,
             actor=actor,
         )
 

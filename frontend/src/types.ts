@@ -218,6 +218,14 @@ export interface InternalTransfer {
   completed_at: string | null;
 }
 
+export interface TransferLimits {
+  per_request_limit_usdt: string;
+  daily_limit_usdt: string;
+  enabled: boolean;
+  updated_by: string;
+  updated_at: string;
+}
+
 export interface AutoStrategyConfig {
   environment: Environment;
   enabled_exchanges: Exchange[];

@@ -531,6 +531,20 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
 .form-grid.compact select { display: block; width: 100%; margin-top: 7px; }
 .transfer-form { display: grid; grid-template-columns: 2fr repeat(3, 1fr) 1fr auto; gap: 10px; align-items: center; }
 .transfer-form h3, .transfer-form p { margin: 0 0 5px; }
+.transfer-limit-panel {
+  margin: 18px 0;
+  padding: 18px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.transfer-limit-panel > header { display: flex; gap: 20px; align-items: center; justify-content: space-between; }
+.transfer-limit-panel h3, .transfer-limit-panel p { margin: 0; }
+.transfer-limit-panel h3 { color: #263d50; font-size: 13px; }
+.transfer-limit-panel header p, .transfer-limit-meta { margin-top: 5px; color: var(--muted); font-size: 10px; }
+.transfer-limit-panel form { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: end; margin-top: 14px; }
+.transfer-limit-panel label { color: var(--muted); font-size: 9px; }
+.transfer-limit-panel input { display: block; width: 100%; margin-top: 7px; }
 .transfer-balance-panel {
   margin: 18px 0;
   padding: 18px;
@@ -619,6 +633,8 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
   .ops-grid { grid-template-columns: 1fr 1fr; }
   .transfer-form { grid-template-columns: 1fr 1fr 1fr; }
   .transfer-form > div { grid-column: 1 / -1; }
+  .transfer-limit-panel form { grid-template-columns: 1fr 1fr; }
+  .transfer-limit-panel form button { grid-column: 1 / -1; }
   .transfer-balance-panel dl { grid-template-columns: 1fr 1fr; }
   .transfer-balance-panel dl div:nth-child(3n) { border-right: 1px solid var(--line); }
   .transfer-balance-panel dl div:nth-child(2n) { border-right: 0; }
