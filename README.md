@@ -40,6 +40,8 @@ curl -fsSL \
 
 脚本只让 Compose 对外发布 80/443，PostgreSQL 不发布主机端口。DNS、云厂商安全组、固定出口 IP、
 异地备份和交易所 API Key 仍必须由管理员配置。
+备份校验会先完整验证 SHA-256 与 AES-GCM，再静默解析 PostgreSQL archive；`pg_restore --list`
+成功读取 TOC 后提前关闭输入属于正常成功，不会输出整份对象清单或误报 `Broken pipe`。
 
 管理员 TOTP 泄露或设备丢失时，只能在 VPS 终端验证当前管理员密码后轮换；成功会立刻注销全部浏览器
 会话并输出一次性新 URI：

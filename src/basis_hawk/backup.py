@@ -210,21 +210,43 @@ def _pipe_decrypted(path: Path, command: list[str], env: dict[str, str]) -> None
     _verify_checksum(path)
     with path.open("rb") as source, open(os.devnull, "wb") as sink:
         decrypt_stream(source, sink, key)
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
     assert process.stdin is not None
+    completed = False
     try:
-        with path.open("rb") as source:
-            decrypt_stream(source, process.stdin, key)
-        process.stdin.close()
-        if process.wait() != 0:
+        try:
+            with path.open("rb") as source:
+                decrypt_stream(source, process.stdin, key)
+        except BrokenPipeError:
+            # pg_restore --list can finish successfully after reading only the
+            # authenticated archive header and TOC. The complete archive was
+            # already decrypted to the null sink above, including GCM finalization.
+            pass
+        try:
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
+        return_code = process.wait()
+        completed = True
+        if return_code != 0:
             raise BackupError(f"{command[0]} failed with exit code {process.returncode}")
     except BaseException:
-        process.kill()
-        process.wait()
+        if not completed:
+            process.kill()
+            process.wait()
         raise
     finally:
         if not process.stdin.closed:
-            process.stdin.close()
+            try:
+                process.stdin.close()
+            except BrokenPipeError:
+                pass
 
 
 def verify_backup(path: Path) -> None:

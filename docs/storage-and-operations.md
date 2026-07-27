@@ -87,6 +87,10 @@ docker compose exec backup python3 -m basis_hawk.backup verify \
   /backups/basis-hawk-YYYYMMDDTHHMMSSZ-daily.bhbk
 ```
 
+校验先把完整归档解密到空设备以验证 AES-GCM tag，再把同一归档交给静默的 `pg_restore --list` 解析
+TOC。对于包含实际表数据的大归档，`pg_restore --list` 成功取得 TOC 后可能提前关闭标准输入；只有其
+退出码为 0 时才把该 `BrokenPipe` 视为正常，非零退出仍使校验和部署失败。对象清单不会刷满终端。
+
 生产恢复必须先进入维护暂停并停止 `api`、`worker` 和 `backup`，先验证目标归档，再恢复到一个新的空
 数据库。工具默认拒绝非空目标；只有灾难恢复明确要清理当前数据库时，才可同时提供 `--confirmed`
 和 `--clean`。恢复后运行迁移、启动服务并等待完整账户对账，不能直接宣称可交易：

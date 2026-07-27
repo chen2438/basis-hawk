@@ -113,3 +113,56 @@ def test_restore_authenticates_before_starting_database_command(
     monkeypatch.setattr("basis_hawk.backup.subprocess.Popen", unexpected_process)
     with pytest.raises(BackupError, match="authentication failed"):
         _pipe_decrypted(path, ["pg_restore"], os.environ.copy())
+
+
+@pytest.mark.parametrize("return_code", [0, 7])
+def test_pipe_accepts_early_close_only_when_command_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    return_code: int,
+) -> None:
+    key = os.urandom(32)
+    monkeypatch.setenv(
+        "BASIS_HAWK_BACKUP_KEY",
+        base64.urlsafe_b64encode(key).decode(),
+    )
+    path = tmp_path / "valid.bhbk"
+    encrypted = io.BytesIO()
+    encrypt_stream(io.BytesIO(b"archive payload"), encrypted, key)
+    path.write_bytes(encrypted.getvalue())
+    _write_checksum(path)
+
+    class ClosedInput(io.BytesIO):
+        def write(self, value: bytes) -> int:
+            raise BrokenPipeError
+
+    class EarlyExitProcess:
+        def __init__(self) -> None:
+            self.stdin = ClosedInput()
+            self.returncode: int | None = None
+            self.killed = False
+
+        def wait(self) -> int:
+            self.returncode = return_code
+            return return_code
+
+        def kill(self) -> None:
+            self.killed = True
+
+    process = EarlyExitProcess()
+    monkeypatch.setattr(
+        "basis_hawk.backup.subprocess.Popen",
+        lambda *args, **kwargs: process,
+    )
+
+    if return_code == 0:
+        _pipe_decrypted(path, ["pg_restore", "--list"], os.environ.copy())
+        assert process.killed is False
+    else:
+        with pytest.raises(BackupError, match="exit code 7"):
+            _pipe_decrypted(
+                path,
+                ["pg_restore", "--list"],
+                os.environ.copy(),
+            )
+        assert process.killed is False
