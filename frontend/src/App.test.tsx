@@ -76,6 +76,17 @@ describe("Basis Hawk dashboard", () => {
     );
   });
 
+  it("turns an invalidated trade preview into a Chinese retry instruction", () => {
+    expect(apiErrorMessage(
+      "market or configuration changed after trade preview",
+      "操作失败",
+    )).toBe("行情或配置已发生变化，旧预览已失效，请重新生成预览");
+    expect(apiErrorMessage(
+      "trade preview has expired",
+      "操作失败",
+    )).toBe("预览票据已超过 15 秒有效期，请重新生成预览");
+  });
+
   it("renders the read-only Chinese scanner", async () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("资金费机会，一眼看清。")).toBeTruthy());

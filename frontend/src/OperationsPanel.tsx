@@ -509,9 +509,14 @@ function TradesView({
       `确认提交 ${exchangeNames[openTicket.preview.exchange]} ${openTicket.preview.base_asset} 配对开仓？`,
     )) return;
     void action(async () => {
-      const value = await api.confirmOpen(openTicket.id, crypto.randomUUID());
-      setResult(`开仓意图 ${value.intent.id} 已持久化，状态 ${value.intent.status}`);
-      setOpenTicket(null);
+      try {
+        const value = await api.confirmOpen(openTicket.id, crypto.randomUUID());
+        setResult(`开仓意图 ${value.intent.id} 已持久化，状态 ${value.intent.status}`);
+        setOpenTicket(null);
+      } catch (error) {
+        setOpenTicket(null);
+        throw error;
+      }
     });
   };
   const previewClose = (
@@ -534,13 +539,18 @@ function TradesView({
       `确认提交 ${closeTicket.preview.base_asset} ${closeTicket.preview.emergency ? "紧急" : "普通"}配对平仓？`,
     )) return;
     void action(async () => {
-      const value = await api.confirmClose(
-        closeTicket.preview.position_id,
-        closeTicket.id,
-        crypto.randomUUID(),
-      );
-      setResult(`平仓意图 ${value.intent.id} 已持久化，状态 ${value.intent.status}`);
-      setCloseTicket(null);
+      try {
+        const value = await api.confirmClose(
+          closeTicket.preview.position_id,
+          closeTicket.id,
+          crypto.randomUUID(),
+        );
+        setResult(`平仓意图 ${value.intent.id} 已持久化，状态 ${value.intent.status}`);
+        setCloseTicket(null);
+      } catch (error) {
+        setCloseTicket(null);
+        throw error;
+      }
     });
   };
 
