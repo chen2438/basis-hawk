@@ -136,6 +136,61 @@ def test_opening_selects_highest_net_return_that_passes_all_rules() -> None:
     assert evaluation.decision is not None
     assert evaluation.decision.action == "open"
     assert evaluation.decision.opportunity.key == "okx:HIGH"
+    assert evaluation.decision.notional_usdt == Decimal("100")
+
+
+def test_opening_notional_shrinks_to_safe_book_capacity() -> None:
+    now = datetime.now(UTC)
+    opportunity = _opportunity(observed_at=now).model_copy(
+        update={"top_book_notional": Decimal("150")}
+    )
+
+    evaluation = evaluate_automatic_strategy(
+        config=_config(),
+        opportunities=[opportunity],
+        positions=[],
+        daily_realized_pnl=Decimal("0"),
+        now=now,
+    )
+
+    assert evaluation.decision is not None
+    assert evaluation.decision.notional_usdt == Decimal("75")
+
+
+def test_opening_skips_capacity_below_minimum_notional() -> None:
+    now = datetime.now(UTC)
+    opportunity = _opportunity(observed_at=now).model_copy(
+        update={"top_book_notional": Decimal("99")}
+    )
+
+    evaluation = evaluate_automatic_strategy(
+        config=_config(),
+        opportunities=[opportunity],
+        positions=[],
+        daily_realized_pnl=Decimal("0"),
+        now=now,
+    )
+
+    assert evaluation.decision is None
+
+
+def test_opening_notional_shrinks_to_remaining_exposure() -> None:
+    now = datetime.now(UTC)
+    opportunity = _opportunity(observed_at=now)
+
+    evaluation = evaluate_automatic_strategy(
+        config=_config(
+            per_exchange_max_exposure=Decimal("150"),
+            minimum_two_leg_notional=Decimal("25"),
+        ),
+        opportunities=[opportunity],
+        positions=[_position(now=now)],
+        daily_realized_pnl=Decimal("0"),
+        now=now,
+    )
+
+    assert evaluation.decision is not None
+    assert evaluation.decision.notional_usdt == Decimal("50")
 
 
 def test_opening_is_blocked_by_daily_loss_and_concurrency() -> None:
@@ -290,7 +345,11 @@ async def test_automatic_service_plans_once_across_worker_restart() -> None:
     )
     await database.set_execution_control(state="ready", reason="test")
     await database.save_latest_opportunities(
-        [_opportunity(observed_at=now)]
+        [
+            _opportunity(observed_at=now).model_copy(
+                update={"top_book_notional": Decimal("150")}
+            )
+        ]
     )
     await database.replace_instruments(
         "binance",
@@ -325,4 +384,5 @@ async def test_automatic_service_plans_once_across_worker_restart() -> None:
     ) == {"binance:ORDER"}
     recoverable = await database.recoverable_trade_intents()
     assert [item.id for item in recoverable] == [first.intent_id]
+    assert recoverable[0].requested_notional == Decimal("75")
     await database.close()

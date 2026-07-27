@@ -103,6 +103,7 @@ class AutomaticDecision(BaseModel):
     opportunity: Opportunity
     position_id: str | None = None
     reason: str
+    notional_usdt: Decimal | None = None
     estimated_net_pnl_usdt: Decimal | None = None
 
 
@@ -268,7 +269,7 @@ def evaluate_automatic_strategy(
                 closed_at,
             )
 
-    candidates: list[Opportunity] = []
+    candidates: list[tuple[Opportunity, Decimal]] = []
     for opportunity in opportunities:
         if (
             opportunity.exchange not in config.enabled_exchanges
@@ -283,10 +284,6 @@ def evaluate_automatic_strategy(
             or opportunity.apr_7d < config.minimum_apr_7d
             or opportunity.net_return < config.minimum_net_return
             or opportunity.executable_basis > config.maximum_opening_basis
-            or opportunity.top_book_notional
-            < config.notional_per_trade * config.book_capacity_multiple
-            or opportunity.top_book_notional
-            < config.minimum_two_leg_notional
         ):
             continue
         last_closed = last_closed_by_key.get(opportunity.key)
@@ -300,31 +297,37 @@ def evaluate_automatic_strategy(
             opportunity.exchange,
             Decimal("0"),
         )
-        if (
-            exchange_exposure + config.notional_per_trade
-            > config.per_exchange_max_exposure
-            or global_exposure + config.notional_per_trade
-            > config.global_max_exposure
-        ):
+        notional = min(
+            config.notional_per_trade,
+            opportunity.top_book_notional / config.book_capacity_multiple,
+            config.per_exchange_max_exposure - exchange_exposure,
+            config.global_max_exposure - global_exposure,
+        )
+        if notional < config.minimum_two_leg_notional:
             continue
-        candidates.append(opportunity)
+        candidates.append((opportunity, notional))
     if not candidates:
         return AutomaticEvaluation(
             opening_block_reason="no opportunity satisfies every opening rule",
         )
     candidates.sort(
         key=lambda item: (
-            -(item.net_return or Decimal("-Infinity")),
-            -item.current_apr,
-            item.exchange.value,
-            item.base_asset,
+            -(item[0].net_return or Decimal("-Infinity")),
+            -item[0].current_apr,
+            item[0].exchange.value,
+            item[0].base_asset,
         )
     )
+    opportunity, notional = candidates[0]
     return AutomaticEvaluation(
         decision=AutomaticDecision(
             action="open",
-            opportunity=candidates[0],
-            reason="highest-ranked opportunity satisfies every opening rule",
+            opportunity=opportunity,
+            reason=(
+                "highest-ranked opportunity satisfies every opening rule "
+                "at the available bounded notional"
+            ),
+            notional_usdt=notional,
         )
     )
 
@@ -470,10 +473,14 @@ class AutomaticTradingService:
         environment = ExchangeEnvironment(config.environment)
         try:
             if decision.action == "open":
+                if decision.notional_usdt is None:
+                    raise RuntimeError(
+                        "automatic open decision has no bounded notional"
+                    )
                 intent, created = await self.ledger.plan_live_open(
                     opportunity=decision.opportunity,
                     pair=pair,
-                    notional_usdt=config.notional_per_trade,
+                    notional_usdt=decision.notional_usdt,
                     idempotency_key=idempotency_key,
                     settings=settings,
                     environment=environment,

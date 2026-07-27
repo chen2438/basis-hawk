@@ -984,7 +984,7 @@ function AutomationView({
     </div>
     {execution?.state !== "ready" && <p className="loading-note">当前全局执行不是 ready：可以保存新版本，但不能启用或恢复自动交易。</p>}
     <form className="strategy-editor" onSubmit={save}>
-      <header><div><h3>自动策略完整配置</h3><p>比例均填写小数，例如 0.10 表示 10%。每次保存都会创建新版本，不修改历史版本。</p></div>
+      <header><div><h3>自动策略完整配置</h3><p>比例均填写小数，例如 0.10 表示 10%。单笔金额会按盘口容量和剩余敞口在上限内动态缩小；每次保存都会创建新版本。</p></div>
         <button className="button secondary" disabled={busy || !form.enabled_exchanges.length}>保存新版本</button>
       </header>
       <section>
@@ -995,7 +995,7 @@ function AutomationView({
         </div>
       </section>
       <StrategyFields title="资金与仓位" fields={[
-        ["leverage", "杠杆", "number"], ["notional_per_trade", "每笔名义 USDT"], ["per_exchange_max_exposure", "单所最大敞口"],
+        ["leverage", "杠杆", "number"], ["notional_per_trade", "单笔最大名义 USDT"], ["per_exchange_max_exposure", "单所最大敞口"],
         ["global_max_exposure", "全局最大敞口"], ["max_concurrent_positions", "最大并发仓位", "number"],
         ["minimum_two_leg_notional", "两腿最低成交额"], ["book_capacity_multiple", "盘口容量倍数"], ["daily_max_loss", "UTC 日最大亏损"],
       ]} form={form} setDecimal={setDecimal} setInteger={setInteger} />
