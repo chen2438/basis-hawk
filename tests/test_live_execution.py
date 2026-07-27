@@ -611,8 +611,8 @@ async def test_live_compensation_submits_once_with_fresh_protective_price() -> N
                 side="buy",
                 quantity=primary["spot"].quantity,
                 price=Decimal("0.05"),
-                fee_amount=Decimal("0"),
-                fee_asset="",
+                fee_amount=Decimal("1"),
+                fee_asset="ORDER",
                 liquidity="taker",
                 occurred_at=now,
             )
@@ -678,6 +678,7 @@ async def test_live_compensation_submits_once_with_fresh_protective_price() -> N
     assert len(client.placed) == 1
     assert client.placed[0].market == "spot"
     assert client.placed[0].side == "sell"
+    assert client.placed[0].quantity == Decimal("999")
     assert client.placed[0].limit_price < _opportunity().spot_bid
     current = await database.trade_intent(intent_id)
     assert current is not None
