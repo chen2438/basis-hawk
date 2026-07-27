@@ -43,6 +43,18 @@ describe("Basis Hawk dashboard", () => {
           position_mode: null,
           updated_at: "2026-07-27T00:00:00Z",
         }] }
+        : url.includes("accounts/binance/live/snapshot") ? {
+          exchange: "binance",
+          environment: "live",
+          observed_at: "2026-07-27T10:00:00Z",
+          spot_usdt_available: "11.25",
+          perp_usdt_available: "8.5",
+          perp_usdt_equity: "9.75",
+          shared_balance: false,
+          account_mode: "SPOT",
+          position_mode: "hedge",
+          trade_permission: true,
+        }
         : url.includes("trades/positions") ? { items: [] }
         : url.includes("trades/intents") ? { items: [] }
         : url.includes("trades/orders") ? { items: [] }
@@ -222,6 +234,22 @@ describe("Basis Hawk dashboard", () => {
       expect.objectContaining({ method: "PUT" }),
     ));
     confirmation.mockRestore();
+  });
+
+  it("shows the selected exchange spot and perpetual balances on the transfer page", async () => {
+    render(<App />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "内部划转" }));
+    expect(await screen.findByRole("region", { name: "划转账户余额" })).toBeTruthy();
+    await waitFor(() => expect(screen.getByText("11.25 USDT")).toBeTruthy());
+    expect(screen.getByText("8.5 USDT")).toBeTruthy();
+    expect(screen.getByText("9.75 USDT")).toBeTruthy();
+    expect(screen.getByText("本次来源账户")).toBeTruthy();
+    expect(screen.getByText("独立余额")).toBeTruthy();
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/accounts/binance/live/snapshot",
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
   });
 
   it("shows every automatic strategy risk group without enabling by default", async () => {

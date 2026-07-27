@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import type {
   AccountSnapshot,
@@ -724,6 +724,30 @@ function TransfersView({
     direction: "spot_to_perp" as "spot_to_perp" | "perp_to_spot",
     amount: "",
   });
+  const [snapshot, setSnapshot] = useState<AccountSnapshot | null>(null);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
+  const [snapshotLoading, setSnapshotLoading] = useState(true);
+  const snapshotRequest = useRef(0);
+  const loadSnapshot = useCallback(async () => {
+    const requestId = snapshotRequest.current + 1;
+    snapshotRequest.current = requestId;
+    setSnapshot(null);
+    setSnapshotError(null);
+    setSnapshotLoading(true);
+    try {
+      const value = await api.accountSnapshot(form.exchange, form.environment);
+      if (snapshotRequest.current === requestId) setSnapshot(value);
+    } catch (reason) {
+      if (snapshotRequest.current === requestId) {
+        setSnapshotError(reason instanceof Error ? reason.message : "余额读取失败");
+      }
+    } finally {
+      if (snapshotRequest.current === requestId) setSnapshotLoading(false);
+    }
+  }, [form.environment, form.exchange]);
+  useEffect(() => {
+    void loadSnapshot();
+  }, [loadSnapshot]);
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (!window.confirm(`确认在 ${exchangeNames[form.exchange]} 内部划转 ${form.amount} USDT？提交后全局交易会暂停。`)) return;
@@ -736,6 +760,48 @@ function TransfersView({
     }, crypto.randomUUID()));
   };
   return <>
+    <section className="transfer-balance-panel" aria-label="划转账户余额">
+      <header>
+        <div>
+          <h3>{exchangeNames[form.exchange]} {form.environment === "live" ? "LIVE 实盘" : "SANDBOX"} 账户余额</h3>
+          <p>余额随交易所和环境切换自动刷新；提交划转前请再次核对来源账户可用余额。</p>
+        </div>
+        <button className="button secondary" type="button" disabled={snapshotLoading} onClick={() => void loadSnapshot()}>
+          {snapshotLoading ? "读取中…" : "刷新余额"}
+        </button>
+      </header>
+      {snapshotError && <div className="transfer-balance-error">无法读取余额：{snapshotError}</div>}
+      {snapshot && <dl>
+        <div className={form.direction === "spot_to_perp" ? "source" : ""}>
+          <dt>现货可用</dt>
+          <dd>{amount(snapshot.spot_usdt_available)} USDT</dd>
+          {form.direction === "spot_to_perp" && <span>本次来源账户</span>}
+        </div>
+        <div className={form.direction === "perp_to_spot" ? "source" : ""}>
+          <dt>永续可用</dt>
+          <dd>{amount(snapshot.perp_usdt_available)} USDT</dd>
+          {form.direction === "perp_to_spot" && <span>本次来源账户</span>}
+        </div>
+        <div>
+          <dt>永续权益</dt>
+          <dd>{amount(snapshot.perp_usdt_equity)} USDT</dd>
+        </div>
+        <div>
+          <dt>账户结构</dt>
+          <dd>{snapshot.shared_balance ? "共享余额" : "独立余额"}</dd>
+        </div>
+        <div>
+          <dt>账户模式</dt>
+          <dd>{snapshot.account_mode}</dd>
+        </div>
+        <div>
+          <dt>读取时间</dt>
+          <dd>{time(snapshot.observed_at)}</dd>
+        </div>
+      </dl>}
+      {!snapshot && !snapshotError && <div className="transfer-balance-loading">正在读取现货与永续账户余额…</div>}
+      {snapshot?.shared_balance && <p className="transfer-balance-warning">该交易所账户使用共享余额，无需在现货与永续之间内部划转。</p>}
+    </section>
     <form className="ops-form transfer-form" onSubmit={submit}>
       <div><h3>新建 USDT 内部划转</h3><p>仅同所现货与 USDT 永续；不支持提现、地址、链或跨账户目标。</p></div>
       <select value={form.exchange} onChange={(event) => setForm({ ...form, exchange: event.target.value as Exchange })}>{exchanges.map((item) => <option key={item} value={item}>{exchangeNames[item]}</option>)}</select>

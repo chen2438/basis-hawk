@@ -531,6 +531,36 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
 .form-grid.compact select { display: block; width: 100%; margin-top: 7px; }
 .transfer-form { display: grid; grid-template-columns: 2fr repeat(3, 1fr) 1fr auto; gap: 10px; align-items: center; }
 .transfer-form h3, .transfer-form p { margin: 0 0 5px; }
+.transfer-balance-panel {
+  margin: 18px 0;
+  padding: 18px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.transfer-balance-panel > header { display: flex; gap: 20px; align-items: center; justify-content: space-between; }
+.transfer-balance-panel h3, .transfer-balance-panel p { margin: 0; }
+.transfer-balance-panel h3 { color: #263d50; font-size: 13px; }
+.transfer-balance-panel header p { margin-top: 5px; color: var(--muted); font-size: 10px; }
+.transfer-balance-panel dl {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 14px 0 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.transfer-balance-panel dl div { min-width: 0; padding: 12px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.transfer-balance-panel dl div:nth-child(3n) { border-right: 0; }
+.transfer-balance-panel dl div:nth-last-child(-n + 3) { border-bottom: 0; }
+.transfer-balance-panel dl div.source { background: #edf9f6; box-shadow: inset 3px 0 0 var(--accent); }
+.transfer-balance-panel dt { color: var(--muted); font-size: 9px; }
+.transfer-balance-panel dd { margin: 5px 0 0; overflow-wrap: anywhere; color: #263d50; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.transfer-balance-panel dl span { display: block; margin-top: 5px; color: var(--accent-dark); font-size: 8px; }
+.transfer-balance-loading, .transfer-balance-error { margin-top: 14px; padding: 13px; border-radius: 6px; font-size: 10px; }
+.transfer-balance-loading { color: var(--muted); background: #f8fbfa; }
+.transfer-balance-error { color: #a6293b; background: var(--red-soft); border: 1px solid #f0b3bd; }
+.transfer-balance-panel .transfer-balance-warning { margin-top: 10px; color: #8a6118; font-size: 10px; }
 .trade-form { display: grid; grid-template-columns: 2fr repeat(6, 1fr) auto; gap: 10px; align-items: end; }
 .trade-form h3, .trade-form p { margin: 0 0 5px; }
 .trade-form label { color: var(--muted); font-size: 9px; }
@@ -589,6 +619,11 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
   .ops-grid { grid-template-columns: 1fr 1fr; }
   .transfer-form { grid-template-columns: 1fr 1fr 1fr; }
   .transfer-form > div { grid-column: 1 / -1; }
+  .transfer-balance-panel dl { grid-template-columns: 1fr 1fr; }
+  .transfer-balance-panel dl div:nth-child(3n) { border-right: 1px solid var(--line); }
+  .transfer-balance-panel dl div:nth-child(2n) { border-right: 0; }
+  .transfer-balance-panel dl div:nth-last-child(-n + 3) { border-bottom: 1px solid var(--line); }
+  .transfer-balance-panel dl div:nth-last-child(-n + 2) { border-bottom: 0; }
   .trade-form { grid-template-columns: repeat(3, 1fr); }
   .trade-form > div { grid-column: 1 / -1; }
   .strategy-field-grid { grid-template-columns: repeat(2, 1fr); }
