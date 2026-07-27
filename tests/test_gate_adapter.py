@@ -73,6 +73,28 @@ def handler(request: httpx.Request) -> httpx.Response:
                 }
             ],
         )
+    if path == "/spot/order_book":
+        assert request.url.params["currency_pair"] == "BTC_USDT"
+        assert request.url.params["limit"] == "1"
+        return httpx.Response(
+            200,
+            json={
+                "current": 1785158436760,
+                "asks": [["100.5", "1.5"]],
+                "bids": [["99.5", "2.5"]],
+            },
+        )
+    if path == "/futures/usdt/order_book":
+        assert request.url.params["contract"] == "BTC_USDT"
+        assert request.url.params["limit"] == "1"
+        return httpx.Response(
+            200,
+            json={
+                "current": 1785158438.712,
+                "asks": [{"p": "102.5", "s": -2000}],
+                "bids": [{"p": "101.5", "s": 3000}],
+            },
+        )
     if path == "/futures/usdt/funding_rate":
         return httpx.Response(
             200,
@@ -96,6 +118,7 @@ async def test_gate_normalizes_public_responses() -> None:
     adapter._contracts = {}
     pairs = await adapter.instruments()
     quotes = await adapter.quotes(pairs)
+    executable = await adapter.executable_quote(pairs[0], quotes[0])
     current = await adapter.current_funding(pairs)
     history = await adapter.funding_history(
         pairs[0],
@@ -109,6 +132,10 @@ async def test_gate_normalizes_public_responses() -> None:
     assert str(pairs[0].perp_base_quantity_increment) == "0.001"
     assert str(quotes[0].perp_bid_qty) == "3.000"
     assert str(quotes[0].perp_quote_volume_24h) == "3000000"
+    assert str(executable.spot_ask_qty) == "1.5"
+    assert str(executable.perp_bid_qty) == "3.000"
+    assert str(executable.spot_ask) == "100.5"
+    assert str(executable.perp_bid) == "101.5"
     assert str(current[0].interval_hours) == "4"
     assert history[0].settled is True
     await client.aclose()

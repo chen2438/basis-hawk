@@ -10,6 +10,7 @@ from basis_hawk.exchanges.base import (
     PublicClient,
     as_list,
     decimal_increment,
+    decimal_or_zero,
 )
 from basis_hawk.models import Exchange, FundingObservation, InstrumentPair, MarketQuote
 
@@ -141,6 +142,85 @@ class GateAdapter(ExchangeAdapter):
             except (InvalidOperation, KeyError, TypeError, ValueError):
                 continue
         return results
+
+    async def executable_quote(
+        self,
+        pair: InstrumentPair,
+        quote: MarketQuote,
+    ) -> MarketQuote:
+        spot_payload, perp_payload = await asyncio.gather(
+            self.http.get(
+                "/spot/order_book",
+                currency_pair=pair.spot_symbol,
+                limit=1,
+                with_id="true",
+            ),
+            self.http.get(
+                "/futures/usdt/order_book",
+                contract=pair.perp_symbol,
+                limit=1,
+                with_id="true",
+            ),
+        )
+        if not isinstance(spot_payload, dict) or not isinstance(perp_payload, dict):
+            raise RuntimeError("Gate executable order book is unavailable")
+        spot_bids = spot_payload.get("bids")
+        spot_asks = spot_payload.get("asks")
+        perp_bids = perp_payload.get("bids")
+        perp_asks = perp_payload.get("asks")
+        if not all(
+            isinstance(levels, list) and levels
+            for levels in (spot_bids, spot_asks, perp_bids, perp_asks)
+        ):
+            raise RuntimeError("Gate executable order book is unavailable")
+        try:
+            spot_bid = Decimal(str(spot_bids[0][0]))
+            spot_bid_qty = Decimal(str(spot_bids[0][1]))
+            spot_ask = Decimal(str(spot_asks[0][0]))
+            spot_ask_qty = Decimal(str(spot_asks[0][1]))
+            perp_bid = Decimal(str(perp_bids[0]["p"]))
+            perp_bid_qty = abs(Decimal(str(perp_bids[0]["s"]))) * pair.perp_contract_size
+            perp_ask = Decimal(str(perp_asks[0]["p"]))
+            perp_ask_qty = abs(Decimal(str(perp_asks[0]["s"]))) * pair.perp_contract_size
+        except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("Gate executable order book is unavailable") from exc
+        if min(
+            spot_bid,
+            spot_bid_qty,
+            spot_ask,
+            spot_ask_qty,
+            perp_bid,
+            perp_bid_qty,
+            perp_ask,
+            perp_ask_qty,
+        ) <= 0:
+            raise RuntimeError("Gate executable order book is unavailable")
+        observed_at = datetime.now(UTC)
+        timestamps = (
+            decimal_or_zero(spot_payload.get("current")),
+            decimal_or_zero(perp_payload.get("current")),
+        )
+        latest_timestamp = max(timestamps)
+        if latest_timestamp > 0:
+            if latest_timestamp > Decimal("100000000000"):
+                latest_timestamp /= Decimal("1000")
+            try:
+                observed_at = datetime.fromtimestamp(float(latest_timestamp), tz=UTC)
+            except (OverflowError, OSError, ValueError):
+                pass
+        return quote.model_copy(
+            update={
+                "observed_at": observed_at,
+                "spot_bid": spot_bid,
+                "spot_bid_qty": spot_bid_qty,
+                "spot_ask": spot_ask,
+                "spot_ask_qty": spot_ask_qty,
+                "perp_bid": perp_bid,
+                "perp_bid_qty": perp_bid_qty,
+                "perp_ask": perp_ask,
+                "perp_ask_qty": perp_ask_qty,
+            }
+        )
 
     async def current_funding(
         self, pairs: list[InstrumentPair]

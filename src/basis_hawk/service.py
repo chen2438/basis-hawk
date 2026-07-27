@@ -275,6 +275,24 @@ class ScannerService:
     ) -> InstrumentPair | None:
         return self._pair(f"{exchange.value}:{base_asset.strip().upper()}")
 
+    async def executable_opportunity(
+        self,
+        exchange: Exchange,
+        base_asset: str,
+    ) -> Opportunity | None:
+        key = f"{exchange.value}:{base_asset.strip().upper()}"
+        opportunity = self.opportunities.get(key)
+        pair = self._pair(key)
+        quote = self.quotes.get(key)
+        adapter = self.adapters.get(exchange)
+        if opportunity is None or pair is None or quote is None or adapter is None:
+            return opportunity
+        executable_quote = await adapter.executable_quote(pair, quote)
+        if executable_quote != quote:
+            self.quotes[key] = executable_quote
+            self._rebuild(key)
+        return self.opportunities.get(key)
+
     def _rebuild(self, key: str) -> None:
         pair = self._pair(key)
         if not pair or key not in self.quotes or key not in self.current:

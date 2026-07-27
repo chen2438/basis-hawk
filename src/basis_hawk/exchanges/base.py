@@ -59,6 +59,14 @@ class ExchangeAdapter(ABC):
     @abstractmethod
     async def quotes(self, pairs: list[InstrumentPair]) -> list[MarketQuote]: ...
 
+    async def executable_quote(
+        self,
+        pair: InstrumentPair,
+        quote: MarketQuote,
+    ) -> MarketQuote:
+        """Return a quote with executable best-level quantities when extra I/O is needed."""
+        return quote
+
     @abstractmethod
     async def current_funding(self, pairs: list[InstrumentPair]) -> list[FundingObservation]: ...
 

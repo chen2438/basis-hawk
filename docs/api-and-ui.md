@@ -59,6 +59,8 @@
   买回计划纸面平仓，同样要求 UUID `Idempotency-Key`。
 - `POST /api/trades/open/preview`：为已配置凭据的 `sandbox`/`live` 账户生成 15 秒真实开仓预览票据，
   返回双腿参考价/保护价、原生数量、合约乘数、预计费用、现货余额需求、永续保证金需求及最坏基差。
+  Gate 因批量 ticker 不返回现货最优档数量，会在预览和确认时只为当前所选标的即时读取现货与
+  USDT 永续一档订单簿；两腿较小容量不足、订单簿为空或读取失败时不会创建或确认票据。
 - `POST /api/trades/open/confirm`：请求体必须对预览票据显式发送 `confirmed=true`，同时提供 UUID
   `Idempotency-Key`；仅在全局执行状态为 `ready` 且票据仍匹配当前行情时持久化真实 `planned` 意图。
 - `POST /api/trades/positions/{uuid}/close/preview`：为既有 `sandbox`/`live` 配对仓位生成 15 秒

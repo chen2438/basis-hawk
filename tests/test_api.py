@@ -284,6 +284,16 @@ async def test_live_open_requires_persisted_preview_and_confirmation() -> None:
     await service.initialize()
     service.opportunities["binance:BTC"] = opportunity()
     service.pairs[Exchange.BINANCE] = [instrument_pair()]
+    executable_quote_requests: list[tuple[Exchange, str]] = []
+
+    async def executable_opportunity(
+        exchange: Exchange,
+        base_asset: str,
+    ) -> Opportunity | None:
+        executable_quote_requests.append((exchange, base_asset))
+        return service.opportunities.get(f"{exchange.value}:{base_asset}")
+
+    service.executable_opportunity = executable_opportunity  # type: ignore[method-assign]
     credentials = CredentialService(
         database,
         SecretCipher(SecretCipher.generate_key()),
@@ -324,6 +334,7 @@ async def test_live_open_requires_persisted_preview_and_confirmation() -> None:
             },
         )
         assert preview_response.status_code == 200
+        assert executable_quote_requests == [(Exchange.BINANCE, "BTC")]
         preview_id = preview_response.json()["preview_id"]
         preview = preview_response.json()["preview"]
         assert "request_fingerprint" not in preview

@@ -3,8 +3,10 @@
 Binance、OKX、MEXC、Bybit、Bitget、Gate 适配器只访问各所官方公共 REST API，并输出共同的
 `InstrumentPair`、`MarketQuote` 和 `FundingObservation`。只接受状态正常、现货计价为 USDT、
 永续计价与结算均为 USDT 的线性永续。Bybit 线性目录必须游标翻页，因为默认页不足以覆盖全部合约。
-Gate 批量现货 ticker 不返回最优档数量，当前公共 REST 扫描将该腿最优档容量记为未知（0）；
-后续交易行情层必须用订单簿 WebSocket 填充容量，未知容量不得用于自动下单。
+Gate 批量现货 ticker 不返回最优档数量，公共 REST 排名仍将该腿最优档容量记为未知（0）；
+手动实盘开仓预览和确认会为唯一所选标的即时读取现货与 USDT 永续一档订单簿，按永续合约乘数换算
+基础币数量并计算可执行容量。订单簿缺失、读取失败或容量不足时继续阻断。自动策略不会用这种按需
+快照补足全市场容量，Gate 自动开仓仍要求未来常驻订单簿流提供可审计的新鲜容量。
 
 候选池先要求两腿 24 小时 USDT 成交额均达到 `minimum_quote_volume`（默认 1,000,000 USDT），
 再按 `min(spot_quote_volume_24h, perp_quote_volume_24h)` 降序确定，默认每所最多保留 500 个共同标的。

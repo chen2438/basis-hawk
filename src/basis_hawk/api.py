@@ -1188,9 +1188,16 @@ def create_app(
                 detail="exchange credential is not configured",
             )
         base_asset = value.base_asset.strip().upper()
-        opportunity = scanner.opportunities.get(
-            f"{value.exchange.value}:{base_asset}"
-        )
+        try:
+            opportunity = await scanner.executable_opportunity(
+                value.exchange,
+                base_asset,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="executable top-of-book data is unavailable",
+            ) from exc
         if opportunity is None:
             raise HTTPException(
                 status_code=404,
@@ -1288,9 +1295,16 @@ def create_app(
                 status_code=409,
                 detail="exchange credential is not configured",
             )
-        opportunity = scanner.opportunities.get(
-            f"{exchange.value}:{stored.base_asset}"
-        )
+        try:
+            opportunity = await scanner.executable_opportunity(
+                exchange,
+                stored.base_asset,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="executable top-of-book data is unavailable",
+            ) from exc
         pair = scanner.instrument_pair(exchange, stored.base_asset)
         if opportunity is None or pair is None:
             raise HTTPException(

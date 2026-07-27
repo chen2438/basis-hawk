@@ -50,6 +50,15 @@ class FakeAdapter(ExchangeAdapter):
             )
         ]
 
+    async def executable_quote(self, pair, quote):
+        return quote.model_copy(
+            update={
+                "observed_at": datetime.now(UTC),
+                "spot_ask_qty": Decimal("7"),
+                "perp_bid_qty": Decimal("6"),
+            }
+        )
+
     async def current_funding(self, pairs):
         return [
             FundingObservation(
@@ -92,6 +101,9 @@ async def test_refreshes_and_recalculates() -> None:
     result = service.list_opportunities()[0]
     assert result.base_asset == "BTC"
     assert result.net_return is not None
+    executable = await service.executable_opportunity(Exchange.BINANCE, "BTC")
+    assert executable is not None
+    assert executable.top_book_notional == Decimal("606")
     persisted = await database.latest_opportunities(
         exchanges={Exchange.BINANCE.value}
     )
