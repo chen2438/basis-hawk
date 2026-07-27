@@ -522,9 +522,10 @@ class BinanceAccountClient(PrivateAccountClient):
         )
 
     async def snapshot(self) -> AccountSnapshot:
-        spot, perp, mode = await _gather(
+        spot, perp, configuration, mode = await _gather(
             self._get(self.spot, "/api/v3/account"),
             self._get(self.perp, "/fapi/v3/account"),
+            self._get(self.perp, "/fapi/v1/accountConfig"),
             self._get(self.perp, "/fapi/v1/positionSide/dual"),
         )
         spot_usdt = next(
@@ -551,7 +552,8 @@ class BinanceAccountClient(PrivateAccountClient):
                 if mode.get("dualSidePosition") is True
                 else PositionMode.ONE_WAY
             ),
-            trade_permission=bool(spot.get("canTrade")) and bool(perp.get("canTrade")),
+            trade_permission=bool(spot.get("canTrade"))
+            and bool(configuration.get("canTrade")),
         )
 
     async def submit_internal_transfer(

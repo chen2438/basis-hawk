@@ -115,12 +115,13 @@ async def test_binance_account_snapshot_and_signature() -> None:
             SECRETS.api_secret,
             _query_without_signature(request),
         )
+        if request.url.path == "/fapi/v1/accountConfig":
+            return httpx.Response(200, json={"canTrade": True})
         if request.url.path == "/fapi/v1/positionSide/dual":
             return httpx.Response(200, json={"dualSidePosition": False})
         return httpx.Response(
             200,
             json={
-                "canTrade": True,
                 "assets": [
                     {
                         "asset": "USDT",
@@ -151,6 +152,50 @@ async def test_binance_account_snapshot_and_signature() -> None:
     assert snapshot.perp_usdt_available == 8.5
     assert snapshot.position_mode == PositionMode.ONE_WAY
     assert snapshot.trade_permission is True
+    await spot.aclose()
+    await perp.aclose()
+
+
+async def test_binance_requires_futures_account_configuration_trade_permission() -> None:
+    def spot_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "canTrade": True,
+                "accountType": "SPOT",
+                "balances": [{"asset": "USDT", "free": "12.5"}],
+            },
+        )
+
+    def perp_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/fapi/v1/accountConfig":
+            return httpx.Response(200, json={"canTrade": False})
+        if request.url.path == "/fapi/v1/positionSide/dual":
+            return httpx.Response(200, json={"dualSidePosition": False})
+        return httpx.Response(
+            200,
+            json={
+                "canTrade": True,
+                "assets": [{"asset": "USDT", "availableBalance": "8.5"}],
+            },
+        )
+
+    spot = httpx.AsyncClient(
+        transport=httpx.MockTransport(spot_handler),
+        base_url="https://spot.test",
+    )
+    perp = httpx.AsyncClient(
+        transport=httpx.MockTransport(perp_handler),
+        base_url="https://perp.test",
+    )
+    client = BinanceAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        spot_client=spot,
+        perp_client=perp,
+    )
+    snapshot = await client.snapshot()
+    assert snapshot.trade_permission is False
     await spot.aclose()
     await perp.aclose()
 

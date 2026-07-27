@@ -101,7 +101,9 @@ AES-GCM 关联数据加密；响应、审计事件和日志均不得包含 API S
 签名参数或响应原文的脱敏错误。MEXC 和 Gate 没有满足同所现货+USDT 永续完整验收要求的沙盒，
 其 `sandbox` 快照明确返回不支持，不会回退到实盘地址。Bybit V5 不直接返回无持仓标的的全局持仓模式，
 因此当前快照如实返回 `unknown`；模式未知时后续状态机必须禁止下单，不能按默认值猜测。
-OKX 快照从账户配置的 `perm` 确认 `trade`；Bybit 从当前 API Key 信息同时确认非只读、SpotTrade
+Binance 快照从现货账户的 `canTrade` 和独立的永续 `/fapi/v1/accountConfig` 配置共同确认双腿权限；
+永续 V3 账户响应只用于余额/权益，不从其已移除的配置字段猜测权限。OKX 快照从账户配置的 `perm`
+确认 `trade`；Bybit 从当前 API Key 信息同时确认非只读、SpotTrade
 和 ContractTrade Order 权限。缺少权限返回 `false`，接口未提供字段则保持 `unknown`。
 Bitget UTA 从 `/api/v3/account/info` 要求 `permType=read-and-write`，并同时具有 `uta_trade` 与
 `uta_mgt`；Classic 从 `/api/v2/spot/account/info` 同时要求现货交易、合约订单和合约持仓写权限。

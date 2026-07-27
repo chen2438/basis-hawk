@@ -130,7 +130,9 @@ sudo docker compose --env-file .env run --rm api \
 同一交易所、同一环境只保存一个账户配置；替换和删除都会写入不含秘密值的审计事件。API 读取只能返回
 Key 掩码，私有适配器在进程内按需解密，不能把解密结果缓存到数据库或发送给前端。
 私有请求的签名查询串必须和实际发送顺序完全一致；异常消息禁止包含完整 URL，因为查询参数可能带签名。
-OKX 账户快照读取当前 Key 的 `perm`，只有包含 `trade` 才确认可交易；Bybit 额外调用当前 Key 信息，
+Binance 账户快照用现货账户的 `canTrade` 与永续 `/fapi/v1/accountConfig` 的 `canTrade` 共同确认
+双腿权限；`/fapi/v3/account` 继续只用于余额和权益，不能读取其已移除的配置字段。OKX 账户快照读取
+当前 Key 的 `perm`，只有包含 `trade` 才确认可交易；Bybit 额外调用当前 Key 信息，
 要求 `readOnly=0`、现货含 `SpotTrade` 且合约含 `Order`。明确只读或缺任一权限写为 `false`，响应
 缺字段则写为 `unknown`，不能把成功读取余额等同于具有双腿写权限。
 Bitget UTA 读取无需额外权限的当前账号信息，要求 Key 为读写且同时有 `uta_trade`、`uta_mgt`；
