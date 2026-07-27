@@ -103,17 +103,17 @@ printf '%s\n' \
     "action=update" \
     "target_commit=${available_commit}" >"${temporary}"
 chmod 0600 "${temporary}"
-ln "${temporary}" "${REQUEST_FILE}" || exit 0
 
 if ! docker compose \
     --project-directory "${PROJECT_DIRECTORY}" \
     --env-file "${PROJECT_DIRECTORY}/.env" \
     run --rm --no-deps api \
     basis-hawk update-prepare --target "${available_commit}"; then
-    rm -f -- "${REQUEST_FILE}"
     exit 0
 fi
 
 flock -u 9
 exec 9>&-
+systemctl reset-failed basis-hawk-update.service || true
+ln "${temporary}" "${REQUEST_FILE}" || exit 0
 systemctl start --no-block basis-hawk-update.service

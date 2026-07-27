@@ -185,6 +185,7 @@ esac
     docker_command.write_text(
         "#!/usr/bin/env bash\n"
         "printf '%s\\n' \"$*\" >\"$FAKE_DOCKER_LOG\"\n"
+        "[[ ! -e \"$FAKE_REQUEST_FILE\" ]] || exit 97\n"
         "exit \"${FAKE_PREPARE_RESULT:-0}\"\n",
         encoding="utf-8",
     )
@@ -202,6 +203,7 @@ esac
         "BASIS_HAWK_UPDATER_LOCK_FILE": str(tmp_path / "update.lock"),
         "BASIS_HAWK_AUTO_UPDATE_REQUEST_ID": str(uuid4()),
         "FAKE_DOCKER_LOG": str(docker_log),
+        "FAKE_REQUEST_FILE": str(request_directory / "request"),
     }
 
     approved = subprocess.run(
