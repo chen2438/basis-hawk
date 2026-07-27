@@ -32,13 +32,15 @@
 
 - `GET /api/accounts/credentials`：仅返回交易所、环境、标签、更新时间和 API Key 掩码；
 - `PUT /api/accounts/{exchange}/{sandbox|live}/credentials`：保存或替换 API Key、Secret，
-  OKX/Bitget 还必须提供 passphrase；
-- `DELETE /api/accounts/{exchange}/{sandbox|live}/credentials`：删除本地加密凭据。
+  OKX/Bitget 还必须提供 passphrase；成功写入前先请求全量安全对账，worker 会在运行中自动替换对应
+  私有流，不需要重启；
+- `DELETE /api/accounts/{exchange}/{sandbox|live}/credentials`：删除本地加密凭据，并自动停止对应
+  私有流后重新对账。
 - `GET /api/accounts/{exchange}/{sandbox|live}/snapshot`：按需解密凭据并从交易所读取 USDT
   现货可用余额、永续可用余额/权益、账户类型和持仓模式；响应仍不包含任何凭据。
 - `PUT /api/accounts/bybit/{sandbox|live}/position-mode`：要求 `confirmed=true`，只更新既有加密
   凭据中的单向/双向模式声明，不需要重新输入 Key，也不会修改交易所设置；用于 Bybit 空子账户不返回
-  `positionIdx` 时完成只读能力声明。
+  `positionIdx` 时完成只读能力声明；更新后同样热重载 Bybit 私有流并重新对账。
 - `GET /api/system/execution`：读取 worker 的全局执行阻断状态，以及各账户最近一次启动对账状态、
   私有流就绪状态、远端结果完整性、挂单数和仓位数。
 - `POST /api/trades/paper/open`：使用当前健康机会持久化纸面开仓意图和现货买入/永续卖出双腿；
@@ -157,6 +159,9 @@ Bybit 游标会读取到末页；其余接口一旦达到单页上限或交易�
 订单/成交/仓位三类订阅全部成功且最近心跳不超过 30 秒时为 `true`。Binance、OKX、Bybit、Bitget、
 Gate LIVE 与 MEXC LIVE 的认证连接均已装配到常驻 worker。任一私有事件会合并唤醒同一执行器锁内的
 严格 REST 对账，快速更新订单、成交和仓位账本；固定周期对账仍作为漏事件与断线恢复路径。
+worker 还会每秒比较当前凭据的交易所、环境和更新时间：新凭据启动新连接，替换凭据先关闭旧连接再用
+新密钥建立连接，删除凭据关闭并移除连接。凭据变化先把非暂停状态置为 `reconciling`，连接成功或断开
+都会立即唤醒对账；既有 `paused` 原因不会被凭据操作覆盖。
 当全部已配置账户的余额、交易权限、持仓模式、远端挂单/成交/仓位关联以及私有流新鲜度都通过时，
 worker 才会把账户项和全局状态置为 `ready`；任一账户失败或阻断都会保持 `blocked`，已有的
 `paused` 安全状态优先且不会被普通对账清除。

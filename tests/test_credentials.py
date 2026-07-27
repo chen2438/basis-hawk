@@ -35,6 +35,58 @@ async def test_credential_service_requires_exchange_passphrase() -> None:
     await database.close()
 
 
+async def test_credential_changes_request_reconciliation_without_clearing_pause() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    service = CredentialService(database, SecretCipher(SecretCipher.generate_key()))
+    await database.set_execution_control(state="ready", reason="test ready")
+
+    await service.save(
+        exchange=Exchange.GATE,
+        environment=ExchangeEnvironment.LIVE,
+        label="primary",
+        secrets=ExchangeSecrets(
+            api_key="gate-api-key",
+            api_secret="gate-api-secret",
+        ),
+        actor="admin",
+    )
+    control = await database.execution_control()
+    assert control is not None
+    assert control.state == "reconciling"
+    assert control.reason == "exchange credential configuration changed"
+
+    await database.set_execution_control(state="paused", reason="manual review")
+    await service.save(
+        exchange=Exchange.GATE,
+        environment=ExchangeEnvironment.LIVE,
+        label="replacement",
+        secrets=ExchangeSecrets(
+            api_key="new-gate-api-key",
+            api_secret="new-gate-api-secret",
+        ),
+        actor="admin",
+    )
+    control = await database.execution_control()
+    assert control is not None
+    assert control.state == "paused"
+    assert control.reason == "manual review"
+
+    assert (
+        await service.delete(
+            Exchange.GATE,
+            ExchangeEnvironment.LIVE,
+            actor="admin",
+        )
+        is True
+    )
+    control = await database.execution_control()
+    assert control is not None
+    assert control.state == "paused"
+    assert control.reason == "manual review"
+    await database.close()
+
+
 async def test_credential_api_never_echoes_plaintext() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     scanner = ScannerService(database, {})

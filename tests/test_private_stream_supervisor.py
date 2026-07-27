@@ -48,6 +48,7 @@ async def test_supervisor_tracks_events_and_disconnects_fail_closed() -> None:
     await database.initialize()
     registry = PrivateStreamRegistry(database)
     seen: list[object] = []
+    states: list[bool] = []
 
     async def on_event(connection: FakeConnection, event: object) -> None:
         assert connection.exchange == Exchange.BYBIT
@@ -57,6 +58,7 @@ async def test_supervisor_tracks_events_and_disconnects_fail_closed() -> None:
         registry,
         receive_timeout_seconds=0.01,
         event_handler=on_event,
+        state_handler=lambda _connection, connected: states.append(connected),
     )
     connection = FakeConnection([{"topic": "order"}, RuntimeError("closed")])
 
@@ -64,6 +66,7 @@ async def test_supervisor_tracks_events_and_disconnects_fail_closed() -> None:
         await supervisor.run_connection_once(connection)
 
     assert seen == [{"topic": "order"}]
+    assert states == [True, False]
     assert connection.connected is True
     assert connection.closed is True
     state = await database.private_stream_state(

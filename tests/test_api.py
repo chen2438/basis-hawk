@@ -298,6 +298,10 @@ async def test_live_open_requires_persisted_preview_and_confirmation() -> None:
         ),
         actor="test",
     )
+    await database.set_execution_control(
+        state="ready",
+        reason="credential reconciliation passed",
+    )
     app = create_app(
         service,
         manage_lifecycle=False,
@@ -657,6 +661,10 @@ async def test_internal_transfer_api_requires_confirmation_and_is_idempotent(
             api_secret="test-api-secret",
         ),
         actor="test",
+    )
+    await database.set_execution_control(
+        state="ready",
+        reason="credential reconciliation passed",
     )
     app = create_app(
         service,

@@ -1046,6 +1046,40 @@ class Database:
                 row.updated_at = now
             await session.commit()
 
+    async def request_execution_reconciliation(self, *, reason: str) -> None:
+        async with self.sessions() as session:
+            await self._request_execution_reconciliation_in_session(
+                session,
+                reason=reason,
+            )
+            await session.commit()
+
+    async def _request_execution_reconciliation_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        reason: str,
+    ) -> None:
+        row = await session.scalar(
+            select(ExecutionControlRow)
+            .where(ExecutionControlRow.id == 1)
+            .with_for_update()
+        )
+        now = datetime.now(UTC)
+        if row is None:
+            session.add(
+                ExecutionControlRow(
+                    id=1,
+                    state="reconciling",
+                    reason=reason,
+                    updated_at=now,
+                )
+            )
+        elif row.state != "paused":
+            row.state = "reconciling"
+            row.reason = reason
+            row.updated_at = now
+
     async def execution_control(self) -> ExecutionControlRow | None:
         async with self.sessions() as session:
             return await session.get(ExecutionControlRow, 1)
@@ -4444,6 +4478,7 @@ class Database:
         ciphertext: str,
         nonce: str,
         key_version: int,
+        reconciliation_reason: str | None = None,
     ) -> ExchangeCredentialRow:
         async with self.sessions() as session:
             row = await session.scalar(
@@ -4474,6 +4509,11 @@ class Database:
                     updated_at=now,
                 )
                 session.add(row)
+            if reconciliation_reason is not None:
+                await self._request_execution_reconciliation_in_session(
+                    session,
+                    reason=reconciliation_reason,
+                )
             await session.commit()
             await session.refresh(row)
             return row
@@ -4499,7 +4539,13 @@ class Database:
             )
             return list(values)
 
-    async def delete_exchange_credential(self, exchange: str, environment: str) -> bool:
+    async def delete_exchange_credential(
+        self,
+        exchange: str,
+        environment: str,
+        *,
+        reconciliation_reason: str | None = None,
+    ) -> bool:
         async with self.sessions() as session:
             result = await session.execute(
                 delete(ExchangeCredentialRow).where(
@@ -4507,6 +4553,11 @@ class Database:
                     ExchangeCredentialRow.environment == environment,
                 )
             )
+            if result.rowcount and reconciliation_reason is not None:
+                await self._request_execution_reconciliation_in_session(
+                    session,
+                    reason=reconciliation_reason,
+                )
             await session.commit()
             return bool(result.rowcount)
 

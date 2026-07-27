@@ -25,8 +25,12 @@ from basis_hawk.notifications import (
     NotificationDeliveryService,
     NotificationProjectionService,
 )
-from basis_hawk.private_stream import PrivateStreamRegistry, PrivateStreamSupervisor
-from basis_hawk.private_stream_factory import create_private_stream_connections
+from basis_hawk.private_stream import (
+    DynamicPrivateStreamManager,
+    PrivateStreamRegistry,
+    PrivateStreamSupervisor,
+)
+from basis_hawk.private_stream_factory import create_private_stream_connection
 from basis_hawk.reconciliation import ReconciliationService, WorkerLockUnavailable
 from basis_hawk.storage import Database
 
@@ -181,11 +185,6 @@ async def run_worker(*, once: bool) -> int:
                 f"notifications={delivered}"
             )
             return 0
-        connections = await create_private_stream_connections(
-            credentials,
-            timeout_seconds=config.http_timeout_seconds,
-        )
-
         async def reconcile_private_event(
             _connection: object,
             _event: object,
@@ -195,9 +194,21 @@ async def run_worker(*, once: bool) -> int:
         supervisor = PrivateStreamSupervisor(
             PrivateStreamRegistry(database),
             event_handler=reconcile_private_event,
+            state_handler=lambda _connection, _connected: (
+                reconciler.request_reconciliation()
+            ),
+        )
+        stream_manager = DynamicPrivateStreamManager(
+            supervisor,
+            credentials.list,
+            lambda summary: create_private_stream_connection(
+                credentials,
+                summary,
+                timeout_seconds=config.http_timeout_seconds,
+            ),
         )
         tasks = [
-            asyncio.create_task(supervisor.run(connections)),
+            asyncio.create_task(stream_manager.run()),
             asyncio.create_task(reconciler.run_forever()),
             asyncio.create_task(notification_projection.run_forever()),
             asyncio.create_task(notifications.run_forever()),

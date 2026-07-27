@@ -90,6 +90,7 @@ class CredentialService:
             ciphertext=encrypted.ciphertext,
             nonce=encrypted.nonce,
             key_version=encrypted.key_version,
+            reconciliation_reason="exchange credential configuration changed",
         )
         await self.database.append_audit(
             "credential.saved",
@@ -153,6 +154,7 @@ class CredentialService:
             ciphertext=encrypted.ciphertext,
             nonce=encrypted.nonce,
             key_version=encrypted.key_version,
+            reconciliation_reason="exchange credential configuration changed",
         )
         await self.database.append_audit(
             "credential.position_mode_updated",
@@ -207,6 +209,7 @@ class CredentialService:
         deleted = await self.database.delete_exchange_credential(
             exchange.value,
             environment.value,
+            reconciliation_reason="exchange credential configuration changed",
         )
         if deleted:
             await self.database.append_audit(
