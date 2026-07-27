@@ -98,6 +98,24 @@ Docker build cache；清理失败只告警，不把健康部署误报为失败�
 `journalctl -u basis-hawk-update.service`。首次获得该功能必须仍用远程 bootstrap 升级一次以安装
 宿主机代理，此后才能在前端检查和更新。
 
+需要无人值守更新时，在一次受控部署中显式加入 `--enable-auto-update`。安装器会启用 root 所有的
+`basis-hawk-auto-update.timer`，开机两分钟后开始、之后约每 5 分钟检查一次；后续部署未传开关时
+保留当前设置，可用 `--disable-auto-update` 明确关闭。自动检查只支持锁定的 GitHub HTTPS 仓库，
+并通过 GitHub Actions API 查找远端头对应的 `ci.yml`、`push`、`completed/success` workflow run。
+未找到成功结果（包括 CI 尚未完成或失败）时不排队，也不会先拉取运行代码。
+
+CI 通过后，自动代理仍先验证干净 checkout、固定 origin/branch、快进关系及没有其他更新请求，再在
+数据库行锁下要求全局执行精确为 `ready`。只有成功切换为 `software update requested` 暂停才保留
+更新请求；人工暂停、安全暂停、blocked/reconciling 或准备命令失败会删除该请求并等待下一周期。
+实际更新继续由同一个 `basis-hawk-update.service` 二次验证远端头并执行备份、快进、重建、迁移、
+健康检查和更新后自动对账。VPS 主动访问 GitHub，GitHub 不需要保存 VPS SSH 私钥或其他服务器秘密。
+可用以下命令检查定时器和最近一次自动检查；完整部署输出仍查看原更新服务：
+
+```bash
+systemctl status basis-hawk-auto-update.timer
+journalctl -u basis-hawk-auto-update.service -u basis-hawk-update.service
+```
+
 Compose 还提供独立非 root `backup` 服务。它使用与 PostgreSQL 17 服务端同版本的 `pg_dump`，启动后
 立即生成一次 custom archive，之后默认每 86400 秒生成一次。归档在写入命名卷时直接使用独立
 `BASIS_HAWK_BACKUP_KEY` 做 AES-256-GCM 认证加密，明文数据库不会落盘；每份归档另有 SHA-256 文件，
@@ -477,6 +495,7 @@ worker、单轮 worker、AES-GCM 归档验证、空库恢复和非空库拒绝�
 ```bash
 bash -n scripts/install_update_agent.sh
 bash -n scripts/update_agent.sh
+bash -n scripts/auto_update_agent.sh
 ```
 
 API 容器挂载同一 `postgres_backups` 卷，仅用于列出归档以及受控单个或批量删除非最新归档和旁路

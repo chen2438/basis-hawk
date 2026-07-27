@@ -33,6 +33,7 @@ from basis_hawk.private_stream import (
 from basis_hawk.private_stream_factory import create_private_stream_connection
 from basis_hawk.reconciliation import ReconciliationService, WorkerLockUnavailable
 from basis_hawk.storage import Database
+from basis_hawk.updates import COMMIT_PATTERN
 
 MINIMUM_ADMIN_PASSWORD_LENGTH = 12
 
@@ -166,6 +167,26 @@ async def request_post_update_reconciliation(*, required: bool) -> int:
     return 0
 
 
+async def prepare_automatic_update(*, target: str) -> int:
+    if not COMMIT_PATTERN.fullmatch(target):
+        print("update-prepare: invalid target commit")
+        return 1
+    config = get_config()
+    database = Database(config.database_url)
+    await database.initialize()
+    try:
+        accepted = await database.request_automatic_software_update(
+            target=target,
+        )
+        if not accepted:
+            print("update-prepare: execution is not ready; automatic update skipped")
+            return 1
+    finally:
+        await database.close()
+    print("update-prepare: execution paused for an automatic software update")
+    return 0
+
+
 async def run_worker(*, once: bool) -> int:
     config = get_config()
     if config.credential_master_key is None:
@@ -263,6 +284,8 @@ def main() -> None:
     rotate_totp_parser.add_argument("--username", default="admin")
     update_reconcile_parser = subparsers.add_parser("update-reconcile")
     update_reconcile_parser.add_argument("--required", action="store_true")
+    update_prepare_parser = subparsers.add_parser("update-prepare")
+    update_prepare_parser.add_argument("--target", required=True)
     args = parser.parse_args()
     config = get_config()
     logging.basicConfig(level=config.log_level)
@@ -278,6 +301,10 @@ def main() -> None:
             asyncio.run(
                 request_post_update_reconciliation(required=args.required)
             )
+        )
+    if args.command == "update-prepare":
+        raise SystemExit(
+            asyncio.run(prepare_automatic_update(target=args.target))
         )
     if args.command == "worker":
         raise SystemExit(asyncio.run(run_worker(once=args.once)))

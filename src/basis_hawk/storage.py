@@ -1237,6 +1237,34 @@ class Database:
             await session.commit()
             return True
 
+    async def request_automatic_software_update(self, *, target: str) -> bool:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ExecutionControlRow)
+                .where(ExecutionControlRow.id == 1)
+                .with_for_update()
+            )
+            if row is None or row.state != "ready":
+                return False
+            row.state = "paused"
+            row.reason = "software update requested"
+            row.updated_at = datetime.now(UTC)
+            session.add(
+                AuditEventRow(
+                    id=str(uuid.uuid4()),
+                    occurred_at=row.updated_at,
+                    event_type="software.automatic_update_requested",
+                    actor="system:auto-update-agent",
+                    details=json.dumps(
+                        {"target_commit": target},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            )
+            await session.commit()
+            return True
+
     async def _request_execution_reconciliation_in_session(
         self,
         session: AsyncSession,

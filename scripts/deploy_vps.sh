@@ -16,6 +16,7 @@ SKIP_ADMIN=false
 ASSUME_YES=false
 PREPARE_ENV_ONLY=false
 RECONCILE_AFTER_UPDATE=false
+AUTO_UPDATE_MODE="preserve"
 TEMPORARY_ENVIRONMENT_FILE=""
 ADMIN_TOTP_URI=""
 
@@ -63,6 +64,9 @@ Options:
   --prepare-env-only       Only create or validate .env; do not use Docker.
   --reconcile-after-update Request a fresh safety reconciliation before the
                            new worker starts. Reserved for the update agent.
+  --enable-auto-update     Every 5 minutes, install the latest main-branch
+                           commit only after its GitHub CI workflow succeeds.
+  --disable-auto-update    Disable the periodic automatic update timer.
   -h, --help               Show this help.
 
 The script never overwrites an existing .env and never prints generated
@@ -135,6 +139,14 @@ while (($#)); do
             ;;
         --reconcile-after-update)
             RECONCILE_AFTER_UPDATE=true
+            shift
+            ;;
+        --enable-auto-update)
+            AUTO_UPDATE_MODE=true
+            shift
+            ;;
+        --disable-auto-update)
+            AUTO_UPDATE_MODE=false
             shift
             ;;
         -h|--help)
@@ -446,7 +458,8 @@ if [[ -d "${PROJECT_DIRECTORY}/.git" ]]; then
     if [[ "${updater_origin}" == https://* && -n "${updater_branch}" ]]; then
         log "installing the constrained host update agent"
         run_as_root "${PROJECT_DIRECTORY}/scripts/install_update_agent.sh" \
-            "${PROJECT_DIRECTORY}" "${updater_origin}" "${updater_branch}"
+            "${PROJECT_DIRECTORY}" "${updater_origin}" "${updater_branch}" \
+            "${AUTO_UPDATE_MODE}"
     else
         warn "web updates are unavailable because the checkout origin or branch is unsupported"
     fi

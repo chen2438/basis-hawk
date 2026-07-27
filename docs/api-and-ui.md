@@ -125,7 +125,8 @@
 - `POST /api/operations/logs/prune`：要求 `confirmed=true` 和 1–3650 天保留期，只删除截止时间前
   已经 `sent/dead` 的通知投递日志；`pending/sending/retry` 和管理员审计永不由该接口删除。
 - `GET /api/operations/update`：读取宿主机代理写入的当前提交、远端提交、检查/完成时间、状态和
-  预定义错误码；不返回 Git 输出、部署日志或宿主机路径。
+  预定义错误码；不返回 Git 输出、部署日志或宿主机路径。VPS 显式启用自动更新后，同一状态也会反映
+  定时代理最终排队并执行的版本；CI 未成功时定时代理不会生成更新请求。
 - `POST /api/operations/update/check`：创建一次固定的检查请求，由宿主机代理对部署时锁定的 HTTPS
   origin/branch 执行 fetch 和快进关系校验；API 容器本身不接触 checkout。
 - `POST /api/operations/update/apply`：要求 `confirmed=true`，且目标必须等于最近一次检查或失败状态

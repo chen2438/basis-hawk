@@ -190,6 +190,11 @@
   避免 Web 与交易执行器运行不同版本；新 worker 启动前，代理只把自己创建的“软件更新请求”暂停
   原子切换为 `reconciling`，随后自动完成账户、订单、成交、仓位和私有流全量对账。人工暂停及任何
   成交失衡、补偿失败等安全暂停都不能由更新流程清除；状态与脱敏错误码回传前端。
+- 已完成：可显式启用的 VPS 自动更新。root systemd timer 每 5 分钟检查锁定 GitHub 仓库与分支，
+  仅当远端头是当前版本的快进后继且该提交的 `CI` push workflow 已明确成功时才排队；排队前必须用
+  数据库行锁确认全局执行为 `ready` 并切到软件更新暂停。CI 未完成/失败、工作区有改动、非快进、
+  远端变化或已有人工/安全暂停时均跳过，不向 GitHub 保存 VPS SSH 私钥，也不绕过既有备份、迁移、
+  健康检查和更新后自动对账。
 - 已完成：六所各 500 个候选的 3,000 标的端到端负载验收。行情服务使用标的键索引重算并持久化全部
   机会，REST 单页上限及首页初始请求同步扩展到 3,000，不再出现后端已扫描但前端只取得前 300 个的
   截断；负载测试同时验证每所 500 上限、健康计算、完整持久化和越界拒绝。
@@ -392,6 +397,7 @@ bash -n scripts/deploy_vps.sh
 bash -n scripts/bootstrap_vps.sh
 bash -n scripts/install_update_agent.sh
 bash -n scripts/update_agent.sh
+bash -n scripts/auto_update_agent.sh
 pnpm --dir frontend test
 pnpm --dir frontend build
 docker compose --env-file .env.example config --quiet

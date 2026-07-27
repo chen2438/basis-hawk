@@ -19,6 +19,9 @@ jobs:
       - run: pytest -q
       - run: bash -n scripts/deploy_vps.sh
       - run: bash -n scripts/bootstrap_vps.sh
+      - run: bash -n scripts/install_update_agent.sh
+      - run: bash -n scripts/update_agent.sh
+      - run: bash -n scripts/auto_update_agent.sh
   frontend:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: frontend } }

@@ -86,6 +86,7 @@ def test_deploy_script_help_does_not_require_a_vps() -> None:
     result = run_script("--help")
     assert result.returncode == 0
     assert "--prepare-env-only" in result.stdout
+    assert "--enable-auto-update" in result.stdout
     assert "never overwrites an existing .env" in result.stdout
 
 

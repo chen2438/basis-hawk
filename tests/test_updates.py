@@ -116,6 +116,47 @@ async def test_post_update_reconciliation_only_clears_the_update_pause() -> None
         await database.close()
 
 
+async def test_automatic_update_only_pauses_ready_execution() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    try:
+        await database.set_execution_control(
+            state="paused",
+            reason="operator requested a safety pause",
+        )
+        assert (
+            await database.request_automatic_software_update(target=AVAILABLE)
+            is False
+        )
+        control = await database.execution_control()
+        assert control is not None
+        assert control.state == "paused"
+        assert control.reason == "operator requested a safety pause"
+
+        await database.set_execution_control(
+            state="ready",
+            reason="account reconciliation passed",
+        )
+        assert (
+            await database.request_automatic_software_update(target=AVAILABLE)
+            is True
+        )
+        control = await database.execution_control()
+        assert control is not None
+        assert control.state == "paused"
+        assert control.reason == "software update requested"
+        assert (
+            await database.request_automatic_software_update(target=AVAILABLE)
+            is False
+        )
+        events = await database.audit_events(limit=10)
+        assert [event.event_type for event in events] == [
+            "software.automatic_update_requested"
+        ]
+    finally:
+        await database.close()
+
+
 async def test_update_api_checks_and_pauses_before_apply(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
