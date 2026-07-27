@@ -30,6 +30,8 @@ from basis_hawk.private_stream_factory import create_private_stream_connections
 from basis_hawk.reconciliation import ReconciliationService, WorkerLockUnavailable
 from basis_hawk.storage import Database
 
+MINIMUM_ADMIN_PASSWORD_LENGTH = 12
+
 
 async def doctor() -> int:
     config = get_config()
@@ -61,16 +63,32 @@ async def doctor() -> int:
     return int(failed)
 
 
+def prompt_admin_password() -> str:
+    print(
+        "Administrator password must contain at least "
+        f"{MINIMUM_ADMIN_PASSWORD_LENGTH} characters."
+    )
+    while True:
+        password = getpass.getpass("Administrator password: ")
+        if len(password) < MINIMUM_ADMIN_PASSWORD_LENGTH:
+            print(
+                "admin-create: password must contain at least "
+                f"{MINIMUM_ADMIN_PASSWORD_LENGTH} characters; try again"
+            )
+            continue
+        confirmation = getpass.getpass("Confirm password: ")
+        if password != confirmation:
+            print("admin-create: passwords do not match; try again")
+            continue
+        return password
+
+
 async def create_admin(username: str) -> int:
     config = get_config()
     if config.credential_master_key is None:
         print("admin-create: BASIS_HAWK_CREDENTIAL_MASTER_KEY is required")
         return 1
-    password = getpass.getpass("Administrator password: ")
-    confirmation = getpass.getpass("Confirm password: ")
-    if password != confirmation:
-        print("admin-create: passwords do not match")
-        return 1
+    password = prompt_admin_password()
     database = Database(config.database_url)
     await database.initialize()
     auth = AuthService(
