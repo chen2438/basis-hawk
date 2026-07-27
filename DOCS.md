@@ -140,6 +140,10 @@
   在 PostgreSQL 17 实际执行全部迁移，验证 API 进程重启、数据库重启后的连接恢复、第二 worker 被
   advisory lock 拒绝、单轮 worker、认证加密备份、空库恢复及非空库拒绝覆盖；临时容器、网络和卷
   始终自动清理，CI 同步执行。
+- 已完成：幂等 VPS 一键部署脚本。首次部署生成权限为 600 的 `.env`、数据库密码及相互独立的凭据/
+  备份密钥，可选按 Docker 官方 apt 仓库安装 Engine/Compose 和启用 UFW；已有部署绝不覆盖配置，
+  升级前停止 API/worker/backup 并生成加密备份，之后才更新服务镜像、迁移、启动并验证行情就绪与
+  最新备份。
 - 已完成：启动对账在全部已配置账户的余额、权限、模式、远端订单/成交/仓位关联和私有流均通过时进入
   `ready`；任一账户失败、阻断或心跳在最终确认前失效都保持 `blocked`，既有安全暂停不被覆盖。
 - 已完成：Binance、OKX、Bybit 现货/永续保护性限价 IOC 下单、撤单、逐仓和 1–10 倍杠杆私有适配。
@@ -309,6 +313,7 @@ MEXC 使用已获特批的标准 V1 合约接口，但官方文档仍将合约�
 ```bash
 .venv/bin/ruff check .
 .venv/bin/pytest -q
+bash -n scripts/deploy_vps.sh
 pnpm --dir frontend test
 pnpm --dir frontend build
 docker compose --env-file .env.example config --quiet

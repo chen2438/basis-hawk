@@ -17,6 +17,7 @@ jobs:
       - run: pip install -r requirements.lock && pip install -e . --no-deps && pip install pytest pytest-asyncio ruff
       - run: ruff check .
       - run: pytest -q
+      - run: bash -n scripts/deploy_vps.sh
   frontend:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: frontend } }

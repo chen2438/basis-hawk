@@ -25,6 +25,32 @@ Docker Compose 当前提供 PostgreSQL、FastAPI、唯一交易 worker 和 Caddy
 worker 启动对账、Caddy 接入。worker 使用 PostgreSQL advisory lock；同一数据库已有执行器时第二个
 worker 会拒绝运行。
 
+仓库根目录的 `scripts/deploy_vps.sh` 把首次安装和后续幂等升级固化为一个入口。Ubuntu/Debian 新机可
+显式使用 `--install-docker`，脚本按
+[Docker 官方 apt 仓库步骤](https://docs.docker.com/engine/install/)安装 Engine、Buildx 和 Compose
+插件；已有 Docker 的其他 Linux 发行版可直接运行而不使用该参数。典型首次部署为：
+
+```bash
+sudo ./scripts/deploy_vps.sh \
+  --domain hawk.example.com \
+  --install-docker \
+  --enable-ufw
+```
+
+首次运行从 `.env.example` 创建权限为 600 的 `.env`，生成 URL-safe 数据库密码、32 字节凭据主密钥
+和另一把独立的 32 字节备份密钥，全程不向终端输出秘密。已有 `.env` 时只校验域名、密钥、数据库 URL
+和权限，绝不覆盖或补写；域名参数与现有配置不一致会失败。管理员密码仍只经 `getpass` 的隐藏终端输入，
+不能通过命令参数或环境变量注入。无交互初始化可用 `--skip-admin`，但在以后创建管理员前无法登录。
+`--prepare-env-only` 只生成或检查配置，不安装或启动任何服务。
+
+重复部署识别已有 Alembic schema 后，先停止 API、worker 和定时 backup，并用独立备份镜像创建认证
+加密归档；只有备份成功后才拉取 PostgreSQL/Caddy 镜像、刷新数据库容器并执行迁移。随后启动全部服务，
+依次验证 PostgreSQL、API liveness、六所行情目录 readiness 和最新加密备份；失败
+会保留容器与日志供排查，不删除数据库或卷。`--enable-ufw` 会先放行当前 SSH 服务端口及
+80/443，再启用 UFW；非 22 端口应显式传入 `--ssh-port`。Docker 官方说明发布的容器端口可能绕过
+部分 UFW 规则，因此还必须在云厂商安全组只开放 SSH、80 和 443；当前 Compose 本身只发布 80/443。
+脚本不修改 DNS、云安全组、交易所 Key 或异地备份目标。
+
 Compose 还提供独立非 root `backup` 服务。它使用与 PostgreSQL 17 服务端同版本的 `pg_dump`，启动后
 立即生成一次 custom archive，之后默认每 86400 秒生成一次。归档在写入命名卷时直接使用独立
 `BASIS_HAWK_BACKUP_KEY` 做 AES-256-GCM 认证加密，明文数据库不会落盘；每份归档另有 SHA-256 文件，
@@ -309,7 +335,9 @@ docker compose run --rm worker basis-hawk worker --once
 `.env.example` 只包含占位符。修改它时不得读取、输出或提交本地 `.env`；交易所 Key 必须禁止提现并绑定
 VPS 出口 IP。
 
-CI 对提交信息、后端 Ruff/Pytest 和前端 Vitest/TypeScript/Vite 分别验收。容器层另执行
+CI 对提交信息、后端 Ruff/Pytest、VPS 脚本 Bash 语法和前端 Vitest/TypeScript/Vite 分别验收。部署
+脚本测试使用伪 VPS/Docker 命令验证首次安装顺序、秘密不出现在输出、配置幂等、权限/域名拒绝及升级时
+“停 API/worker/backup → 加密备份 → 更新镜像 → 迁移”的严格先后。容器层另执行
 `docker compose --env-file .env.example config --quiet`；PostgreSQL 可用时还必须实际运行 Alembic
 upgrade/current。
 
