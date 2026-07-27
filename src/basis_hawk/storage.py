@@ -657,6 +657,7 @@ class TradeIntentRow(Base):
     action: Mapped[str] = mapped_column(String(20))
     emergency: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(30), index=True)
+    failure_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     leverage: Mapped[int] = mapped_column(Integer, default=1)
     requested_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     base_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
@@ -677,6 +678,12 @@ class TradeIntentRow(Base):
         CheckConstraint(
             "leverage >= 1 AND leverage <= 10",
             name="ck_trade_intent_leverage_range",
+        ),
+        CheckConstraint(
+            "failure_code IS NULL OR failure_code IN "
+            "('market_data_expired', 'no_fills', "
+            "'exposure_neutralized', 'state_transition_failed')",
+            name="ck_trade_intent_failure_code",
         ),
         CheckConstraint(
             "emergency = false OR action = 'close'",
@@ -2086,6 +2093,11 @@ class Database:
                 )
                 .values(
                     status=status,
+                    failure_code=(
+                        "state_transition_failed"
+                        if status == "failed"
+                        else None
+                    ),
                     version=TradeIntentRow.version + 1,
                     updated_at=datetime.now(UTC),
                 )
@@ -2291,6 +2303,7 @@ class Database:
                     position.status = "open"
                     position.closing_intent_id = None
             intent.status = "failed"
+            intent.failure_code = "market_data_expired"
             intent.version += 1
             intent.updated_at = now
             await session.commit()
@@ -2429,6 +2442,7 @@ class Database:
             changed = True
             if spot_base == 0 and perp_base == 0:
                 intent.status = "failed"
+                intent.failure_code = "no_fills"
             elif not _numeric_equal(spot_base, perp_base):
                 excess_leg = (
                     primary["spot"]
@@ -2522,6 +2536,7 @@ class Database:
                     else:
                         if common_base == 0:
                             intent.status = "failed"
+                            intent.failure_code = "exposure_neutralized"
                         elif (
                             primary["spot"].average_price is None
                             or primary["perp"].average_price is None
@@ -2666,6 +2681,7 @@ class Database:
             now = datetime.now(UTC)
             if spot_base == 0 and perp_base == 0:
                 intent.status = "failed"
+                intent.failure_code = "no_fills"
                 position.status = "open"
                 position.closing_intent_id = None
             elif not _numeric_equal(spot_base, perp_base):
@@ -2830,6 +2846,8 @@ class Database:
                         intent.status = (
                             "closed" if common_base > 0 else "failed"
                         )
+                        if common_base == 0:
+                            intent.failure_code = "exposure_neutralized"
                         if _numeric_equal(
                             position.quantity,
                             Decimal("0"),
@@ -3095,6 +3113,7 @@ class Database:
                 intent.status = "hedged"
             else:
                 intent.status = "failed"
+                intent.failure_code = "no_fills"
             intent.version += 1
             intent.updated_at = now
             session.add_all(fills)
@@ -3224,6 +3243,7 @@ class Database:
                 intent.status = "hedged"
             else:
                 intent.status = "failed"
+                intent.failure_code = "exposure_neutralized"
             intent.version += 1
             intent.updated_at = now
             session.add(compensation_fill)
@@ -3546,6 +3566,8 @@ class Database:
             position.status = "open"
             position.closing_intent_id = None
             intent.status = "closed" if common_quantity > 0 else "failed"
+            if common_quantity == 0:
+                intent.failure_code = "no_fills"
         intent.version += 1
         intent.updated_at = now
         return PnlRealizationRow(

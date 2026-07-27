@@ -125,6 +125,7 @@ export interface TradeIntent {
   action: string;
   emergency: boolean;
   status: string;
+  failure_code: string | null;
   leverage: number;
   requested_notional: string;
   base_quantity: string;

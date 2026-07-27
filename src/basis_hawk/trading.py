@@ -148,6 +148,7 @@ class TradeIntentView(BaseModel):
     action: str
     emergency: bool
     status: TradeIntentStatus
+    failure_code: str | None
     leverage: int
     requested_notional: Decimal
     base_quantity: Decimal
@@ -1498,6 +1499,7 @@ def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:
         action=row.action,
         emergency=row.emergency,
         status=TradeIntentStatus(row.status),
+        failure_code=row.failure_code,
         leverage=row.leverage,
         requested_notional=row.requested_notional,
         base_quantity=row.base_quantity,

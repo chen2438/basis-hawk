@@ -145,7 +145,7 @@ def main() -> int:
             "SELECT version_num FROM alembic_version;",
             capture=True,
         ).stdout.strip()
-        if revision != "20260727_0026":
+        if revision != "20260727_0027":
             raise RuntimeError(f"unexpected Alembic revision: {revision}")
 
         intent_persistence_probe = f"""

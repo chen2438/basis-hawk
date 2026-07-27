@@ -290,6 +290,7 @@ async def test_live_executor_expires_stale_open_without_remote_calls() -> None:
     assert result.examined == 1
     assert result.submitted == 0
     assert stored[0].status == "failed"
+    assert stored[0].failure_code == "market_data_expired"
     assert client.placed == []
     await database.close()
 
@@ -335,6 +336,7 @@ async def test_live_executor_expires_stale_close_and_reopens_position() -> None:
     assert stored is not None and position is not None
     assert result.submitted == 0
     assert stored[0].status == "failed"
+    assert stored[0].failure_code == "market_data_expired"
     assert position.status == "open"
     assert position.closing_intent_id is None
     assert client.placed == []

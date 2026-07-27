@@ -657,14 +657,27 @@ function TradeLedgerView({
   pnlRealizations: PnlRealization[];
   fundingIncome: FundingIncome[];
 }) {
+  const failureReason = (item: TradeIntent) => {
+    if (item.status !== "failed") return "—";
+    const reasons: Record<string, string> = {
+      market_data_expired: "行情数据过期，订单未提交",
+      no_fills: "现货与永续均未成交",
+      exposure_neutralized: "单腿成交后已补偿归零，未建立持仓",
+      state_transition_failed: "交易状态机已终止该意图",
+    };
+    return item.failure_code
+      ? (reasons[item.failure_code] ?? `未知失败代码：${item.failure_code}`)
+      : "升级前记录，未保存失败原因";
+  };
   return <div className="history-grid trade-ledger">
     <section>
       <header><div><h3>交易意图</h3><p>最近 100 条持久化开平仓请求。</p></div><strong>{intents.length}</strong></header>
-      <div className="ops-table-wrap"><table><thead><tr><th>时间</th><th>交易所</th><th>环境</th><th>标的</th><th>动作</th><th>名义额</th><th>状态</th></tr></thead>
+      <div className="ops-table-wrap"><table><thead><tr><th>时间</th><th>交易所</th><th>环境</th><th>标的</th><th>动作</th><th>名义额</th><th>状态</th><th>失败原因</th></tr></thead>
         <tbody>{intents.map((item) => <tr key={item.id}>
           <td>{time(item.created_at)}</td><td>{exchangeNames[item.exchange]}</td><td>{item.environment}</td>
           <td>{item.base_asset}</td><td>{item.emergency ? `紧急${item.action}` : item.action}</td>
           <td>{amount(item.requested_notional)} USDT</td><td><span className={`status-pill ${item.status}`}>{item.status}</span></td>
+          <td>{failureReason(item)}</td>
         </tr>)}</tbody>
       </table>{!intents.length && <div className="empty">尚无交易意图</div>}</div>
     </section>

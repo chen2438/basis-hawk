@@ -56,7 +56,22 @@ describe("Basis Hawk dashboard", () => {
           trade_permission: true,
         }
         : url.includes("trades/positions") ? { items: [] }
-        : url.includes("trades/intents") ? { items: [] }
+        : url.includes("trades/intents") ? { items: [{
+          id: "failed-intent",
+          paired_position_id: null,
+          exchange: "gate",
+          environment: "live",
+          base_asset: "WET",
+          action: "open",
+          emergency: false,
+          status: "failed",
+          failure_code: "market_data_expired",
+          leverage: 1,
+          requested_notional: "60",
+          base_quantity: "900",
+          created_at: "2026-07-27T18:58:28Z",
+          updated_at: "2026-07-27T18:58:28Z",
+        }] }
         : url.includes("trades/orders") ? { items: [] }
         : url.includes("trades/fills") ? { items: [] }
         : url.includes("trades/pnl") ? { items: [] }
@@ -327,5 +342,6 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByRole("heading", { name: "已实现盈亏" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "实际资金费" })).toBeTruthy();
     expect(screen.getByText(/最近 100 条持久化开平仓请求/)).toBeTruthy();
+    expect(screen.getByText("行情数据过期，订单未提交")).toBeTruthy();
   });
 });

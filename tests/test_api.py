@@ -166,6 +166,7 @@ async def test_rest_contract_and_settings() -> None:
         )
         assert repeated.json()["created"] is False
         fetched = await client.get(f"/api/trades/intents/{intent_id}")
+        assert fetched.json()["intent"]["failure_code"] is None
         assert fetched.json()["intent"]["legs"][0]["client_order_id"].startswith(
             "bh-"
         )
@@ -242,6 +243,7 @@ async def test_global_trade_ledgers_are_bounded_filterable_and_decimal_safe() ->
         )
         assert intents.status_code == 200
         assert [item["id"] for item in intents.json()["items"]] == [closing.id]
+        assert intents.json()["items"][0]["failure_code"] is None
 
         orders = await client.get(
             "/api/trades/orders",
