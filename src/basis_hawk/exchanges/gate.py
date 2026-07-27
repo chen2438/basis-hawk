@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from basis_hawk.credentials import ExchangeEnvironment
 from basis_hawk.exchanges.base import (
     ExchangeAdapter,
     PublicClient,
@@ -12,15 +13,21 @@ from basis_hawk.exchanges.base import (
     decimal_increment,
     decimal_or_zero,
 )
+from basis_hawk.gate_endpoints import gate_endpoints
 from basis_hawk.models import Exchange, FundingObservation, InstrumentPair, MarketQuote
 
 
 class GateAdapter(ExchangeAdapter):
     name = "gate"
 
-    def __init__(self, *, timeout: float = 10) -> None:
+    def __init__(
+        self,
+        *,
+        timeout: float = 10,
+        environment: ExchangeEnvironment = ExchangeEnvironment.LIVE,
+    ) -> None:
         self.http = PublicClient(
-            "https://api.gateio.ws/api/v4",
+            f"{gate_endpoints(environment).rest}/api/v4",
             timeout=timeout,
             minimum_interval=0.06,
         )

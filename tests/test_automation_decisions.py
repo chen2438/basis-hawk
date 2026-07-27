@@ -2,11 +2,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from basis_hawk.automation import (
+    GATE_AUTOMATIC_DEPTH_CANDIDATES,
     AutomaticTradingService,
     AutomationPosition,
     AutoStrategyConfig,
     evaluate_automatic_strategy,
 )
+from basis_hawk.credentials import ExchangeEnvironment
 from basis_hawk.models import (
     Exchange,
     InstrumentPair,
@@ -384,5 +386,125 @@ async def test_automatic_service_plans_once_across_worker_restart() -> None:
     ) == {"binance:ORDER"}
     recoverable = await database.recoverable_trade_intents()
     assert [item.id for item in recoverable] == [first.intent_id]
+    assert recoverable[0].requested_notional == Decimal("75")
+    await database.close()
+
+
+class _GateDepthAdapter:
+    def __init__(self, pairs: list[InstrumentPair]) -> None:
+        self.pairs = pairs
+        self.calls: list[str] = []
+        self.closed = False
+
+    async def instruments(self) -> list[InstrumentPair]:
+        return self.pairs
+
+    async def executable_quote(self, pair, quote):
+        self.calls.append(pair.base_asset)
+        return quote.model_copy(
+            update={
+                "observed_at": datetime.now(UTC),
+                "spot_bid": Decimal("9.99"),
+                "spot_bid_qty": Decimal("20"),
+                "spot_ask": Decimal("10"),
+                "spot_ask_qty": Decimal("15"),
+                "perp_bid": Decimal("10.10"),
+                "perp_bid_qty": Decimal("20"),
+                "perp_ask": Decimal("10.11"),
+                "perp_ask_qty": Decimal("20"),
+            }
+        )
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def test_gate_automatic_service_fetches_bounded_sandbox_depth() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    now = datetime.now(UTC)
+    config = _config(
+        environment="sandbox",
+        enabled_exchanges={Exchange.GATE},
+    )
+    strategy = await database.create_strategy_version(
+        environment="sandbox",
+        payload=config.model_dump(mode="json"),
+        actor="test",
+    )
+    await database.set_automation_control(
+        state="enabled",
+        active_strategy_id=strategy.id,
+        reason="test",
+        actor="test",
+    )
+    await database.set_execution_control(state="ready", reason="test")
+    opportunities = [
+        _opportunity(
+            exchange=Exchange.GATE,
+            base_asset=f"GATE{index:02d}",
+            observed_at=now,
+            net_return=Decimal("0.04") - Decimal(index) / Decimal("10000"),
+        ).model_copy(
+            update={
+                "spot_symbol": f"GATE{index:02d}_USDT",
+                "perp_symbol": f"GATE{index:02d}_USDT",
+                "top_book_notional": Decimal("0"),
+                "close_top_book_notional": Decimal("0"),
+            }
+        )
+        for index in range(GATE_AUTOMATIC_DEPTH_CANDIDATES + 5)
+    ]
+    await database.save_latest_opportunities(opportunities)
+    pairs = [
+        InstrumentPair(
+            exchange=Exchange.GATE,
+            base_asset=item.base_asset,
+            spot_symbol=f"{item.base_asset}_USDT",
+            perp_symbol=f"{item.base_asset}_USDT",
+            spot_price_increment=Decimal("0.01"),
+            spot_quantity_increment=Decimal("0.01"),
+            spot_min_quantity=Decimal("0.01"),
+            spot_min_notional=Decimal("5"),
+            perp_price_increment=Decimal("0.01"),
+            perp_quantity_increment=Decimal("1"),
+            perp_min_quantity=Decimal("1"),
+            perp_min_notional=Decimal("5"),
+            perp_contract_size=Decimal("0.01"),
+        )
+        for item in opportunities
+    ]
+    await database.replace_instruments("gate", pairs)
+    sandbox_pairs = [
+        pair.model_copy(
+            update={"spot_price_increment": Decimal("0.1")}
+        )
+        if pair.base_asset == "GATE00"
+        else pair
+        for pair in pairs
+    ]
+    adapter = _GateDepthAdapter(sandbox_pairs)
+    environments: list[ExchangeEnvironment] = []
+
+    def gate_adapter_factory(environment: ExchangeEnvironment):
+        environments.append(environment)
+        return adapter
+
+    result = await AutomaticTradingService(
+        database,
+        gate_adapter_factory=gate_adapter_factory,
+    ).run_once()
+
+    assert result.created is True
+    assert result.action == "open"
+    assert environments == [ExchangeEnvironment.SANDBOX]
+    assert len(adapter.calls) == GATE_AUTOMATIC_DEPTH_CANDIDATES
+    assert adapter.calls[0] == "GATE01"
+    assert adapter.closed is True
+    recoverable = await database.recoverable_trade_intents()
+    assert len(recoverable) == 1
+    assert recoverable[0].exchange == Exchange.GATE.value
+    assert recoverable[0].environment == "sandbox"
+    assert recoverable[0].base_asset == "GATE01"
     assert recoverable[0].requested_notional == Decimal("75")
     await database.close()

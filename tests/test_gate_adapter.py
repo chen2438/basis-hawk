@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 
+from basis_hawk.credentials import ExchangeEnvironment
 from basis_hawk.exchanges.base import PublicClient
 from basis_hawk.exchanges.gate import GateAdapter
 
@@ -139,3 +140,11 @@ async def test_gate_normalizes_public_responses() -> None:
     assert str(current[0].interval_hours) == "4"
     assert history[0].settled is True
     await client.aclose()
+
+
+async def test_gate_sandbox_public_adapter_uses_testnet() -> None:
+    adapter = GateAdapter(environment=ExchangeEnvironment.SANDBOX)
+    assert str(adapter.http.client.base_url) == (
+        "https://api-testnet.gateapi.io/api/v4/"
+    )
+    await adapter.close()

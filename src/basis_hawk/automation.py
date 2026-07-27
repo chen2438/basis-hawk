@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
@@ -9,13 +11,23 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 from basis_hawk.credentials import ExchangeEnvironment
-from basis_hawk.models import Exchange, Opportunity, Quality
+from basis_hawk.exchanges import ExchangeAdapter, GateAdapter
+from basis_hawk.models import (
+    Exchange,
+    InstrumentPair,
+    MarketQuote,
+    Opportunity,
+    Quality,
+)
 from basis_hawk.storage import Database
 from basis_hawk.trading import (
     IdempotencyConflict,
     TradeLedger,
     TradeValidationError,
 )
+
+logger = logging.getLogger(__name__)
+GATE_AUTOMATIC_DEPTH_CANDIDATES = 20
 
 
 class AutoStrategyConfig(BaseModel):
@@ -250,10 +262,7 @@ def evaluate_automatic_strategy(
 
     exposure_by_exchange: dict[Exchange, Decimal] = {}
     global_exposure = Decimal("0")
-    active_keys: set[str] = set()
-    last_closed_by_key: dict[str, datetime] = {}
     for position in scoped_positions:
-        key = f"{position.exchange.value}:{position.base_asset}"
         if position.status in {"open", "closing"} and position.quantity > 0:
             exposure = position.quantity * position.spot_entry_price
             exposure_by_exchange[position.exchange] = (
@@ -261,38 +270,15 @@ def evaluate_automatic_strategy(
                 + exposure
             )
             global_exposure += exposure
-            active_keys.add(key)
-        elif position.closed_at is not None:
-            closed_at = _utc(position.closed_at)
-            last_closed_by_key[key] = max(
-                last_closed_by_key.get(key, closed_at),
-                closed_at,
-            )
 
     candidates: list[tuple[Opportunity, Decimal]] = []
-    for opportunity in opportunities:
-        if (
-            opportunity.exchange not in config.enabled_exchanges
-            or opportunity.key in blocked_keys
-            or opportunity.key in active_keys
-            or not _tradable_quote(opportunity, observed_now)
-            or opportunity.apr_24h is None
-            or opportunity.apr_7d is None
-            or opportunity.net_return is None
-            or opportunity.current_apr < config.minimum_current_apr
-            or opportunity.apr_24h < config.minimum_apr_24h
-            or opportunity.apr_7d < config.minimum_apr_7d
-            or opportunity.net_return < config.minimum_net_return
-            or opportunity.executable_basis > config.maximum_opening_basis
-        ):
-            continue
-        last_closed = last_closed_by_key.get(opportunity.key)
-        if (
-            last_closed is not None
-            and observed_now - last_closed
-            < timedelta(minutes=config.minimum_reentry_minutes)
-        ):
-            continue
+    for opportunity in _opening_rule_candidates(
+        config=config,
+        opportunities=opportunities,
+        positions=scoped_positions,
+        blocked_open_keys=blocked_keys,
+        now=observed_now,
+    ):
         exchange_exposure = exposure_by_exchange.get(
             opportunity.exchange,
             Decimal("0"),
@@ -310,14 +296,6 @@ def evaluate_automatic_strategy(
         return AutomaticEvaluation(
             opening_block_reason="no opportunity satisfies every opening rule",
         )
-    candidates.sort(
-        key=lambda item: (
-            -(item[0].net_return or Decimal("-Infinity")),
-            -item[0].current_apr,
-            item[0].exchange.value,
-            item[0].base_asset,
-        )
-    )
     opportunity, notional = candidates[0]
     return AutomaticEvaluation(
         decision=AutomaticDecision(
@@ -332,15 +310,162 @@ def evaluate_automatic_strategy(
     )
 
 
+def _opening_rule_candidates(
+    *,
+    config: AutoStrategyConfig,
+    opportunities: list[Opportunity],
+    positions: list[AutomationPosition],
+    blocked_open_keys: set[str],
+    now: datetime,
+) -> list[Opportunity]:
+    active_keys: set[str] = set()
+    last_closed_by_key: dict[str, datetime] = {}
+    for position in positions:
+        if (
+            position.environment != config.environment
+            or position.exchange not in config.enabled_exchanges
+        ):
+            continue
+        key = f"{position.exchange.value}:{position.base_asset}"
+        if position.status in {"open", "closing"} and position.quantity > 0:
+            active_keys.add(key)
+        elif position.closed_at is not None:
+            closed_at = _utc(position.closed_at)
+            last_closed_by_key[key] = max(
+                last_closed_by_key.get(key, closed_at),
+                closed_at,
+            )
+    candidates: list[Opportunity] = []
+    for opportunity in opportunities:
+        if (
+            opportunity.exchange not in config.enabled_exchanges
+            or opportunity.key in blocked_open_keys
+            or opportunity.key in active_keys
+            or not _tradable_quote(opportunity, now)
+            or opportunity.apr_24h is None
+            or opportunity.apr_7d is None
+            or opportunity.net_return is None
+            or opportunity.current_apr < config.minimum_current_apr
+            or opportunity.apr_24h < config.minimum_apr_24h
+            or opportunity.apr_7d < config.minimum_apr_7d
+            or opportunity.net_return < config.minimum_net_return
+            or opportunity.executable_basis > config.maximum_opening_basis
+        ):
+            continue
+        last_closed = last_closed_by_key.get(opportunity.key)
+        if (
+            last_closed is not None
+            and now - last_closed
+            < timedelta(minutes=config.minimum_reentry_minutes)
+        ):
+            continue
+        candidates.append(opportunity)
+    candidates.sort(
+        key=lambda item: (
+            -(item.net_return or Decimal("-Infinity")),
+            -item.current_apr,
+            item.exchange.value,
+            item.base_asset,
+        )
+    )
+    return candidates
+
+
+def _quote_from_opportunity(opportunity: Opportunity) -> MarketQuote:
+    return MarketQuote(
+        exchange=opportunity.exchange,
+        base_asset=opportunity.base_asset,
+        observed_at=opportunity.observed_at,
+        spot_bid=opportunity.spot_bid,
+        spot_bid_qty=Decimal("0"),
+        spot_ask=opportunity.spot_ask,
+        spot_ask_qty=(
+            opportunity.spot_ask_notional / opportunity.spot_ask
+            if opportunity.spot_ask > 0
+            else Decimal("0")
+        ),
+        perp_bid=opportunity.perp_bid,
+        perp_bid_qty=(
+            opportunity.perp_bid_notional / opportunity.perp_bid
+            if opportunity.perp_bid > 0
+            else Decimal("0")
+        ),
+        perp_ask=opportunity.perp_ask,
+        perp_ask_qty=Decimal("0"),
+        spot_quote_volume_24h=opportunity.spot_quote_volume_24h,
+        perp_quote_volume_24h=opportunity.perp_quote_volume_24h,
+    )
+
+
+def _same_trading_rules(
+    left: InstrumentPair,
+    right: InstrumentPair,
+) -> bool:
+    return all(
+        getattr(left, field) == getattr(right, field)
+        for field in (
+            "spot_symbol",
+            "perp_symbol",
+            "spot_price_increment",
+            "spot_quantity_increment",
+            "spot_min_quantity",
+            "spot_min_notional",
+            "perp_price_increment",
+            "perp_quantity_increment",
+            "perp_min_quantity",
+            "perp_min_notional",
+            "perp_contract_size",
+        )
+    )
+
+
+def _opportunity_with_quote(
+    opportunity: Opportunity,
+    quote: MarketQuote,
+) -> Opportunity:
+    spot_ask_notional = quote.spot_ask * quote.spot_ask_qty
+    perp_bid_notional = quote.perp_bid * quote.perp_bid_qty
+    return opportunity.model_copy(
+        update={
+            "observed_at": quote.observed_at,
+            "spot_bid": quote.spot_bid,
+            "spot_ask": quote.spot_ask,
+            "perp_bid": quote.perp_bid,
+            "perp_ask": quote.perp_ask,
+            "executable_basis": (
+                quote.perp_bid / quote.spot_ask - Decimal("1")
+            ),
+            "top_book_notional": min(
+                spot_ask_notional,
+                perp_bid_notional,
+            ),
+            "close_top_book_notional": min(
+                quote.spot_bid * quote.spot_bid_qty,
+                quote.perp_ask * quote.perp_ask_qty,
+            ),
+            "spot_ask_notional": spot_ask_notional,
+            "perp_bid_notional": perp_bid_notional,
+        }
+    )
+
+
 class AutomaticTradingService:
     def __init__(
         self,
         database: Database,
         *,
         ledger: TradeLedger | None = None,
+        gate_adapter_factory: Callable[
+            [ExchangeEnvironment],
+            ExchangeAdapter,
+        ]
+        | None = None,
     ) -> None:
         self.database = database
         self.ledger = ledger or TradeLedger(database)
+        self.gate_adapter_factory = gate_adapter_factory or (
+            lambda environment: GateAdapter(environment=environment)
+        )
 
     async def run_once(self) -> AutomaticTradingResult:
         control = await self.database.automation_control()
@@ -412,14 +537,24 @@ class AutomaticTradingService:
             exchanges=exchanges,
             since=day_start,
         )
+        blocked_open_keys = await self.database.active_open_intent_keys(
+            environment=config.environment
+        )
+        if Exchange.GATE in config.enabled_exchanges:
+            opportunities = await self._refresh_gate_automatic_capacity(
+                config=config,
+                opportunities=opportunities,
+                positions=positions,
+                blocked_open_keys=blocked_open_keys,
+                pair_by_key=pair_by_key,
+                now=now,
+            )
         evaluation = evaluate_automatic_strategy(
             config=config,
             opportunities=opportunities,
             positions=positions,
             daily_realized_pnl=daily_pnl,
-            blocked_open_keys=await self.database.active_open_intent_keys(
-                environment=config.environment
-            ),
+            blocked_open_keys=blocked_open_keys,
             now=now,
         )
         if evaluation.decision is None:
@@ -529,6 +664,125 @@ class AutomaticTradingService:
             action=decision.action,
             reason=decision.reason,
         )
+
+    async def _refresh_gate_automatic_capacity(
+        self,
+        *,
+        config: AutoStrategyConfig,
+        opportunities: list[Opportunity],
+        positions: list[AutomationPosition],
+        blocked_open_keys: set[str],
+        pair_by_key: dict[str, InstrumentPair],
+        now: datetime,
+    ) -> list[Opportunity]:
+        adapter = self.gate_adapter_factory(
+            ExchangeEnvironment(config.environment)
+        )
+        depth_pair_by_key = pair_by_key
+        if config.environment == ExchangeEnvironment.SANDBOX.value:
+            try:
+                sandbox_pairs = await adapter.instruments()
+            except (RuntimeError, ValueError):
+                await adapter.close()
+                logger.info(
+                    "automatic Gate sandbox catalog unavailable",
+                    extra={
+                        "exchange": Exchange.GATE.value,
+                        "environment": config.environment,
+                    },
+                )
+                return opportunities
+            depth_pair_by_key = {
+                pair.key: pair
+                for pair in sandbox_pairs
+                if pair.key in pair_by_key
+                and _same_trading_rules(pair, pair_by_key[pair.key])
+            }
+            pair_by_key.update(depth_pair_by_key)
+        opportunity_by_key = {
+            item.key: item
+            for item in opportunities
+            if item.exchange == Exchange.GATE
+        }
+        gate_positions = sorted(
+            (
+                position
+                for position in positions
+                if position.exchange == Exchange.GATE
+                and position.environment == config.environment
+                and position.status == "open"
+                and position.quantity > 0
+            ),
+            key=lambda position: (
+                position.liquidation_buffer is None,
+                position.liquidation_buffer or Decimal("Infinity"),
+                _utc(position.opened_at),
+                position.base_asset,
+            ),
+        )
+        candidates: list[Opportunity] = []
+        candidate_keys: set[str] = set()
+        for position in gate_positions:
+            key = f"{Exchange.GATE.value}:{position.base_asset}"
+            opportunity = opportunity_by_key.get(key)
+            if (
+                opportunity is not None
+                and opportunity.key in depth_pair_by_key
+                and _tradable_quote(opportunity, now)
+            ):
+                candidates.append(opportunity)
+                candidate_keys.add(opportunity.key)
+            if len(candidates) >= GATE_AUTOMATIC_DEPTH_CANDIDATES:
+                break
+        opening_candidates = [
+            item
+            for item in _opening_rule_candidates(
+                config=config,
+                opportunities=opportunities,
+                positions=positions,
+                blocked_open_keys=blocked_open_keys,
+                now=now,
+            )
+            if item.exchange == Exchange.GATE
+            and item.key in depth_pair_by_key
+            and item.key not in candidate_keys
+        ]
+        candidates.extend(
+            opening_candidates[
+                : GATE_AUTOMATIC_DEPTH_CANDIDATES - len(candidates)
+            ]
+        )
+        if not candidates:
+            await adapter.close()
+            return opportunities
+        refreshed: dict[str, Opportunity] = {}
+        try:
+            for opportunity in candidates:
+                pair = depth_pair_by_key[opportunity.key]
+                try:
+                    quote = await adapter.executable_quote(
+                        pair,
+                        _quote_from_opportunity(opportunity),
+                    )
+                    refreshed[opportunity.key] = _opportunity_with_quote(
+                        opportunity,
+                        quote,
+                    )
+                except (RuntimeError, ValueError):
+                    logger.info(
+                        "automatic Gate depth unavailable",
+                        extra={
+                            "exchange": Exchange.GATE.value,
+                            "symbol": opportunity.base_asset,
+                            "environment": config.environment,
+                        },
+                    )
+        finally:
+            await adapter.close()
+        return [
+            refreshed.get(opportunity.key, opportunity)
+            for opportunity in opportunities
+        ]
 
 
 def _opening_portfolio_block(
