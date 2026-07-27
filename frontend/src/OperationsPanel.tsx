@@ -21,6 +21,7 @@ import type {
   PairedPosition,
   PnlRealization,
   TradeIntent,
+  UpdateStatus,
 } from "./types";
 
 const exchangeNames: Record<Exchange, string> = {
@@ -38,6 +39,17 @@ const time = (value: string | null) =>
   value ? new Date(value).toLocaleString("zh-CN") : "—";
 const amount = (value: string | null) =>
   value == null ? "—" : Number(value).toLocaleString("zh-CN", { maximumFractionDigits: 8 });
+const updateStateNames: Record<UpdateStatus["state"], string> = {
+  unavailable: "不可用",
+  idle: "等待检查",
+  queued: "已排队",
+  checking: "检查中",
+  up_to_date: "已是最新版",
+  update_available: "发现新版本",
+  updating: "更新中",
+  succeeded: "更新完成",
+  failed: "更新失败",
+};
 
 export function OperationsPanel({
   onClose,
@@ -60,6 +72,7 @@ export function OperationsPanel({
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [notifications, setNotifications] = useState<NotificationHistoryItem[]>([]);
   const [backup, setBackup] = useState<BackupStatus | null>(null);
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const [snapshots, setSnapshots] = useState<Record<string, AccountSnapshot>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -79,6 +92,7 @@ export function OperationsPanel({
       auditValue,
       notificationValue,
       backupValue,
+      updateValue,
     ] =
       await Promise.all([
         api.execution(),
@@ -94,6 +108,7 @@ export function OperationsPanel({
         api.auditHistory(),
         api.notificationHistory(),
         api.backupStatus(),
+        api.updateStatus(),
       ]);
     setExecution(executionValue);
     setCredentials(credentialValue.items);
@@ -108,11 +123,20 @@ export function OperationsPanel({
     setAuditEvents(auditValue.items);
     setNotifications(notificationValue.items);
     setBackup(backupValue);
+    setUpdate(updateValue);
   }, []);
 
   useEffect(() => {
     refresh().catch((reason: Error) => setError(reason.message));
   }, [refresh]);
+
+  useEffect(() => {
+    if (!update || !["queued", "checking", "updating"].includes(update.state)) return;
+    const timer = window.setInterval(() => {
+      api.updateStatus().then(setUpdate).catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [update]);
 
   const action = async (operation: () => Promise<unknown>) => {
     setBusy(true);
@@ -156,6 +180,7 @@ export function OperationsPanel({
         {tab === "system" && <SystemView
           execution={execution}
           backup={backup}
+          update={update}
           busy={busy}
           action={action}
         />}
@@ -207,15 +232,21 @@ export function OperationsPanel({
 function SystemView({
   execution,
   backup,
+  update,
   busy,
   action,
 }: {
   execution: ExecutionStatus | null;
   backup: BackupStatus | null;
+  update: UpdateStatus | null;
   busy: boolean;
   action: (operation: () => Promise<unknown>) => Promise<void>;
 }) {
   if (!execution) return <p className="loading-note">正在读取 worker 状态…</p>;
+  const updateCanApply = Boolean(
+    update?.available_commit
+    && (update.state === "update_available" || update.state === "failed"),
+  );
   return <>
     <div className="ops-summary">
       <div><span>全局执行</span><strong className={`state-text ${execution.state}`}>{execution.state}</strong></div>
@@ -227,6 +258,33 @@ function SystemView({
       <div><span>最近备份</span><strong>{time(backup?.latest?.modified_at ?? null)}</strong></div>
       <div><span>校验文件</span><strong>{backup?.latest ? (backup.latest.checksum_present ? "存在" : "缺失") : "—"}</strong></div>
     </div>
+    <section className="update-manager">
+      <header>
+        <div><h3>软件更新</h3><p>只允许从部署时锁定的 Git 远端和分支快进更新；更新会先暂停交易并创建加密备份。</p></div>
+        <span className={`status-pill ${update?.state === "failed" ? "blocked" : "ready"}`}>
+          {update ? updateStateNames[update.state] : "读取中"}
+        </span>
+      </header>
+      <div className="update-details">
+        <div><span>当前版本</span><code>{update?.current_commit?.slice(0, 12) ?? "—"}</code></div>
+        <div><span>远端版本</span><code>{update?.available_commit?.slice(0, 12) ?? "—"}</code></div>
+        <div><span>检查时间</span><strong>{time(update?.checked_at ?? null)}</strong></div>
+        {update?.error_code && <div><span>错误码</span><code>{update.error_code}</code></div>}
+      </div>
+      <div className="inline-actions update-actions">
+        <button className="button secondary" disabled={busy || !update?.enabled || ["queued", "checking", "updating"].includes(update.state)}
+          onClick={() => void action(api.checkForUpdates)}>检查更新</button>
+        <button className="button primary" disabled={busy || !updateCanApply}
+          onClick={() => {
+            if (update?.available_commit && window.confirm(
+              `确认更新到 ${update.available_commit.slice(0, 12)}？系统会暂停交易、备份数据库并短暂离线；完成后仍需重新对账。`,
+            )) {
+              void action(() => api.applyUpdate(update.available_commit as string));
+            }
+          }}>{update?.state === "failed" ? "重试更新" : "立即更新"}</button>
+      </div>
+      {!update?.enabled && <p className="warning-note">宿主机更新代理尚未安装；请先通过远程部署命令升级一次。</p>}
+    </section>
     <section className="backup-manager">
       <header><div><h3>加密备份管理</h3><p>最新备份受保护；删除旧归档时会同时删除对应校验文件。</p></div></header>
       <div className="ops-table-wrap"><table><thead><tr><th>归档</th><th>时间</th><th>大小</th><th>校验</th><th>操作</th></tr></thead>

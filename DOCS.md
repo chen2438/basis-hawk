@@ -138,6 +138,10 @@
 - 已完成：受控运维清理。前端列出全部加密归档并只允许显式确认删除非最新备份及其校验文件；通知日志
   只清理超过指定保留期的 `sent/dead` 终态，待发送/重试记录和不可修改的管理员审计不受影响。全部
   Compose 服务的 Docker JSON 日志限制为 10 MiB × 5 文件，不向 Web 容器暴露 Docker Socket。
+- 已完成：前端受控软件更新。API 只能向宿主机 systemd 代理提交检查或更新到已锁定 HTTPS Git
+  远端/分支最新提交的固定请求，不持有 Docker Socket、Git checkout 或任意宿主机命令权限；代理拒绝
+  脏工作区、远端/分支变化、非快进和检查后远端漂移。确认更新会先持久化全局暂停，再由既有部署流程
+  创建加密备份、快进、构建、迁移和健康检查，状态与脱敏错误码回传前端，完成后仍需管理员重新对账。
 - 已完成：六所各 500 个候选的 3,000 标的端到端负载验收。行情服务使用标的键索引重算并持久化全部
   机会，REST 单页上限及首页初始请求同步扩展到 3,000，不再出现后端已扫描但前端只取得前 300 个的
   截断；负载测试同时验证每所 500 上限、健康计算、完整持久化和越界拒绝。
@@ -327,6 +331,8 @@ MEXC 使用已获特批的标准 V1 合约接口，但官方文档仍将合约�
 .venv/bin/pytest -q
 bash -n scripts/deploy_vps.sh
 bash -n scripts/bootstrap_vps.sh
+bash -n scripts/install_update_agent.sh
+bash -n scripts/update_agent.sh
 pnpm --dir frontend test
 pnpm --dir frontend build
 docker compose --env-file .env.example config --quiet

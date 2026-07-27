@@ -33,6 +33,8 @@ class AppConfig(BaseSettings):
     smtp_to: str | None = None
     notification_batch_size: int = Field(default=20, ge=1, le=100)
     backup_directory: Path = Path("/backups")
+    update_request_directory: Path = Path("/var/lib/basis-hawk-updater/request")
+    update_status_file: Path = Path("/var/lib/basis-hawk-updater/status/status")
     transfer_per_request_limit_usdt: Decimal = Field(
         default=Decimal("0"),
         ge=0,

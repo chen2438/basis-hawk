@@ -58,6 +58,8 @@ services:
     tmpfs: [/tmp]
     volumes:
       - postgres_backups:/backups
+      - /var/lib/basis-hawk-updater/request:/var/lib/basis-hawk-updater/request
+      - /var/lib/basis-hawk-updater/status:/var/lib/basis-hawk-updater/status:ro
     logging: *default-logging
     networks: [backend]
 

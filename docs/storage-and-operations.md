@@ -74,6 +74,17 @@ SSH 会话启动时，bootstrap 会在读取完脚本后把部署脚本的标准
 部分 UFW 规则，因此还必须在云厂商安全组只开放 SSH、80 和 443；当前 Compose 本身只发布 80/443。
 脚本不修改 DNS、云安全组、交易所 Key 或异地备份目标。
 
+从 Git checkout 部署时，部署脚本还会安装 root 所有的 `basis-hawk-update.path` 和
+`basis-hawk-update.service`。API 只对 `/var/lib/basis-hawk-updater/request` 拥有写权限，只读挂载
+`status`，不挂载 Docker Socket、`/opt/basis-hawk` 或 updater 配置。systemd 代理从 root-only 配置
+读取部署时锁定的项目目录、HTTPS origin 和分支；请求格式只有版本、UUID、`check|update` 以及受
+严格十六进制校验的目标提交，不存在命令、参数、路径或仓库字段。代理使用独占锁，拒绝符号链接、
+脏工作区、origin/branch 不一致、非快进历史及目标不再等于远端头的请求。检查只 fetch；更新在 API
+已经持久化全局暂停后快进，并调用同一 `deploy_vps.sh --skip-admin --yes`，因此仍执行升级前加密备份、
+迁移和健康检查。状态文件只含提交 ID、时间和预定义错误码；完整输出留在
+`journalctl -u basis-hawk-update.service`。首次获得该功能必须仍用远程 bootstrap 升级一次以安装
+宿主机代理，此后才能在前端检查和更新。更新成功不会自动解除安全暂停，管理员必须重新对账。
+
 Compose 还提供独立非 root `backup` 服务。它使用与 PostgreSQL 17 服务端同版本的 `pg_dump`，启动后
 立即生成一次 custom archive，之后默认每 86400 秒生成一次。归档在写入命名卷时直接使用独立
 `BASIS_HAWK_BACKUP_KEY` 做 AES-256-GCM 认证加密，明文数据库不会落盘；每份归档另有 SHA-256 文件，
@@ -398,6 +409,13 @@ API 进程重启、PostgreSQL 重启及连接池恢复、advisory lock 排他 wo
 验证、空库恢复和非空库拒绝覆盖。应用及备份运行均使用只读根文件系统和 `/tmp` tmpfs。无论成功或
 失败都只按本次随机名称清理资源，不会连接 Compose 项目、读取真实凭据或接触交易所。CI 的
 `container-acceptance` job 会执行同一命令。
+
+更新相关 shell 文件还必须通过：
+
+```bash
+bash -n scripts/install_update_agent.sh
+bash -n scripts/update_agent.sh
+```
 
 API 容器挂载同一 `postgres_backups` 卷，仅用于列出归档以及受控删除非最新归档和旁路 SHA-256 文件。
 API 不接收 `BASIS_HAWK_BACKUP_KEY`，因此不能解密、验证内容或恢复数据库；实际认证验证和恢复仍只允许

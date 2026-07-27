@@ -15,6 +15,16 @@ describe("Basis Hawk dashboard", () => {
         : url.includes("system/execution") ? { state: "blocked", reason: "worker pending", updated_at: null, accounts: [] }
         : url.includes("operations/audit") ? { items: [] }
         : url.includes("operations/notifications") ? { items: [] }
+        : url.includes("operations/update") ? {
+          enabled: true,
+          state: "update_available",
+          current_commit: "1111111111111111111111111111111111111111",
+          available_commit: "2222222222222222222222222222222222222222",
+          request_id: null,
+          checked_at: "2026-07-27T00:00:00Z",
+          completed_at: null,
+          error_code: null,
+        }
         : url.includes("operations/backup") ? {
           directory_available: true,
           archive_count: 2,
@@ -66,6 +76,9 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByText("实盘运营控制台")).toBeTruthy();
     expect(screen.getByText("worker pending")).toBeTruthy();
     expect(screen.getByRole("button", { name: "交易所账户" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "软件更新" })).toBeTruthy();
+    expect(screen.getByText("发现新版本")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "立即更新" }) as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getAllByRole("button", { name: "删除旧备份" })[0] as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getAllByRole("button", { name: "删除旧备份" })[1] as HTMLButtonElement).disabled).toBe(false);
   });

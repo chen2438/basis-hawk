@@ -21,6 +21,7 @@ import type {
   PnlRealization,
   Settings,
   TradeIntent,
+  UpdateStatus,
 } from "./types";
 
 function cookie(name: string): string | null {
@@ -74,6 +75,17 @@ export const api = {
   notificationHistory: () =>
     request<{ items: NotificationHistoryItem[] }>("/api/operations/notifications?limit=100"),
   backupStatus: () => request<BackupStatus>("/api/operations/backup"),
+  updateStatus: () => request<UpdateStatus>("/api/operations/update"),
+  checkForUpdates: () =>
+    request<{ queued: true; request_id: string }>("/api/operations/update/check", {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  applyUpdate: (targetCommit: string) =>
+    request<{ queued: true; request_id: string }>("/api/operations/update/apply", {
+      method: "POST",
+      body: JSON.stringify({ target_commit: targetCommit, confirmed: true }),
+    }),
   deleteBackup: (archiveName: string) =>
     request<{ deleted: true; archive_name: string }>(
       `/api/operations/backups/${encodeURIComponent(archiveName)}`,

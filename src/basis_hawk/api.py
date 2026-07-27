@@ -49,6 +49,7 @@ from basis_hawk.transfers import (
     InternalTransferLedger,
     InternalTransferRequest,
 )
+from basis_hawk.updates import UpdateError, enqueue_update, update_status
 
 SESSION_COOKIE = "basis_hawk_session"
 CSRF_COOKIE = "basis_hawk_csrf"
@@ -147,6 +148,11 @@ class BackupDeleteRequest(BaseModel):
 
 class LogPruneRequest(BaseModel):
     retention_days: int = Field(default=30, ge=1, le=3650)
+    confirmed: Literal[True]
+
+
+class UpdateApplyRequest(BaseModel):
+    target_commit: str = Field(min_length=40, max_length=64)
     confirmed: Literal[True]
 
 
@@ -766,6 +772,81 @@ def create_app(
             },
         )
         return {"deleted_count": deleted, "cutoff": cutoff}
+
+    @app.get("/api/operations/update")
+    async def operation_update_status() -> dict[str, object]:
+        return update_status(
+            config.update_request_directory,
+            config.update_status_file,
+        )
+
+    @app.post("/api/operations/update/check")
+    async def operation_check_update(request: Request) -> dict[str, object]:
+        request_id = uuid4()
+        try:
+            enqueue_update(
+                config.update_request_directory,
+                action="check",
+                request_id=request_id,
+            )
+        except UpdateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await scanner.database.append_audit(
+            "software.update_check_requested",
+            actor=request_actor(request),
+            details={"request_id": str(request_id)},
+        )
+        return {"queued": True, "request_id": str(request_id)}
+
+    @app.post("/api/operations/update/apply")
+    async def operation_apply_update(
+        value: UpdateApplyRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        status = update_status(
+            config.update_request_directory,
+            config.update_status_file,
+        )
+        if (
+            not status["enabled"]
+            or status["state"] not in {"update_available", "failed"}
+            or status["available_commit"] != value.target_commit
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="check for updates again before applying",
+            )
+        request_id = uuid4()
+        await scanner.database.set_execution_control(
+            state="paused",
+            reason="software update requested",
+        )
+        await scanner.database.append_audit(
+            "software.update_requested",
+            actor=request_actor(request),
+            details={
+                "request_id": str(request_id),
+                "target_commit": value.target_commit,
+            },
+        )
+        try:
+            enqueue_update(
+                config.update_request_directory,
+                action="update",
+                request_id=request_id,
+                target_commit=value.target_commit,
+            )
+        except UpdateError as exc:
+            await scanner.database.append_audit(
+                "software.update_queue_failed",
+                actor=request_actor(request),
+                details={
+                    "request_id": str(request_id),
+                    "error_code": "queue_failed",
+                },
+            )
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"queued": True, "request_id": str(request_id)}
 
     @app.get("/api/transfers")
     async def internal_transfers(

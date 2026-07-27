@@ -428,6 +428,25 @@ if ! ${ASSUME_YES}; then
         || die "deployment canceled"
 fi
 
+if [[ -d "${PROJECT_DIRECTORY}/.git" ]]; then
+    updater_origin="$(
+        git -C "${PROJECT_DIRECTORY}" remote get-url origin 2>/dev/null || true
+    )"
+    updater_branch="$(
+        git -C "${PROJECT_DIRECTORY}" symbolic-ref --quiet --short HEAD \
+            2>/dev/null || true
+    )"
+    if [[ "${updater_origin}" == https://* && -n "${updater_branch}" ]]; then
+        log "installing the constrained host update agent"
+        run_as_root "${PROJECT_DIRECTORY}/scripts/install_update_agent.sh" \
+            "${PROJECT_DIRECTORY}" "${updater_origin}" "${updater_branch}"
+    else
+        warn "web updates are unavailable because the checkout origin or branch is unsupported"
+    fi
+else
+    warn "web updates are unavailable because this deployment is not a Git checkout"
+fi
+
 wait_for_command() {
     local timeout_seconds="$1"
     local description="$2"

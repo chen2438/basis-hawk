@@ -292,11 +292,22 @@ export interface BackupStatus {
 }
 
 export interface BackupArchive {
-    name: string;
-    size_bytes: number;
-    modified_at: string;
-    checksum_present: boolean;
-    latest?: boolean;
+  name: string;
+  size_bytes: number;
+  modified_at: string;
+  checksum_present: boolean;
+  latest?: boolean;
+}
+
+export interface UpdateStatus {
+  enabled: boolean;
+  state: "unavailable" | "idle" | "queued" | "checking" | "up_to_date" | "update_available" | "updating" | "succeeded" | "failed";
+  current_commit: string | null;
+  available_commit: string | null;
+  request_id: string | null;
+  checked_at: string | null;
+  completed_at: string | null;
+  error_code: string | null;
 }
 
 export interface LiveOpenPreview {
