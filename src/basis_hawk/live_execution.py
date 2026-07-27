@@ -14,6 +14,7 @@ from basis_hawk.accounts import (
     PerpMarginMode,
     PositionMode,
     PrivateAccountClient,
+    PrivateRequestError,
     RemotePosition,
     create_account_client,
 )
@@ -246,10 +247,15 @@ class LiveExecutionService:
             uncertain = 0
             for leg, result in zip(ordered_legs, results, strict=True):
                 if isinstance(result, BaseException):
-                    await self.database.mark_order_submission_unknown(
-                        order_leg_id=leg.id
-                    )
-                    uncertain += 1
+                    if _definitive_order_rejection(result):
+                        await self.database.mark_order_submission_rejected(
+                            order_leg_id=leg.id
+                        )
+                    else:
+                        await self.database.mark_order_submission_unknown(
+                            order_leg_id=leg.id
+                        )
+                        uncertain += 1
                     continue
                 try:
                     await self.database.record_order_submission(
@@ -267,6 +273,15 @@ class LiveExecutionService:
                 await client.close()
             except Exception:
                 pass
+
+
+def _definitive_order_rejection(error: BaseException) -> bool:
+    return (
+        isinstance(error, PrivateRequestError)
+        and error.status_code is not None
+        and 400 <= error.status_code < 500
+        and error.status_code not in {408, 425, 429}
+    )
 
 
 class LiveCompensationService:

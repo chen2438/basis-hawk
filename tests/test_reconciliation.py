@@ -709,6 +709,25 @@ async def test_reconciliation_blocks_when_submitted_order_cannot_be_found() -> N
     assert states[0].order_reconciliation_complete is False
     assert states[0].fill_reconciliation_complete is False
     assert "not found by client order ID" in states[0].reason
+
+    async with database.sessions() as session:
+        intent = await session.get(TradeIntentRow, intent_id)
+        leg = await session.get(OrderLegRow, stored[1][0].id)
+        assert intent is not None
+        assert leg is not None
+        intent.status = "manual_review"
+        leg.status = "unknown"
+        await session.commit()
+    await database.set_execution_control(state="reconciling", reason="test")
+
+    await reconciler.run_once()
+
+    recovered = await database.trade_intent(intent_id)
+    assert recovered is not None
+    assert recovered[1][0].status == "failed"
+    states = await database.reconciliation_states()
+    assert states[0].order_reconciliation_complete is True
+    assert states[0].fill_reconciliation_complete is True
     await database.close()
 
 

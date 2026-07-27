@@ -231,12 +231,21 @@ class ReconciliationService:
                                 or "remote order lookup is incomplete"
                             )
                         elif lookup.order is None:
-                            order_reconciliation_complete = False
-                            reasons.append(
-                                "submitted order was not found by client order ID"
-                                if recovering_order_id
-                                else "linked order was not found by client order ID"
+                            missing_unknown = (
+                                leg.status == "unknown"
+                                and await self.database.mark_unknown_order_not_found(
+                                    order_leg_id=leg.id
+                                )
                             )
+                            if missing_unknown:
+                                leg.status = "failed"
+                            if not missing_unknown:
+                                order_reconciliation_complete = False
+                                reasons.append(
+                                    "submitted order was not found by client order ID"
+                                    if recovering_order_id
+                                    else "linked order was not found by client order ID"
+                                )
                         else:
                             exchange_order_id = (
                                 await self.database.reconcile_remote_order(

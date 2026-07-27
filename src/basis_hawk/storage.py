@@ -2477,6 +2477,63 @@ class Database:
                 control.updated_at = now
             await session.commit()
 
+    async def mark_order_submission_rejected(
+        self,
+        *,
+        order_leg_id: str,
+    ) -> None:
+        async with self.sessions() as session:
+            leg = await session.scalar(
+                select(OrderLegRow)
+                .where(OrderLegRow.id == order_leg_id)
+                .with_for_update()
+            )
+            if leg is None:
+                raise ValueError("order leg was not found")
+            if leg.status == "submitted":
+                leg.status = "failed"
+                leg.updated_at = datetime.now(UTC)
+            control = await session.get(ExecutionControlRow, 1)
+            reason = (
+                "one or more two-leg orders were rejected; "
+                "fill reconciliation and compensation are required"
+            )
+            now = datetime.now(UTC)
+            if control is None:
+                session.add(
+                    ExecutionControlRow(
+                        id=1,
+                        state="paused",
+                        reason=reason,
+                        updated_at=now,
+                    )
+                )
+            else:
+                control.state = "paused"
+                control.reason = reason
+                control.updated_at = now
+            await session.commit()
+
+    async def mark_unknown_order_not_found(
+        self,
+        *,
+        order_leg_id: str,
+    ) -> bool:
+        async with self.sessions() as session:
+            leg = await session.scalar(
+                select(OrderLegRow)
+                .where(OrderLegRow.id == order_leg_id)
+                .with_for_update()
+            )
+            if leg is None:
+                raise ValueError("order leg was not found")
+            if leg.status != "unknown" or leg.exchange_order_id is not None:
+                return False
+            leg.status = "failed"
+            leg.updated_at = datetime.now(UTC)
+            await session.commit()
+            return True
+
     async def settle_live_open(
         self,
         *,

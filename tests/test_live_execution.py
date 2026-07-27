@@ -8,6 +8,7 @@ from basis_hawk.accounts import (
     OrderSubmission,
     PerpConfiguration,
     PositionMode,
+    PrivateRequestError,
     RemoteFill,
     RemotePosition,
     RemoteTradingState,
@@ -538,6 +539,46 @@ async def test_live_executor_marks_uncertain_leg_pauses_and_never_resubmits() ->
     assert control is not None
     assert control.state == "paused"
     assert "client-order-ID reconciliation" in control.reason
+    await database.close()
+
+
+async def test_live_executor_records_definitive_http_rejection() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials, intent_id = await _planned_live_intent(database)
+    await database.set_execution_control(state="ready", reason="test")
+
+    class RejectedPerpClient(FakeLiveAccountClient):
+        async def place_limit_ioc(
+            self,
+            order: LimitIocOrder,
+        ) -> OrderSubmission:
+            if order.market == "perp":
+                raise PrivateRequestError(
+                    "private account request rejected with HTTP 400",
+                    status_code=400,
+                )
+            return await super().place_limit_ioc(order)
+
+    client = RejectedPerpClient(database)
+    result = await LiveExecutionService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    ).run_once()
+
+    assert result.submitted == 1
+    assert result.uncertain == 0
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    assert {item.market: item.status for item in stored[1]} == {
+        "spot": "acknowledged",
+        "perp": "failed",
+    }
+    control = await database.execution_control()
+    assert control is not None
+    assert control.state == "paused"
+    assert "orders were rejected" in control.reason
     await database.close()
 
 
