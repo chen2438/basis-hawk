@@ -477,7 +477,7 @@ async def test_gate_automatic_service_fetches_bounded_sandbox_depth() -> None:
     await database.replace_instruments("gate", pairs)
     sandbox_pairs = [
         pair.model_copy(
-            update={"spot_price_increment": Decimal("0.1")}
+            update={"spot_quantity_increment": Decimal("0.4")}
         )
         if pair.base_asset == "GATE00"
         else pair
@@ -499,12 +499,15 @@ async def test_gate_automatic_service_fetches_bounded_sandbox_depth() -> None:
     assert result.action == "open"
     assert environments == [ExchangeEnvironment.SANDBOX]
     assert len(adapter.calls) == GATE_AUTOMATIC_DEPTH_CANDIDATES
-    assert adapter.calls[0] == "GATE01"
+    assert adapter.calls[0] == "GATE00"
     assert adapter.closed is True
     recoverable = await database.recoverable_trade_intents()
     assert len(recoverable) == 1
     assert recoverable[0].exchange == Exchange.GATE.value
     assert recoverable[0].environment == "sandbox"
-    assert recoverable[0].base_asset == "GATE01"
+    assert recoverable[0].base_asset == "GATE00"
     assert recoverable[0].requested_notional == Decimal("75")
+    assert abs(
+        recoverable[0].base_quantity - Decimal("7.2")
+    ) < Decimal("0.000000000001")
     await database.close()

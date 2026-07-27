@@ -12,10 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_valid
 
 from basis_hawk.credentials import ExchangeEnvironment
 from basis_hawk.exchanges import ExchangeAdapter, GateAdapter
+from basis_hawk.executable_quotes import (
+    market_quote_from_opportunity,
+    opportunity_with_executable_quote,
+)
 from basis_hawk.models import (
     Exchange,
     InstrumentPair,
-    MarketQuote,
     Opportunity,
     Quality,
 )
@@ -371,84 +374,6 @@ def _opening_rule_candidates(
     return candidates
 
 
-def _quote_from_opportunity(opportunity: Opportunity) -> MarketQuote:
-    return MarketQuote(
-        exchange=opportunity.exchange,
-        base_asset=opportunity.base_asset,
-        observed_at=opportunity.observed_at,
-        spot_bid=opportunity.spot_bid,
-        spot_bid_qty=Decimal("0"),
-        spot_ask=opportunity.spot_ask,
-        spot_ask_qty=(
-            opportunity.spot_ask_notional / opportunity.spot_ask
-            if opportunity.spot_ask > 0
-            else Decimal("0")
-        ),
-        perp_bid=opportunity.perp_bid,
-        perp_bid_qty=(
-            opportunity.perp_bid_notional / opportunity.perp_bid
-            if opportunity.perp_bid > 0
-            else Decimal("0")
-        ),
-        perp_ask=opportunity.perp_ask,
-        perp_ask_qty=Decimal("0"),
-        spot_quote_volume_24h=opportunity.spot_quote_volume_24h,
-        perp_quote_volume_24h=opportunity.perp_quote_volume_24h,
-    )
-
-
-def _same_trading_rules(
-    left: InstrumentPair,
-    right: InstrumentPair,
-) -> bool:
-    return all(
-        getattr(left, field) == getattr(right, field)
-        for field in (
-            "spot_symbol",
-            "perp_symbol",
-            "spot_price_increment",
-            "spot_quantity_increment",
-            "spot_min_quantity",
-            "spot_min_notional",
-            "perp_price_increment",
-            "perp_quantity_increment",
-            "perp_min_quantity",
-            "perp_min_notional",
-            "perp_contract_size",
-        )
-    )
-
-
-def _opportunity_with_quote(
-    opportunity: Opportunity,
-    quote: MarketQuote,
-) -> Opportunity:
-    spot_ask_notional = quote.spot_ask * quote.spot_ask_qty
-    perp_bid_notional = quote.perp_bid * quote.perp_bid_qty
-    return opportunity.model_copy(
-        update={
-            "observed_at": quote.observed_at,
-            "spot_bid": quote.spot_bid,
-            "spot_ask": quote.spot_ask,
-            "perp_bid": quote.perp_bid,
-            "perp_ask": quote.perp_ask,
-            "executable_basis": (
-                quote.perp_bid / quote.spot_ask - Decimal("1")
-            ),
-            "top_book_notional": min(
-                spot_ask_notional,
-                perp_bid_notional,
-            ),
-            "close_top_book_notional": min(
-                quote.spot_bid * quote.spot_bid_qty,
-                quote.perp_ask * quote.perp_ask_qty,
-            ),
-            "spot_ask_notional": spot_ask_notional,
-            "perp_bid_notional": perp_bid_notional,
-        }
-    )
-
-
 class AutomaticTradingService:
     def __init__(
         self,
@@ -696,7 +621,6 @@ class AutomaticTradingService:
                 pair.key: pair
                 for pair in sandbox_pairs
                 if pair.key in pair_by_key
-                and _same_trading_rules(pair, pair_by_key[pair.key])
             }
             pair_by_key.update(depth_pair_by_key)
         opportunity_by_key = {
@@ -762,11 +686,13 @@ class AutomaticTradingService:
                 try:
                     quote = await adapter.executable_quote(
                         pair,
-                        _quote_from_opportunity(opportunity),
+                        market_quote_from_opportunity(opportunity),
                     )
-                    refreshed[opportunity.key] = _opportunity_with_quote(
-                        opportunity,
-                        quote,
+                    refreshed[opportunity.key] = (
+                        opportunity_with_executable_quote(
+                            opportunity,
+                            quote,
+                        )
                     )
                 except (RuntimeError, ValueError):
                     logger.info(

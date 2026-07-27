@@ -22,7 +22,12 @@ from basis_hawk.credentials import (
     ExchangeEnvironment,
     ExchangeSecrets,
 )
-from basis_hawk.models import Exchange
+from basis_hawk.exchanges import ExchangeAdapter, GateAdapter
+from basis_hawk.executable_quotes import (
+    market_quote_from_opportunity,
+    opportunity_with_executable_quote,
+)
+from basis_hawk.models import Exchange, InstrumentPair, Opportunity
 from basis_hawk.storage import Database, OrderLegRow, TradeIntentRow
 from basis_hawk.trading import protective_limit_price
 
@@ -274,10 +279,18 @@ class LiveCompensationService:
             [Exchange, ExchangeSecrets, ExchangeEnvironment],
             PrivateAccountClient,
         ] = create_account_client,
+        gate_adapter_factory: Callable[
+            [ExchangeEnvironment],
+            ExchangeAdapter,
+        ]
+        | None = None,
     ) -> None:
         self.database = database
         self.credentials = credentials
         self.account_client_factory = account_client_factory
+        self.gate_adapter_factory = gate_adapter_factory or (
+            lambda environment: GateAdapter(environment=environment)
+        )
 
     async def run_once(self) -> LiveCompensationResult:
         control = await self.database.execution_control()
@@ -357,6 +370,14 @@ class LiveCompensationService:
             (item for item in pairs if item.base_asset == intent.base_asset),
             None,
         )
+        if (
+            exchange == Exchange.GATE
+            and environment == ExchangeEnvironment.SANDBOX
+            and opportunity is not None
+        ):
+            opportunity, pair = await self._gate_sandbox_market(
+                opportunity
+            )
         now = datetime.now(UTC)
         if (
             opportunity is None
@@ -463,6 +484,39 @@ class LiveCompensationService:
             return True, 0
         finally:
             await client.close()
+
+    async def _gate_sandbox_market(
+        self,
+        opportunity: Opportunity,
+    ) -> tuple[Opportunity, InstrumentPair | None]:
+        adapter = self.gate_adapter_factory(
+            ExchangeEnvironment.SANDBOX
+        )
+        try:
+            pairs = await adapter.instruments()
+            pair = next(
+                (
+                    item
+                    for item in pairs
+                    if item.base_asset == opportunity.base_asset
+                ),
+                None,
+            )
+            if pair is None:
+                return opportunity, None
+            quote = await adapter.executable_quote(
+                pair,
+                market_quote_from_opportunity(opportunity),
+            )
+            return (
+                opportunity_with_executable_quote(
+                    opportunity,
+                    quote,
+                ),
+                pair,
+            )
+        finally:
+            await adapter.close()
 
     async def _maximum_slippage(self, *, environment: str) -> Decimal:
         control = await self.database.automation_control()

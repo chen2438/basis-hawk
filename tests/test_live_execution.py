@@ -645,3 +645,78 @@ async def test_live_compensation_submits_once_with_fresh_protective_price() -> N
     )
     assert compensation.status == "acknowledged"
     await database.close()
+
+
+async def test_gate_sandbox_compensation_uses_testnet_rules_and_depth() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials = CredentialService(
+        database,
+        SecretCipher(SecretCipher.generate_key()),
+    )
+    opportunity = _opportunity().model_copy(
+        update={
+            "exchange": Exchange.GATE,
+            "spot_symbol": "ORDER_USDT",
+            "perp_symbol": "ORDER_USDT",
+        }
+    )
+    sandbox_pair = _pair().model_copy(
+        update={
+            "exchange": Exchange.GATE,
+            "spot_symbol": "ORDER_USDT",
+            "perp_symbol": "ORDER_USDT",
+            "spot_price_increment": Decimal("0.001"),
+            "spot_quantity_increment": Decimal("0.4"),
+            "perp_price_increment": Decimal("0.0001"),
+            "perp_contract_size": Decimal("0.01"),
+        }
+    )
+
+    class FakeGateDepthAdapter:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def instruments(self) -> list[InstrumentPair]:
+            return [sandbox_pair]
+
+        async def executable_quote(self, pair, quote):
+            assert pair is sandbox_pair
+            return quote.model_copy(
+                update={
+                    "observed_at": datetime.now(UTC),
+                    "spot_bid": Decimal("0.048"),
+                    "spot_bid_qty": Decimal("200"),
+                    "spot_ask": Decimal("0.049"),
+                    "spot_ask_qty": Decimal("150"),
+                    "perp_bid": Decimal("0.050"),
+                    "perp_bid_qty": Decimal("180"),
+                    "perp_ask": Decimal("0.051"),
+                    "perp_ask_qty": Decimal("170"),
+                }
+            )
+
+        async def close(self) -> None:
+            self.closed = True
+
+    adapter = FakeGateDepthAdapter()
+    environments: list[ExchangeEnvironment] = []
+
+    def gate_adapter_factory(environment: ExchangeEnvironment):
+        environments.append(environment)
+        return adapter
+
+    refreshed, resolved_pair = await LiveCompensationService(
+        database,
+        credentials,
+        gate_adapter_factory=gate_adapter_factory,
+    )._gate_sandbox_market(opportunity)
+
+    assert environments == [ExchangeEnvironment.SANDBOX]
+    assert resolved_pair is sandbox_pair
+    assert refreshed.spot_bid == Decimal("0.048")
+    assert refreshed.perp_ask == Decimal("0.051")
+    assert refreshed.top_book_notional == Decimal("7.35")
+    assert refreshed.close_top_book_notional == Decimal("8.67")
+    assert adapter.closed is True
+    await database.close()
