@@ -6,6 +6,7 @@ import { apiErrorMessage } from "./api";
 import {
   executionReason,
   OperationsPanel,
+  PositionsView,
   tradeFailureReason,
 } from "./OperationsPanel";
 
@@ -381,6 +382,37 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByText("真实配对持仓平仓")).toBeTruthy();
     expect((screen.getByRole("button", { name: "生成开仓预览" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/先生成 60 秒预览票据/)).toBeTruthy();
+  });
+
+  it("shows price-only unrealized PnL with its executable exit marks", () => {
+    render(<PositionsView positions={[{
+      id: "position-1",
+      opening_intent_id: "intent-1",
+      closing_intent_id: null,
+      exchange: "gate",
+      environment: "sandbox",
+      base_asset: "VINE",
+      initial_quantity: "100",
+      quantity: "100",
+      spot_entry_price: "0.0084",
+      perp_entry_price: "0.0085",
+      opening_fees_usdt: "0.01",
+      remaining_opening_fees_usdt: "0.01",
+      closing_fees_usdt: null,
+      realized_pnl_usdt: null,
+      spot_exit_price: "0.0086",
+      perp_exit_price: "0.0084",
+      unrealized_pnl_usdt: "0.03",
+      valuation_observed_at: "2026-07-28T20:00:00Z",
+      status: "open",
+      opened_at: "2026-07-28T19:00:00Z",
+      closed_at: null,
+    }]} />);
+    expect(screen.getByText("未实现 PnL（价格）")).toBeTruthy();
+    expect(screen.getByText("0.0084 / 0.0086")).toBeTruthy();
+    expect(screen.getByText("0.0085 / 0.0084")).toBeTruthy();
+    expect(screen.getByText("0.03 USDT")).toBeTruthy();
+    expect(screen.getByText(/不含资金费及开平仓手续费/)).toBeTruthy();
   });
 
   it("lets an existing Bybit account declare its empty-account position mode", async () => {

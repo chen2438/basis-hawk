@@ -174,9 +174,19 @@ async def test_rest_contract_and_settings() -> None:
         assert result.executed == 1
         fills = await client.get(f"/api/trades/intents/{intent_id}/fills")
         assert len(fills.json()["items"]) == 2
-        positions = await client.get("/api/trades/positions", params={"status": "open"})
-        position_id = positions.json()["items"][0]["id"]
-        assert positions.json()["items"][0]["opening_intent_id"] == intent_id
+        positions = await client.get(
+            "/api/trades/positions",
+            params={"status": "open", "include_valuation": True},
+        )
+        open_position = positions.json()["items"][0]
+        position_id = open_position["id"]
+        assert open_position["opening_intent_id"] == intent_id
+        assert open_position["spot_exit_price"] == "99"
+        assert open_position["perp_exit_price"] == "102"
+        assert Decimal(open_position["unrealized_pnl_usdt"]) == (
+            Decimal(open_position["quantity"]) * Decimal("-2")
+        )
+        assert open_position["valuation_observed_at"] is not None
         close = await client.post(
             f"/api/trades/paper/positions/{position_id}/close",
             headers={"Idempotency-Key": str(uuid.uuid4())},
@@ -191,6 +201,7 @@ async def test_rest_contract_and_settings() -> None:
         assert (await PaperExecutionService(database).run_once()).executed == 1
         closed = await client.get("/api/trades/positions", params={"status": "closed"})
         assert closed.json()["items"][0]["id"] == position_id
+        assert closed.json()["items"][0]["unrealized_pnl_usdt"] is None
     await database.close()
 
 

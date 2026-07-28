@@ -111,6 +111,10 @@ export interface PairedPosition {
   remaining_opening_fees_usdt: string;
   closing_fees_usdt: string | null;
   realized_pnl_usdt: string | null;
+  spot_exit_price: string | null;
+  perp_exit_price: string | null;
+  unrealized_pnl_usdt: string | null;
+  valuation_observed_at: string | null;
   status: string;
   opened_at: string;
   closed_at: string | null;

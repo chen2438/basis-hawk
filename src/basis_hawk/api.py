@@ -39,6 +39,7 @@ from basis_hawk.credentials import (
     ExchangeSecrets,
 )
 from basis_hawk.crypto import SecretCipher
+from basis_hawk.exchanges import GateAdapter
 from basis_hawk.models import Exchange, Quality, ScannerSettings
 from basis_hawk.notifications import TelegramCommandService
 from basis_hawk.service import ScannerService, default_adapters
@@ -48,7 +49,13 @@ from basis_hawk.storage import (
     InternalTransferRow,
     TransferLimitSettings,
 )
-from basis_hawk.trading import IdempotencyConflict, TradeLedger, TradeValidationError
+from basis_hawk.trading import (
+    IdempotencyConflict,
+    PairedPositionView,
+    TradeLedger,
+    TradeValidationError,
+    value_open_position,
+)
 from basis_hawk.transfers import (
     InternalTransferDirection,
     InternalTransferLedger,
@@ -1872,11 +1879,94 @@ def create_app(
         }
 
     @app.get("/api/trades/positions")
-    async def paired_positions(status: str | None = None) -> dict[str, object]:
+    async def paired_positions(
+        status: str | None = None,
+        include_valuation: bool = False,
+    ) -> dict[str, object]:
+        positions = await trade_ledger.positions(status=status)
+        if not include_valuation:
+            return {
+                "items": [item.model_dump(mode="json") for item in positions]
+            }
+        valuations: dict[
+            tuple[Exchange, str, str],
+            tuple[Decimal, Decimal, datetime],
+        ] = {}
+        now = datetime.now(UTC)
+        for item in positions:
+            if item.status not in {"open", "closing"}:
+                continue
+            opportunity = scanner.opportunities.get(
+                f"{item.exchange.value}:{item.base_asset}"
+            )
+            if (
+                item.environment != ExchangeEnvironment.SANDBOX.value
+                and opportunity is not None
+                and opportunity.observed_at <= now + timedelta(seconds=5)
+                and now - opportunity.observed_at <= timedelta(seconds=15)
+            ):
+                valuations[(item.exchange, item.environment, item.base_asset)] = (
+                    opportunity.spot_bid,
+                    opportunity.perp_ask,
+                    opportunity.observed_at,
+                )
+
+        sandbox_bases = {
+            item.base_asset
+            for item in positions
+            if item.exchange == Exchange.GATE
+            and item.environment == ExchangeEnvironment.SANDBOX.value
+            and item.status in {"open", "closing"}
+        }
+        if sandbox_bases:
+            adapter = GateAdapter(
+                timeout=config.http_timeout_seconds,
+                environment=ExchangeEnvironment.SANDBOX,
+            )
+            try:
+                pairs = [
+                    pair
+                    for pair in await adapter.instruments()
+                    if pair.base_asset in sandbox_bases
+                ]
+                for quote in await adapter.quotes(pairs):
+                    sandbox_now = datetime.now(UTC)
+                    if (
+                        quote.observed_at <= sandbox_now + timedelta(seconds=5)
+                        and sandbox_now - quote.observed_at <= timedelta(seconds=15)
+                    ):
+                        valuations[
+                            (
+                                Exchange.GATE,
+                                ExchangeEnvironment.SANDBOX.value,
+                                quote.base_asset,
+                            )
+                        ] = (quote.spot_bid, quote.perp_ask, quote.observed_at)
+            except RuntimeError:
+                # A public TestNet outage must not hide the persisted position ledger.
+                pass
+            finally:
+                await adapter.close()
+
+        valued_positions: list[PairedPositionView] = []
+        for item in positions:
+            valuation = valuations.get(
+                (item.exchange, item.environment, item.base_asset)
+            )
+            valued_positions.append(
+                value_open_position(
+                    item,
+                    spot_exit_price=valuation[0],
+                    perp_exit_price=valuation[1],
+                    observed_at=valuation[2],
+                )
+                if valuation is not None
+                else item
+            )
         return {
             "items": [
                 item.model_dump(mode="json")
-                for item in await trade_ledger.positions(status=status)
+                for item in valued_positions
             ]
         }
 

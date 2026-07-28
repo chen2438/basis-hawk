@@ -598,6 +598,8 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
 .close-position-list article strong, .close-position-list article span { display: block; }
 .ops-table-wrap { max-height: 520px; overflow: auto; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
 .ops-table-wrap th { top: 0; }
+.positions-view { display: grid; gap: 10px; }
+.position-valuation-note { margin: 0; color: var(--muted); font-size: 12px; }
 .strategy-json { overflow: hidden; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
 .strategy-json header { display: flex; padding: 14px 16px; border-bottom: 1px solid var(--line); justify-content: space-between; }
 .strategy-json pre { max-height: 470px; margin: 0; padding: 18px; overflow: auto; color: #345266; font-size: 11px; background: #f8fbfa; }

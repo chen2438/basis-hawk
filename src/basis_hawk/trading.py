@@ -260,6 +260,10 @@ class PairedPositionView(BaseModel):
     remaining_opening_fees_usdt: Decimal
     closing_fees_usdt: Decimal | None
     realized_pnl_usdt: Decimal | None
+    spot_exit_price: Decimal | None = None
+    perp_exit_price: Decimal | None = None
+    unrealized_pnl_usdt: Decimal | None = None
+    valuation_observed_at: datetime | None = None
     status: str
     opened_at: datetime
     closed_at: datetime | None
@@ -273,6 +277,9 @@ class PairedPositionView(BaseModel):
         "remaining_opening_fees_usdt",
         "closing_fees_usdt",
         "realized_pnl_usdt",
+        "spot_exit_price",
+        "perp_exit_price",
+        "unrealized_pnl_usdt",
         when_used="json",
     )
     def serialize_decimal(self, value: Decimal | None) -> str | None:
@@ -1647,4 +1654,26 @@ def _position_view(row: PairedPositionRow) -> PairedPositionView:
         status=row.status,
         opened_at=row.opened_at,
         closed_at=row.closed_at,
+    )
+
+
+def value_open_position(
+    position: PairedPositionView,
+    *,
+    spot_exit_price: Decimal,
+    perp_exit_price: Decimal,
+    observed_at: datetime,
+) -> PairedPositionView:
+    """Attach conservative, price-only mark-to-market values to an open pair."""
+    unrealized_pnl = position.quantity * (
+        (spot_exit_price - position.spot_entry_price)
+        + (position.perp_entry_price - perp_exit_price)
+    )
+    return position.model_copy(
+        update={
+            "spot_exit_price": spot_exit_price,
+            "perp_exit_price": perp_exit_price,
+            "unrealized_pnl_usdt": unrealized_pnl,
+            "valuation_observed_at": observed_at,
+        }
     )

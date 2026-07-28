@@ -82,7 +82,11 @@
 - `GET /api/trades/funding-income`：按实际结算时间倒序读取交易所私有账户资金费收支，可按交易所和
   环境过滤；正数表示收到、负数表示支付。
   五个全局账本入口默认返回 100 条、`limit` 范围为 1–500，所有金融值均为十进制字符串。
-- `GET /api/trades/positions?status=open`：读取配对仓位。
+- `GET /api/trades/positions?status=open&include_valuation=true`：读取配对仓位；显式请求估值时，开放仓位
+  同时返回可空的
+  `spot_exit_price`、`perp_exit_price`、`unrealized_pnl_usdt` 和 `valuation_observed_at`。
+  `live`/`paper` 使用扫描器最新行情，Gate `sandbox` 直接读取 TestNet 行情；超过 15 秒或读取失败时
+  估值字段为 `null`，持久化仓位仍正常返回。
 - `POST /api/trades/paper/positions/{uuid}/close`：使用现货 bid 卖出及永续 ask reduce-only
   买回计划纸面平仓，同样要求 UUID `Idempotency-Key`。
 - `POST /api/trades/open/preview`：为已配置凭据的 `sandbox`/`live` 账户生成 60 秒真实开仓预览票据，
@@ -287,6 +291,11 @@ taker 成交并创建配对仓位；
 `initial_quantity` 保留初始数量，`quantity` 表示剩余数量，
 `remaining_opening_fees_usdt` 表示尚未分摊到已实现盈亏的开仓费用；每次安全完成部分平仓后仓位重新
 回到 `open`，可用新的幂等键继续平仓，数量归零后才进入 `closed`。
+
+配对持仓页在可见期间每 5 秒重新读取仓位估值。“未实现 PnL（价格）”按
+`数量 × [(现货买一 - 现货开仓价) + (永续开仓价 - 永续卖一)]` 计算，代表立即按一档价格平掉
+现货多头和永续空头时的价格浮盈亏；界面同时展示两腿开仓价/平仓估值与估值时间。该数字不包含
+实际资金费、剩余开仓手续费或预计平仓手续费，不能与最终已实现净盈亏混用。
 
 WebSocket 首帧为 `snapshot`，后续帧为带单调 `sequence` 的 `update`；客户端发现序号断层或重连时重新读取 REST 快照。
 

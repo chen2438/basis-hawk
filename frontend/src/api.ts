@@ -197,7 +197,10 @@ export const api = {
     request<void>(`/api/accounts/${exchange}/${environment}/credentials`, { method: "DELETE" }),
   accountSnapshot: (exchange: Exchange, environment: Environment) =>
     request<AccountSnapshot>(`/api/accounts/${exchange}/${environment}/snapshot`),
-  positions: () => request<{ items: PairedPosition[] }>("/api/trades/positions"),
+  positions: (includeValuation = false) =>
+    request<{ items: PairedPosition[] }>(
+      `/api/trades/positions${includeValuation ? "?include_valuation=true" : ""}`,
+    ),
   tradeIntents: () => request<{ items: TradeIntent[] }>("/api/trades/intents?limit=100"),
   orders: () => request<{ items: OrderHistoryItem[] }>("/api/trades/orders?limit=100"),
   fills: () => request<{ items: FillHistoryItem[] }>("/api/trades/fills?limit=100"),

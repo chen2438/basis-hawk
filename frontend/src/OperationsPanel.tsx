@@ -40,7 +40,7 @@ const tabDetails: Record<OperationsTab, { eyebrow: string; title: string; descri
   system: { eyebrow: "SYSTEM / EXECUTION", title: "执行状态", description: "核对交易执行、账户连接、备份与软件版本。" },
   accounts: { eyebrow: "CREDENTIALS / ACCOUNTS", title: "交易所账户", description: "管理加密 API 凭据并验证账户余额与交易权限。" },
   trades: { eyebrow: "EXECUTION / MANUAL", title: "手动交易", description: "先预览、再确认；所有真实订单仍由唯一 worker 执行。" },
-  positions: { eyebrow: "PORTFOLIO / POSITIONS", title: "配对持仓", description: "查看同所现货多头与永续空头的真实配对仓位。" },
+  positions: { eyebrow: "PORTFOLIO / POSITIONS", title: "配对持仓", description: "查看同所现货多头与永续空头仓位，以及按可执行平仓价格估算的未实现盈亏。" },
   ledger: { eyebrow: "LEDGER / ACTIVITY", title: "交易账本", description: "审阅交易意图、订单腿、成交、盈亏与实际资金费。" },
   transfers: { eyebrow: "TREASURY / TRANSFERS", title: "内部划转", description: "仅限同一交易所现货与 USDT 永续账户之间划转。" },
   automation: { eyebrow: "STRATEGY / AUTOMATION", title: "自动策略", description: "创建不可变策略版本并控制自动交易生命周期。" },
@@ -224,6 +224,27 @@ export function OperationsPanel({
     }, 3000);
     return () => window.clearInterval(timer);
   }, [update]);
+
+  useEffect(() => {
+    if (activeTab !== "positions") return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const value = await api.positions(true);
+        if (!cancelled) setPositions(value.items);
+      } catch {
+        // Keep the last successful valuation visible during a transient quote outage.
+      } finally {
+        if (!cancelled) timer = window.setTimeout(poll, 5000);
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [activeTab]);
 
   const action = async (operation: () => Promise<unknown>) => {
     setBusy(true);
@@ -720,15 +741,25 @@ function TradePreview({
   </section>;
 }
 
-function PositionsView({ positions }: { positions: PairedPosition[] }) {
-  return <div className="ops-table-wrap"><table><thead><tr><th>标的</th><th>环境</th><th>数量</th><th>现货开仓</th><th>永续开仓</th><th>已实现 PnL</th><th>状态</th><th>开仓时间</th></tr></thead>
+export function PositionsView({ positions }: { positions: PairedPosition[] }) {
+  return <div className="positions-view">
+    <p className="position-valuation-note">
+      未实现 PnL 每 5 秒刷新，按当前现货买一卖出、永续卖一回补估算；仅含价格浮盈亏，不含资金费及开平仓手续费。
+    </p>
+    <div className="ops-table-wrap"><table><thead><tr><th>标的</th><th>环境</th><th>数量</th><th>现货开仓 / 平仓估值</th><th>永续开仓 / 平仓估值</th><th>未实现 PnL（价格）</th><th>已实现 PnL</th><th>状态</th><th>估值时间</th><th>开仓时间</th></tr></thead>
     <tbody>{positions.map((item) => <tr key={item.id}>
       <td><div className="asset"><strong>{item.base_asset}</strong><span>{exchangeNames[item.exchange]}</span></div></td>
-      <td>{item.environment}</td><td>{amount(item.quantity)}</td><td>{amount(item.spot_entry_price)}</td><td>{amount(item.perp_entry_price)}</td>
+      <td>{item.environment}</td><td>{amount(item.quantity)}</td>
+      <td>{amount(item.spot_entry_price)} / {amount(item.spot_exit_price)}</td>
+      <td>{amount(item.perp_entry_price)} / {amount(item.perp_exit_price)}</td>
+      <td className={Number(item.unrealized_pnl_usdt ?? 0) >= 0 ? "positive" : "negative"}>
+        {item.unrealized_pnl_usdt == null ? "—" : `${amount(item.unrealized_pnl_usdt)} USDT`}
+      </td>
       <td className={Number(item.realized_pnl_usdt ?? 0) >= 0 ? "positive" : "negative"}>{amount(item.realized_pnl_usdt)}</td>
-      <td><span className={`status-pill ${item.status}`}>{item.status}</span></td><td>{time(item.opened_at)}</td>
+      <td><span className={`status-pill ${item.status}`}>{item.status}</span></td>
+      <td>{time(item.valuation_observed_at)}</td><td>{time(item.opened_at)}</td>
     </tr>)}</tbody>
-  </table>{!positions.length && <div className="empty">当前没有配对持仓</div>}</div>;
+  </table>{!positions.length && <div className="empty">当前没有配对持仓</div>}</div></div>;
 }
 
 function TradeLedgerView({
