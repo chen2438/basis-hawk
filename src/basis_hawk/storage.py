@@ -20,6 +20,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    case,
     delete,
     event,
     func,
@@ -1732,13 +1733,27 @@ class Database:
         status: str | None = None,
     ) -> list[tuple[TradeIntentRow, list[OrderLegRow]]]:
         async with self.sessions() as session:
+            latest_leg_update = (
+                select(func.max(OrderLegRow.updated_at))
+                .where(OrderLegRow.trade_intent_id == TradeIntentRow.id)
+                .correlate(TradeIntentRow)
+                .scalar_subquery()
+            )
+            latest_activity = case(
+                (latest_leg_update.is_(None), TradeIntentRow.updated_at),
+                (
+                    latest_leg_update > TradeIntentRow.updated_at,
+                    latest_leg_update,
+                ),
+                else_=TradeIntentRow.updated_at,
+            )
             statement = select(TradeIntentRow)
             if status is not None:
                 statement = statement.where(TradeIntentRow.status == status)
             intents = list(
                 await session.scalars(
                     statement.order_by(
-                        TradeIntentRow.created_at.desc(),
+                        latest_activity.desc(),
                         TradeIntentRow.id.desc(),
                     ).limit(limit)
                 )

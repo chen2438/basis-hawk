@@ -131,6 +131,7 @@ export interface TradeIntent {
   base_quantity: string;
   created_at: string;
   updated_at: string;
+  activity_at: string;
 }
 
 export interface OrderHistoryItem {

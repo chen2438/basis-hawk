@@ -724,9 +724,9 @@ function TradeLedgerView({
   return <div className="history-grid trade-ledger">
     <section>
       <header><div><h3>交易意图</h3><p>最近 100 条持久化开平仓请求。</p></div><strong>{intents.length}</strong></header>
-      <div className="ops-table-wrap"><table><thead><tr><th>创建时间</th><th>意图</th><th>交易所</th><th>环境</th><th>标的</th><th>动作</th><th>名义额</th><th>状态</th><th>失败/阻断原因</th></tr></thead>
+      <div className="ops-table-wrap"><table><thead><tr><th>创建时间</th><th>最近活动</th><th>意图</th><th>交易所</th><th>环境</th><th>标的</th><th>动作</th><th>名义额</th><th>状态</th><th>失败/阻断原因</th></tr></thead>
         <tbody>{intents.map((item) => <tr key={item.id}>
-          <td>{time(item.created_at)}</td><td title={item.id}>{shortId(item.id)}</td><td>{exchangeNames[item.exchange]}</td><td>{item.environment}</td>
+          <td>{time(item.created_at)}</td><td>{time(item.activity_at)}</td><td title={item.id}>{shortId(item.id)}</td><td>{exchangeNames[item.exchange]}</td><td>{item.environment}</td>
           <td>{item.base_asset}</td><td>{item.emergency ? `紧急${item.action}` : item.action}</td>
           <td>{amount(item.requested_notional)} USDT</td><td><span className={`status-pill ${item.status}`}>{item.status}</span></td>
           <td>{tradeFailureReason(item)}</td>

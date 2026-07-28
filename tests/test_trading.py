@@ -14,7 +14,7 @@ from basis_hawk.models import (
     Quality,
     ScannerSettings,
 )
-from basis_hawk.storage import Database
+from basis_hawk.storage import Database, OrderLegRow
 from basis_hawk.trading import (
     IdempotencyConflict,
     PaperExecutionService,
@@ -121,6 +121,39 @@ async def test_paper_intent_is_persisted_before_execution_and_idempotent() -> No
             idempotency_key=key,
             settings=ScannerSettings(),
         )
+    await database.close()
+
+
+async def test_trade_intents_follow_latest_child_activity() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = TradeLedger(database)
+    older, _ = await ledger.plan_paper_open(
+        opportunity=_opportunity(),
+        notional_usdt=Decimal("100"),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+    newer, _ = await ledger.plan_paper_open(
+        opportunity=_opportunity(),
+        notional_usdt=Decimal("101"),
+        idempotency_key=uuid.uuid4(),
+        settings=ScannerSettings(),
+    )
+    latest_activity = datetime.now(UTC) + timedelta(minutes=1)
+    async with database.sessions() as session:
+        older_leg = await session.get(OrderLegRow, older.legs[0].id)
+        assert older_leg is not None
+        older_leg.updated_at = latest_activity
+        await session.commit()
+
+    intents = await ledger.intents(limit=2)
+
+    assert [item.id for item in intents] == [older.id, newer.id]
+    assert intents[0].activity_at == latest_activity
+    assert intents[1].activity_at.replace(tzinfo=None) == intents[
+        1
+    ].updated_at.replace(tzinfo=None)
     await database.close()
 
 

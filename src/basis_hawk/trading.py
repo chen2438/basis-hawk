@@ -159,6 +159,7 @@ class TradeIntentView(BaseModel):
     version: int
     created_at: datetime
     updated_at: datetime
+    activity_at: datetime
     legs: list[OrderLegView]
 
     @field_serializer(
@@ -1489,6 +1490,12 @@ def _live_client_order_ids(
 
 
 def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:
+    activity_at = max(
+        value.replace(tzinfo=UTC)
+        if value.tzinfo is None
+        else value.astimezone(UTC)
+        for value in [row.updated_at, *(item.updated_at for item in legs)]
+    )
     return TradeIntentView(
         id=row.id,
         paired_position_id=row.paired_position_id,
@@ -1510,6 +1517,7 @@ def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:
         version=row.version,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        activity_at=activity_at,
         legs=[
             OrderLegView(
                 id=item.id,

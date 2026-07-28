@@ -244,6 +244,7 @@ async def test_global_trade_ledgers_are_bounded_filterable_and_decimal_safe() ->
         assert intents.status_code == 200
         assert [item["id"] for item in intents.json()["items"]] == [closing.id]
         assert intents.json()["items"][0]["failure_code"] is None
+        assert "activity_at" in intents.json()["items"][0]
 
         orders = await client.get(
             "/api/trades/orders",
