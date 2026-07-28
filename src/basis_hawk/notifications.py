@@ -130,8 +130,6 @@ class SmtpSender:
             smtplib.SMTPSenderRefused,
         ) as exc:
             raise NotificationDeliveryError("remote_rejected") from exc
-        except (TimeoutError, OSError) as exc:
-            raise NotificationDeliveryError("transport_error") from exc
         except smtplib.SMTPNotSupportedError as exc:
             raise NotificationDeliveryError("tls_unavailable") from exc
         except smtplib.SMTPResponseException as exc:
@@ -143,6 +141,8 @@ class SmtpSender:
             raise NotificationDeliveryError(code) from exc
         except smtplib.SMTPException as exc:
             raise NotificationDeliveryError("smtp_error") from exc
+        except (TimeoutError, OSError) as exc:
+            raise NotificationDeliveryError("transport_error") from exc
 
     def _send_sync(self, item: NotificationOutboxItem) -> None:
         message = EmailMessage()

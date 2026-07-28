@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import smtplib
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 
 from basis_hawk.notifications import (
     NotificationDeliveryError,
@@ -182,3 +184,54 @@ async def test_smtp_sender_uses_starttls_and_authentication(monkeypatch) -> None
         ["owner@example.com"],
         "Critical alert",
     )
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        (smtplib.SMTPNotSupportedError("STARTTLS unavailable"), "tls_unavailable"),
+        (smtplib.SMTPDataError(421, b"try later"), "remote_unavailable"),
+        (smtplib.SMTPDataError(550, b"rejected"), "remote_rejected"),
+        (smtplib.SMTPException("protocol failure"), "smtp_error"),
+        (OSError("connection reset"), "transport_error"),
+    ],
+)
+async def test_smtp_sender_preserves_safe_failure_categories(
+    monkeypatch,
+    failure: Exception,
+    expected_code: str,
+) -> None:
+    sender = SmtpSender(
+        host="smtp.example.com",
+        port=587,
+        security="starttls",
+        username=None,
+        password=None,
+        sender="hawk@example.com",
+        recipients=("owner@example.com",),
+        timeout_seconds=3,
+    )
+    item = NotificationOutboxItem(
+        id="id",
+        dedupe_key="key",
+        event_type="test",
+        severity="critical",
+        channel="email",
+        subject="Critical alert",
+        body="Execution paused.",
+        status="sending",
+        attempts=1,
+        next_attempt_at=datetime.now(UTC),
+        last_error_code=None,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+        sent_at=None,
+    )
+
+    def fail(_item: NotificationOutboxItem) -> None:
+        raise failure
+
+    monkeypatch.setattr(sender, "_send_sync", fail)
+    with pytest.raises(NotificationDeliveryError) as captured:
+        await sender.send(item)
+    assert captured.value.error_code == expected_code

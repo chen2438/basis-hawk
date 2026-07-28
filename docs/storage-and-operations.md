@@ -333,8 +333,11 @@ MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
 常驻 worker 与对账、私有流任务并行运行通知投递器；`worker --once` 也会在对账后消费一批。Telegram
 使用官方 `sendMessage` HTTPS 接口，消息为不解析标记的受保护纯文本且限制为 4096 字符；Bot token
 只保留在进程内，请求异常及完整 URL 不进入日志或数据库。SMTP 支持 `starttls` 和连接即 TLS 的
-`smtps`，使用系统证书校验，阻塞 SMTP 客户端通过工作线程执行。配置项如下；某一通道的必要字段未完整
-提供时该通道不创建发送器，已入队记录会以 `channel_unconfigured` 脱敏失败码退避，交易循环不受影响：
+`smtps`，使用系统证书校验，阻塞 SMTP 客户端通过工作线程执行。异常按认证、收件人/发件人拒绝、
+TLS 不可用、4xx 暂时不可用、5xx 拒绝、其他 SMTP 协议错误和网络传输错误依次归一化；由于
+`SMTPException` 继承 `OSError`，协议异常必须在通用网络异常之前匹配。配置项如下；某一通道的必要
+字段未完整提供时该通道不创建发送器，已入队记录会以 `channel_unconfigured` 脱敏失败码退避，交易
+循环不受影响：
 
 ```text
 BASIS_HAWK_TELEGRAM_BOT_TOKEN
