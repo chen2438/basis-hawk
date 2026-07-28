@@ -86,6 +86,29 @@ def test_update_status_rejects_untrusted_metadata(tmp_path: Path) -> None:
     assert status["error_code"] == "update_agent_unavailable"
 
 
+def test_update_status_rejects_symlinked_request_directory(
+    tmp_path: Path,
+) -> None:
+    actual_directory = tmp_path / "actual"
+    actual_directory.mkdir()
+    request_directory = tmp_path / "request"
+    request_directory.symlink_to(actual_directory, target_is_directory=True)
+    status_file = tmp_path / "status"
+    write_status(status_file)
+
+    status = update_status(request_directory, status_file)
+
+    assert status["enabled"] is False
+    assert status["state"] == "unavailable"
+    assert status["error_code"] == "update_agent_unavailable"
+    with pytest.raises(UpdateError, match="unavailable"):
+        enqueue_update(
+            request_directory,
+            action="check",
+            request_id=uuid4(),
+        )
+
+
 async def test_post_update_reconciliation_only_clears_the_update_pause() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()

@@ -84,8 +84,9 @@ Docker build cache；清理失败只告警，不把健康部署误报为失败�
 `basis-hawk-update.service`。API 只对 `/var/lib/basis-hawk-updater/request` 拥有写权限，只读挂载
 `status`，不挂载 Docker Socket、`/opt/basis-hawk` 或 updater 配置。systemd 代理从 root-only 配置
 读取部署时锁定的项目目录、HTTPS origin 和分支；请求格式只有版本、UUID、`check|update` 以及受
-严格十六进制校验的目标提交，不存在命令、参数、路径或仓库字段。代理使用独占锁，拒绝符号链接、
-脏工作区、origin/branch 不一致、非快进历史及目标不再等于远端头的请求。检查只 fetch；更新在 API
+严格十六进制校验的目标提交，不存在命令、参数、路径或仓库字段。API 的代理可用状态与实际请求入队
+使用相同边界，都会拒绝符号链接请求目录；代理使用独占锁，拒绝符号链接、脏工作区、
+origin/branch 不一致、非快进历史及目标不再等于远端头的请求。检查只 fetch；更新在 API
 已经持久化全局暂停后快进，并调用同一
 `deploy_vps.sh --skip-admin --reconcile-after-update --yes`，因此仍执行升级前加密备份、迁移和健康
 检查。迁移后、启动新 worker 前，受限的 `basis-hawk update-reconcile` 命令用行锁检查当前暂停必须

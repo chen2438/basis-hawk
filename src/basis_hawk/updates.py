@@ -72,7 +72,11 @@ def update_status(request_directory: Path, status_file: Path) -> dict[str, objec
             "completed_at": None,
             "error_code": "update_agent_unavailable",
         }
-    enabled = request_directory.is_dir() and os.access(request_directory, os.W_OK)
+    enabled = (
+        not request_directory.is_symlink()
+        and request_directory.is_dir()
+        and os.access(request_directory, os.W_OK)
+    )
     request_pending = (
         enabled
         and not (request_directory / "request").is_symlink()
