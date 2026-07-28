@@ -85,7 +85,10 @@
   五个全局账本入口默认返回 100 条、`limit` 范围为 1–500，所有金融值均为十进制字符串。
 - `GET /api/trades/positions?status=open&include_valuation=true`：读取配对仓位；显式请求估值时，开放仓位
   同时返回可空的
-  `spot_exit_price`、`perp_exit_price`、`unrealized_pnl_usdt` 和 `valuation_observed_at`。
+  `spot_exit_price`、`perp_exit_price`、`unrealized_pnl_usdt`、
+  `estimated_closing_fees_usdt`、`estimated_final_pnl_usdt` 和
+  `valuation_observed_at`。`funding_income_usdt` 只累计同交易所、环境和标的自该仓位开仓以来已经
+  写入私有资金费账本的记录；预计平仓费使用不可变开仓意图保存的现货/永续费率。
   每条仓位始终返回 `notional_usdt` 和 `leverage`：前者按剩余共同基础币 `quantity ×
   spot_entry_price` 计算，表示按现货实际开仓均价折算的剩余名义额；后者来自对应不可变开仓意图，
   表示真实下单前已确认的永续杠杆。原始 `quantity` 继续以基础币计价供精确平仓和审计使用，但前端
@@ -299,8 +302,11 @@ taker 成交并创建配对仓位；
 
 配对持仓页在可见期间每 5 秒重新读取仓位估值。“未实现 PnL（价格）”按
 `数量 × [(现货买一 - 现货开仓价) + (永续开仓价 - 永续卖一)]` 计算，代表立即按一档价格平掉
-现货多头和永续空头时的价格浮盈亏；界面同时展示两腿开仓价/平仓估值与估值时间。该数字不包含
-实际资金费、剩余开仓手续费或预计平仓手续费，不能与最终已实现净盈亏混用。
+现货多头和永续空头时的价格浮盈亏。“预估最终收益”按
+`既有已实现净 PnL + 未实现价格 PnL + 已入账实际资金费 - 剩余开仓费 - 预计双腿平仓费`
+计算；它只使用已经同步入账的资金费和当前一档价格，不预测未来资金费、盘口滑移或费率等级变化。
+行情不可用时该估值为空。主表显示两个收益指标，现货/永续开仓价与平仓估值、资金费、费用费率及
+费用组成放在每行可展开的二级详情中。
 
 WebSocket 首帧为 `snapshot`，后续帧为带单调 `sequence` 的 `update`；客户端发现序号断层或重连时重新读取 REST 快照。
 

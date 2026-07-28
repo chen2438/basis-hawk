@@ -1893,6 +1893,17 @@ def create_app(
             tuple[Decimal, Decimal, datetime],
         ] = {}
         now = datetime.now(UTC)
+        active_position_ids = [
+            item.id
+            for item in positions
+            if item.status in {"open", "closing"}
+        ]
+        funding_income_by_position = (
+            await scanner.database.funding_income_totals_for_positions(
+                active_position_ids,
+                through=now,
+            )
+        )
         for item in positions:
             if item.status not in {"open", "closing"}:
                 continue
@@ -1950,6 +1961,13 @@ def create_app(
 
         valued_positions: list[PairedPositionView] = []
         for item in positions:
+            funding_income_usdt = funding_income_by_position.get(
+                item.id,
+                Decimal("0"),
+            )
+            item = item.model_copy(
+                update={"funding_income_usdt": funding_income_usdt}
+            )
             valuation = valuations.get(
                 (item.exchange, item.environment, item.base_asset)
             )
@@ -1959,6 +1977,7 @@ def create_app(
                     spot_exit_price=valuation[0],
                     perp_exit_price=valuation[1],
                     observed_at=valuation[2],
+                    funding_income_usdt=funding_income_usdt,
                 )
                 if valuation is not None
                 else item

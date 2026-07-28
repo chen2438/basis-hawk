@@ -3901,6 +3901,48 @@ class Database:
             )
             return [(row[0], row[1]) for row in rows]
 
+    async def funding_income_totals_for_positions(
+        self,
+        position_ids: list[str],
+        *,
+        through: datetime,
+    ) -> dict[str, Decimal]:
+        if not position_ids:
+            return {}
+        async with self.sessions() as session:
+            rows = await session.execute(
+                select(
+                    PairedPositionRow.id,
+                    func.coalesce(func.sum(FundingIncomeRow.amount), 0),
+                )
+                .outerjoin(
+                    FundingIncomeRow,
+                    (
+                        FundingIncomeRow.exchange
+                        == PairedPositionRow.exchange
+                    )
+                    & (
+                        FundingIncomeRow.environment
+                        == PairedPositionRow.environment
+                    )
+                    & (
+                        FundingIncomeRow.base_asset
+                        == PairedPositionRow.base_asset
+                    )
+                    & (
+                        FundingIncomeRow.occurred_at
+                        >= PairedPositionRow.opened_at
+                    )
+                    & (FundingIncomeRow.occurred_at <= _utc(through)),
+                )
+                .where(PairedPositionRow.id.in_(position_ids))
+                .group_by(PairedPositionRow.id)
+            )
+            return {
+                position_id: Decimal(total or 0)
+                for position_id, total in rows
+            }
+
     async def active_open_intent_keys(
         self,
         *,

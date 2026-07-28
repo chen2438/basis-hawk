@@ -172,6 +172,22 @@ async def test_rest_contract_and_settings() -> None:
         )
         result = await PaperExecutionService(database).run_once()
         assert result.executed == 1
+        await database.persist_funding_income(
+            exchange="binance",
+            environment="paper",
+            records=[
+                {
+                    "exchange_record_id": "position-funding-1",
+                    "symbol": "BTCUSDT",
+                    "base_asset": "BTC",
+                    "asset": "USDT",
+                    "amount": Decimal("0.5"),
+                    "rate": Decimal("0.0001"),
+                    "position_value": Decimal("100"),
+                    "occurred_at": datetime.now(UTC),
+                }
+            ],
+        )
         fills = await client.get(f"/api/trades/intents/{intent_id}/fills")
         assert len(fills.json()["items"]) == 2
         positions = await client.get(
@@ -187,6 +203,21 @@ async def test_rest_contract_and_settings() -> None:
         assert open_position["perp_exit_price"] == "102"
         assert Decimal(open_position["unrealized_pnl_usdt"]) == (
             Decimal(open_position["quantity"]) * Decimal("-2")
+        )
+        expected_closing_fees = Decimal(open_position["quantity"]) * (
+            Decimal("99") * Decimal(open_position["spot_fee_rate"])
+            + Decimal("102") * Decimal(open_position["perp_fee_rate"])
+        )
+        assert Decimal(open_position["funding_income_usdt"]) == Decimal("0.5")
+        assert (
+            Decimal(open_position["estimated_closing_fees_usdt"])
+            == expected_closing_fees
+        )
+        assert Decimal(open_position["estimated_final_pnl_usdt"]) == (
+            Decimal(open_position["unrealized_pnl_usdt"])
+            + Decimal("0.5")
+            - Decimal(open_position["remaining_opening_fees_usdt"])
+            - expected_closing_fees
         )
         assert open_position["valuation_observed_at"] is not None
         close = await client.post(

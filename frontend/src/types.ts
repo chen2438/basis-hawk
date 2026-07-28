@@ -109,13 +109,18 @@ export interface PairedPosition {
   leverage: number;
   spot_entry_price: string;
   perp_entry_price: string;
+  spot_fee_rate: string;
+  perp_fee_rate: string;
   opening_fees_usdt: string;
   remaining_opening_fees_usdt: string;
   closing_fees_usdt: string | null;
   realized_pnl_usdt: string | null;
+  funding_income_usdt: string;
   spot_exit_price: string | null;
   perp_exit_price: string | null;
   unrealized_pnl_usdt: string | null;
+  estimated_closing_fees_usdt: string | null;
+  estimated_final_pnl_usdt: string | null;
   valuation_observed_at: string | null;
   status: string;
   opened_at: string;

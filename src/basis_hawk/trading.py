@@ -258,13 +258,18 @@ class PairedPositionView(BaseModel):
     leverage: int
     spot_entry_price: Decimal
     perp_entry_price: Decimal
+    spot_fee_rate: Decimal
+    perp_fee_rate: Decimal
     opening_fees_usdt: Decimal
     remaining_opening_fees_usdt: Decimal
     closing_fees_usdt: Decimal | None
     realized_pnl_usdt: Decimal | None
+    funding_income_usdt: Decimal = Decimal("0")
     spot_exit_price: Decimal | None = None
     perp_exit_price: Decimal | None = None
     unrealized_pnl_usdt: Decimal | None = None
+    estimated_closing_fees_usdt: Decimal | None = None
+    estimated_final_pnl_usdt: Decimal | None = None
     valuation_observed_at: datetime | None = None
     status: str
     opened_at: datetime
@@ -276,13 +281,18 @@ class PairedPositionView(BaseModel):
         "notional_usdt",
         "spot_entry_price",
         "perp_entry_price",
+        "spot_fee_rate",
+        "perp_fee_rate",
         "opening_fees_usdt",
         "remaining_opening_fees_usdt",
         "closing_fees_usdt",
         "realized_pnl_usdt",
+        "funding_income_usdt",
         "spot_exit_price",
         "perp_exit_price",
         "unrealized_pnl_usdt",
+        "estimated_closing_fees_usdt",
+        "estimated_final_pnl_usdt",
         when_used="json",
     )
     def serialize_decimal(self, value: Decimal | None) -> str | None:
@@ -1659,6 +1669,8 @@ def _position_view(
         leverage=opening_intent.leverage,
         spot_entry_price=row.spot_entry_price,
         perp_entry_price=row.perp_entry_price,
+        spot_fee_rate=opening_intent.spot_fee_rate,
+        perp_fee_rate=opening_intent.perp_fee_rate,
         opening_fees_usdt=row.opening_fees_usdt,
         remaining_opening_fees_usdt=row.remaining_opening_fees_usdt,
         closing_fees_usdt=row.closing_fees_usdt,
@@ -1675,17 +1687,32 @@ def value_open_position(
     spot_exit_price: Decimal,
     perp_exit_price: Decimal,
     observed_at: datetime,
+    funding_income_usdt: Decimal = Decimal("0"),
 ) -> PairedPositionView:
-    """Attach conservative, price-only mark-to-market values to an open pair."""
+    """Attach executable price marks and a fee-aware final PnL estimate."""
     unrealized_pnl = position.quantity * (
         (spot_exit_price - position.spot_entry_price)
         + (position.perp_entry_price - perp_exit_price)
     )
+    estimated_closing_fees = position.quantity * (
+        spot_exit_price * position.spot_fee_rate
+        + perp_exit_price * position.perp_fee_rate
+    )
+    estimated_final_pnl = (
+        (position.realized_pnl_usdt or Decimal("0"))
+        + unrealized_pnl
+        + funding_income_usdt
+        - position.remaining_opening_fees_usdt
+        - estimated_closing_fees
+    )
     return position.model_copy(
         update={
+            "funding_income_usdt": funding_income_usdt,
             "spot_exit_price": spot_exit_price,
             "perp_exit_price": perp_exit_price,
             "unrealized_pnl_usdt": unrealized_pnl,
+            "estimated_closing_fees_usdt": estimated_closing_fees,
+            "estimated_final_pnl_usdt": estimated_final_pnl,
             "valuation_observed_at": observed_at,
         }
     )

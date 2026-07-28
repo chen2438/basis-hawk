@@ -384,7 +384,8 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByText(/先生成 60 秒预览票据/)).toBeTruthy();
   });
 
-  it("shows price-only unrealized PnL with its executable exit marks", () => {
+  it("shows fee-aware final PnL and expandable executable exit marks", async () => {
+    const user = userEvent.setup();
     render(<PositionsView positions={[{
       id: "position-1",
       opening_intent_id: "intent-1",
@@ -398,13 +399,18 @@ describe("Basis Hawk dashboard", () => {
       leverage: 3,
       spot_entry_price: "0.0084",
       perp_entry_price: "0.0085",
+      spot_fee_rate: "0.001",
+      perp_fee_rate: "0.0005",
       opening_fees_usdt: "0.01",
       remaining_opening_fees_usdt: "0.01",
       closing_fees_usdt: null,
       realized_pnl_usdt: null,
+      funding_income_usdt: "0.02",
       spot_exit_price: "0.0086",
       perp_exit_price: "0.0084",
       unrealized_pnl_usdt: "0.03",
+      estimated_closing_fees_usdt: "0.00128",
+      estimated_final_pnl_usdt: "0.03872",
       valuation_observed_at: "2026-07-28T20:00:00Z",
       status: "open",
       opened_at: "2026-07-28T19:00:00Z",
@@ -414,10 +420,16 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByText("名义额（USDT）")).toBeTruthy();
     expect(screen.getByText("0.84 USDT")).toBeTruthy();
     expect(screen.getByText("3×")).toBeTruthy();
+    expect(screen.getByText("0.03 USDT")).toBeTruthy();
+    expect(screen.getByText("预估最终收益")).toBeTruthy();
+    expect(screen.getByText("0.03872 USDT")).toBeTruthy();
+    expect(screen.queryByText("0.0084 / 0.0086")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "查看 VINE 估值明细" }));
     expect(screen.getByText("0.0084 / 0.0086")).toBeTruthy();
     expect(screen.getByText("0.0085 / 0.0084")).toBeTruthy();
-    expect(screen.getByText("0.03 USDT")).toBeTruthy();
-    expect(screen.getByText(/不含资金费及开平仓手续费/)).toBeTruthy();
+    expect(screen.getByText("已入账资金费")).toBeTruthy();
+    expect(screen.getByText("0.02 USDT")).toBeTruthy();
+    expect(screen.getByText(/预估最终收益 = 已实现 PnL/)).toBeTruthy();
   });
 
   it("lets an existing Bybit account declare its empty-account position mode", async () => {

@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { FormEvent, Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import type {
   AccountSnapshot,
@@ -742,23 +742,58 @@ function TradePreview({
 }
 
 export function PositionsView({ positions }: { positions: PairedPosition[] }) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggleDetails = (positionId: string) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(positionId)) next.delete(positionId);
+      else next.add(positionId);
+      return next;
+    });
+  };
+
   return <div className="positions-view">
     <p className="position-valuation-note">
-      名义额按剩余共同数量 × 现货开仓均价折算为 USDT；未实现 PnL 每 5 秒刷新，按当前现货买一卖出、永续卖一回补估算；仅含价格浮盈亏，不含资金费及开平仓手续费。
+      预估最终收益每 5 秒按当前现货买一卖出、永续卖一回补估算，并计入已实现 PnL、已入账资金费、剩余开仓费及预计平仓费；它不预测未来资金费，也不保证实际成交结果。
     </p>
-    <div className="ops-table-wrap"><table><thead><tr><th>标的</th><th>环境</th><th>名义额（USDT）</th><th>合约杠杆</th><th>现货开仓 / 平仓估值</th><th>永续开仓 / 平仓估值</th><th>未实现 PnL（价格）</th><th>已实现 PnL</th><th>状态</th><th>估值时间</th><th>开仓时间</th></tr></thead>
-    <tbody>{positions.map((item) => <tr key={item.id}>
-      <td><div className="asset"><strong>{item.base_asset}</strong><span>{exchangeNames[item.exchange]}</span></div></td>
-      <td>{item.environment}</td><td>{amount(item.notional_usdt)} USDT</td><td>{item.leverage}×</td>
-      <td>{amount(item.spot_entry_price)} / {amount(item.spot_exit_price)}</td>
-      <td>{amount(item.perp_entry_price)} / {amount(item.perp_exit_price)}</td>
-      <td className={Number(item.unrealized_pnl_usdt ?? 0) >= 0 ? "positive" : "negative"}>
-        {item.unrealized_pnl_usdt == null ? "—" : `${amount(item.unrealized_pnl_usdt)} USDT`}
-      </td>
-      <td className={Number(item.realized_pnl_usdt ?? 0) >= 0 ? "positive" : "negative"}>{amount(item.realized_pnl_usdt)}</td>
-      <td><span className={`status-pill ${item.status}`}>{item.status}</span></td>
-      <td>{time(item.valuation_observed_at)}</td><td>{time(item.opened_at)}</td>
-    </tr>)}</tbody>
+    <div className="ops-table-wrap"><table className="positions-table"><thead><tr><th>标的</th><th>环境</th><th>名义额（USDT）</th><th>合约杠杆</th><th>未实现 PnL（价格）</th><th>预估最终收益</th><th>已实现 PnL</th><th>状态</th><th>估值时间</th><th>详情</th></tr></thead>
+    <tbody>{positions.map((item) => {
+      const isExpanded = expanded.has(item.id);
+      return <Fragment key={item.id}>
+        <tr>
+          <td><div className="asset"><strong>{item.base_asset}</strong><span>{exchangeNames[item.exchange]}</span></div></td>
+          <td>{item.environment}</td><td>{amount(item.notional_usdt)} USDT</td><td>{item.leverage}×</td>
+          <td className={Number(item.unrealized_pnl_usdt ?? 0) >= 0 ? "positive" : "negative"}>
+            {item.unrealized_pnl_usdt == null ? "—" : `${amount(item.unrealized_pnl_usdt)} USDT`}
+          </td>
+          <td className={Number(item.estimated_final_pnl_usdt ?? 0) >= 0 ? "positive" : "negative"}>
+            {item.estimated_final_pnl_usdt == null ? "—" : `${amount(item.estimated_final_pnl_usdt)} USDT`}
+          </td>
+          <td className={Number(item.realized_pnl_usdt ?? 0) >= 0 ? "positive" : "negative"}>{amount(item.realized_pnl_usdt)}</td>
+          <td><span className={`status-pill ${item.status}`}>{item.status}</span></td>
+          <td>{time(item.valuation_observed_at)}</td>
+          <td><button
+            type="button"
+            className="position-detail-toggle"
+            aria-expanded={isExpanded}
+            aria-label={`${isExpanded ? "收起" : "查看"} ${item.base_asset} 估值明细`}
+            onClick={() => toggleDetails(item.id)}
+          >{isExpanded ? "收起" : "展开"}</button></td>
+        </tr>
+        {isExpanded && <tr className="position-detail-row"><td colSpan={10}>
+          <div className="position-detail-grid">
+            <div><span>现货开仓 / 平仓估值</span><strong>{amount(item.spot_entry_price)} / {amount(item.spot_exit_price)}</strong></div>
+            <div><span>永续开仓 / 平仓估值</span><strong>{amount(item.perp_entry_price)} / {amount(item.perp_exit_price)}</strong></div>
+            <div><span>已入账资金费</span><strong>{amount(item.funding_income_usdt)} USDT</strong></div>
+            <div><span>剩余开仓费</span><strong>{amount(item.remaining_opening_fees_usdt)} USDT</strong></div>
+            <div><span>预计平仓费</span><strong>{amount(item.estimated_closing_fees_usdt)} USDT</strong></div>
+            <div><span>现货 / 永续费率</span><strong>{amount(item.spot_fee_rate)} / {amount(item.perp_fee_rate)}</strong></div>
+            <div><span>开仓时间</span><strong>{time(item.opened_at)}</strong></div>
+          </div>
+          <p>预估最终收益 = 已实现 PnL + 未实现价格 PnL + 已入账资金费 − 剩余开仓费 − 预计平仓费。</p>
+        </td></tr>}
+      </Fragment>;
+    })}</tbody>
   </table>{!positions.length && <div className="empty">当前没有配对持仓</div>}</div></div>;
 }
 
