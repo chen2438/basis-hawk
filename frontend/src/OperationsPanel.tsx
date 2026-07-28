@@ -182,6 +182,14 @@ export function OperationsPanel({
   }, [refresh]);
 
   useEffect(() => {
+    if (execution?.state !== "reconciling") return;
+    const timer = window.setInterval(() => {
+      api.execution().then(setExecution).catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [execution?.state]);
+
+  useEffect(() => {
     if (!update || !["queued", "checking", "updating"].includes(update.state)) return;
     const timer = window.setInterval(() => {
       api.updateStatus().then(setUpdate).catch(() => undefined);

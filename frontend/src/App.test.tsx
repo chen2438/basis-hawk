@@ -1,9 +1,13 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { apiErrorMessage } from "./api";
-import { executionReason, tradeFailureReason } from "./OperationsPanel";
+import {
+  executionReason,
+  OperationsPanel,
+  tradeFailureReason,
+} from "./OperationsPanel";
 
 class FakeSocket { onmessage: ((event: { data: string }) => void) | null = null; close() {} }
 
@@ -251,6 +255,66 @@ describe("Basis Hawk dashboard", () => {
       expect.objectContaining({ method: "POST" }),
     ));
     confirmation.mockRestore();
+  });
+
+  it("polls execution every three seconds only while reconciling", async () => {
+    vi.useFakeTimers();
+    try {
+      const fallbackFetch = vi.mocked(fetch);
+      let executionCalls = 0;
+      const controlledFetch = vi.fn(
+        (url: string, init?: RequestInit) => {
+          if (url.includes("system/execution")) {
+            executionCalls += 1;
+            const value = executionCalls === 1
+              ? {
+                  state: "reconciling",
+                  reason: "administrator requested a fresh safety reconciliation",
+                  updated_at: "2026-07-28T10:37:53Z",
+                  accounts: [],
+                }
+              : {
+                  state: "ready",
+                  reason: "all configured accounts passed startup reconciliation",
+                  updated_at: "2026-07-28T10:38:41Z",
+                  accounts: [],
+                };
+            return Promise.resolve({
+              ok: true,
+              json: () => Promise.resolve(value),
+            });
+          }
+          return fallbackFetch(url, init);
+        },
+      );
+      vi.stubGlobal("fetch", controlledFetch);
+
+      render(
+        <OperationsPanel
+          opportunities={[]}
+          activeTab="system"
+        />,
+      );
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.getByText("reconciling")).toBeTruthy();
+      expect(executionCalls).toBe(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(screen.getByText("ready")).toBeTruthy();
+      expect(executionCalls).toBe(2);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6000);
+      });
+      expect(executionCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows bounded manual paired-trade controls", async () => {
