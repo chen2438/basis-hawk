@@ -3462,7 +3462,6 @@ class GateAccountClient(PrivateAccountClient):
                 "tif": "ioc",
                 "text": order.client_order_id,
                 "reduce_only": order.reduce_only,
-                "action_mode": "ACK",
             }
         result = await self._post(path, body=body)
         if not isinstance(result, dict):

@@ -1339,11 +1339,12 @@ async def test_gate_places_spot_and_perp_ioc_orders_with_contract_size_types() -
     assert requests[1][1]["size"] == -20
     assert isinstance(requests[1][1]["size"], int)
     assert requests[1][1]["reduce_only"] is False
-    assert requests[1][1]["action_mode"] == "ACK"
+    assert "action_mode" not in requests[1][1]
     assert "pos_margin_mode" not in requests[1][1]
     assert requests[2][1]["size"] == "10.5"
     assert isinstance(requests[2][1]["size"], str)
     assert requests[2][1]["reduce_only"] is True
+    assert "action_mode" not in requests[2][1]
     assert "pos_margin_mode" not in requests[2][1]
     await http.aclose()
 
