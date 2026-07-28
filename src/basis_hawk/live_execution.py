@@ -180,8 +180,21 @@ class LiveExecutionService:
             if set(primary) != {"spot", "perp"}:
                 raise LivePreflightError("intent_legs_invalid")
             if intent.action == "open":
-                if remote_state.positions:
-                    raise LivePreflightError("remote_positions_present")
+                try:
+                    await LiveCompensationService._validate_paired_positions(
+                        self,
+                        exchange=intent.exchange,
+                        environment=intent.environment,
+                        remote_positions=remote_state.positions,
+                        expected_isolated=(
+                            snapshot.perp_margin_mode
+                            == PerpMarginMode.ISOLATED
+                        ),
+                    )
+                except Exception as exc:
+                    raise LivePreflightError(
+                        "remote_positions_present"
+                    ) from exc
                 try:
                     LiveCompensationService._validate_balance(
                         snapshot,
@@ -659,9 +672,25 @@ class LiveCompensationService:
             raise RuntimeError(
                 "live close legs do not exactly reduce the paired position"
             )
-        expected_rows = await self.database.paired_perp_exposures(
+        await LiveCompensationService._validate_paired_positions(
+            self,
             exchange=intent.exchange,
             environment=intent.environment,
+            remote_positions=remote_positions,
+            expected_isolated=expected_isolated,
+        )
+
+    async def _validate_paired_positions(
+        self,
+        *,
+        exchange: str,
+        environment: str,
+        remote_positions: list[RemotePosition],
+        expected_isolated: bool,
+    ) -> None:
+        expected_rows = await self.database.paired_perp_exposures(
+            exchange=exchange,
+            environment=environment,
         )
         expected: dict[str, tuple[Decimal, int]] = {}
         for symbol, quantity, leverage in expected_rows:

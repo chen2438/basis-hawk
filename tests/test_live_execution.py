@@ -311,6 +311,105 @@ async def test_gate_sandbox_submits_perp_before_spot_without_parallel_requests()
     await database.close()
 
 
+async def test_live_executor_allows_open_with_matched_paired_position() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials, opening_intent_id = await _planned_live_intent(database)
+    opening = await database.trade_intent(opening_intent_id)
+    assert opening is not None
+    async with database.sessions() as session:
+        stored_opening = await session.get(TradeIntentRow, opening_intent_id)
+        assert stored_opening is not None
+        stored_opening.status = "hedged"
+        session.add(
+            PairedPositionRow(
+                id=str(uuid.uuid4()),
+                opening_intent_id=opening_intent_id,
+                exchange=Exchange.OKX.value,
+                environment=ExchangeEnvironment.LIVE.value,
+                base_asset="ORDER",
+                initial_quantity=opening[0].base_quantity,
+                quantity=opening[0].base_quantity,
+                spot_entry_price=Decimal("0.05"),
+                perp_entry_price=Decimal("0.051"),
+                opening_fees_usdt=Decimal("0.1"),
+                remaining_opening_fees_usdt=Decimal("0.1"),
+                status="open",
+                opened_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+    credentials, next_intent_id = await _planned_live_intent(database)
+    await database.set_execution_control(state="ready", reason="test")
+    client = FakeLiveAccountClient(
+        database,
+        positions=[
+            RemotePosition(
+                symbol="ORDER-USDT-SWAP",
+                side="short",
+                quantity=Decimal("200"),
+                entry_price=Decimal("0.051"),
+                mark_price=Decimal("0.05"),
+                liquidation_price=Decimal("0.09"),
+                leverage=Decimal("2"),
+                isolated=True,
+            )
+        ],
+    )
+
+    result = await LiveExecutionService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    ).run_once()
+
+    stored = await database.trade_intent(next_intent_id)
+    assert result.submitted == 1
+    assert result.preflight_failed == 0
+    assert stored is not None
+    assert stored[0].status == "executing"
+    assert {item.status for item in stored[1]} == {"acknowledged"}
+    await database.close()
+
+
+async def test_live_executor_rejects_open_with_unmatched_remote_position() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials, intent_id = await _planned_live_intent(database)
+    await database.set_execution_control(state="ready", reason="test")
+    client = FakeLiveAccountClient(
+        database,
+        positions=[
+            RemotePosition(
+                symbol="UNKNOWN-USDT-SWAP",
+                side="short",
+                quantity=Decimal("1"),
+                entry_price=Decimal("1"),
+                mark_price=Decimal("1"),
+                liquidation_price=Decimal("2"),
+                leverage=Decimal("2"),
+                isolated=True,
+            )
+        ],
+    )
+
+    result = await LiveExecutionService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    ).run_once()
+
+    stored = await database.trade_intent(intent_id)
+    control = await database.execution_control()
+    assert result.submitted == 0
+    assert result.preflight_failed == 1
+    assert stored is not None
+    assert stored[0].failure_code == "remote_positions_present"
+    assert control is not None
+    assert control.state == "paused"
+    await database.close()
+
+
 async def test_live_executor_expires_stale_open_without_remote_calls() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()
