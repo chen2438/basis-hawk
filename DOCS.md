@@ -230,6 +230,8 @@
   advisory lock 拒绝、单轮 worker、认证加密备份、空库恢复及非空库拒绝覆盖；锁竞争验收会先通过
   PostgreSQL 探针确认主 worker 已实际持锁，不依赖固定睡眠猜测启动完成；临时容器、网络和卷始终
   自动清理，CI 同步执行。
+- 已完成：生产 Python 依赖使用可重现锁文件安装，SQLAlchemy 显式启用异步运行所需的 `greenlet`；
+  CI 对锁文件运行 `pip-audit`，存在已知安全公告的运行时版本不能通过交付检查。
 - 已完成：交易预览安全测试在用例执行时生成 60 秒票据时间，较慢 CI runner 不会再把管理员或行情
   指纹冲突测试误判为票据过期，同时仍独立覆盖真实过期拒绝分支。
 - 已完成：幂等 VPS 一键部署脚本。首次部署生成权限为 600 的 `.env`、数据库密码及相互独立的凭据/
@@ -420,6 +422,7 @@ MEXC 使用已获特批的标准 V1 合约接口，但官方文档仍将合约�
 ```bash
 .venv/bin/ruff check .
 .venv/bin/pytest -q
+.venv/bin/pip-audit -r requirements.lock
 bash -n scripts/deploy_vps.sh
 bash -n scripts/bootstrap_vps.sh
 bash -n scripts/install_update_agent.sh

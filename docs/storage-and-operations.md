@@ -505,6 +505,18 @@ bash -n scripts/update_agent.sh
 bash -n scripts/auto_update_agent.sh
 ```
 
+生产镜像严格从 `requirements.lock` 安装 Python 依赖。修改 `pyproject.toml` 的运行时依赖后，应使用
+Python 3.12 和
+`pip-compile --upgrade --strip-extras --no-header --no-annotate pyproject.toml`
+重新生成锁文件；SQLAlchemy 使用 `asyncio` extra，不能依赖开发机偶然预装 `greenlet`。提交前及 CI
+都要运行：
+
+```bash
+.venv/bin/pip-audit -r requirements.lock
+```
+
+任何已知运行时漏洞必须先升级到无公告的兼容版本并完成后端、容器和认证回归，不能仅忽略审计结果。
+
 API 容器挂载同一 `postgres_backups` 卷，仅用于列出归档以及受控单个或批量删除非最新归档和旁路
 SHA-256 文件。
 API 不接收 `BASIS_HAWK_BACKUP_KEY`，因此不能解密、验证内容或恢复数据库；实际认证验证和恢复仍只允许
