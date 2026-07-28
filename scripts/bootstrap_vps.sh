@@ -14,7 +14,7 @@ usage() {
 Usage:
   curl -fsSL \
     https://raw.githubusercontent.com/chen2438/basis-hawk/main/scripts/bootstrap_vps.sh \
-    | sudo bash -s -- --domain hawk.example.com --install-docker --enable-ufw
+    | sudo bash -s -- --domain hawk.example.com --install-docker
 
 Bootstrap options:
   --repository URL        Git repository (default: official Basis Hawk repo).

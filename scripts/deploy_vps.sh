@@ -47,8 +47,7 @@ Usage:
 First deployment:
   sudo scripts/deploy_vps.sh \
     --domain hawk.example.com \
-    --install-docker \
-    --enable-ufw
+    --install-docker
 
 Options:
   --domain DOMAIN          Public HTTPS domain. Required when creating .env.

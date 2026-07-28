@@ -88,6 +88,7 @@ def test_deploy_script_help_does_not_require_a_vps() -> None:
     assert "--prepare-env-only" in result.stdout
     assert "--enable-auto-update" in result.stdout
     assert "never overwrites an existing .env" in result.stdout
+    assert "--install-docker \\\n    --enable-ufw" not in result.stdout
 
 
 def test_prepare_environment_generates_independent_secrets_without_leaking(

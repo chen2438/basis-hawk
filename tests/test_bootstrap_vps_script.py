@@ -12,6 +12,18 @@ BOOTSTRAP = (
 )
 
 
+def test_bootstrap_help_does_not_enable_ufw_by_default() -> None:
+    result = subprocess.run(
+        ["bash", str(BOOTSTRAP), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "--install-docker --enable-ufw" not in result.stdout
+
+
 def git(*arguments: str, directory: Path | None = None) -> str:
     result = subprocess.run(
         ["git", *arguments],
