@@ -34,8 +34,7 @@ worker 会拒绝运行。隔离容器验收在启动竞争 worker 前会轮询�
 ```bash
 sudo ./scripts/deploy_vps.sh \
   --domain hawk.example.com \
-  --install-docker \
-  --enable-ufw
+  --install-docker
 ```
 
 空 VPS 无需预先 clone。`scripts/bootstrap_vps.sh` 可从 GitHub Raw 远程执行，缺少 Git 时先通过系统
@@ -46,8 +45,7 @@ curl -fsSL \
   https://raw.githubusercontent.com/chen2438/basis-hawk/main/scripts/bootstrap_vps.sh \
   | sudo bash -s -- \
   --domain hawk.example.com \
-  --install-docker \
-  --enable-ufw
+  --install-docker
 ```
 
 执行前应先检查远程脚本内容。重复运行会验证现有 checkout 的 origin、当前分支和工作区；仅同一
@@ -75,7 +73,7 @@ worker。重复部署识别已有 Alembic schema 后，先停止 API、worker �
 Docker build cache；清理失败只告警，不把健康部署误报为失败。使用 systemd-journald 的宿主机还会安装
 `/etc/systemd/journald.conf.d/basis-hawk.conf`，把持久日志上限设为 200 MB、至少保留 1 GB 空闲空间并
 限制为 7 天，然后压缩既有 journal。该设置不改变 SSH 密码登录，也不启用或修改 UFW。
-`--enable-ufw` 会先放行当前 SSH 服务端口及
+脚本默认不启用或修改 UFW。只有显式传入 `--enable-ufw` 时才会先放行当前 SSH 服务端口及
 80/443，再启用 UFW；非 22 端口应显式传入 `--ssh-port`。Docker 官方说明发布的容器端口可能绕过
 部分 UFW 规则，因此还必须在云厂商安全组只开放 SSH、80 和 443；当前 Compose 本身只发布 80/443。
 脚本不修改 DNS、云安全组、交易所 Key 或异地备份目标。

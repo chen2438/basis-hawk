@@ -14,8 +14,7 @@ curl -fsSL \
   https://raw.githubusercontent.com/chen2438/basis-hawk/main/scripts/bootstrap_vps.sh \
   | sudo bash -s -- \
   --domain hawk.example.com \
-  --install-docker \
-  --enable-ufw
+  --install-docker
 ```
 
 执行远程脚本前应先在浏览器检查上述 GitHub Raw 内容。bootstrap 会安装 Git、把官方仓库 clone 到
@@ -42,7 +41,9 @@ curl -fsSL \
 异地备份和交易所 API Key 仍必须由管理员配置。
 首次通过远程命令升级到包含宿主机更新代理的版本后，运营控制台会提供“检查更新”和“立即更新”。
 后续更新只允许锁定 Git 远端/分支的快进提交，确认时先暂停交易，再复用同一备份、迁移和健康检查流程；
-更新完成后仍需管理员重新对账。Web 容器不会获得 Docker Socket 或任意宿主机命令权限。
+更新完成后 worker 会自动发起一次完整安全对账，只有账户、订单、成交、仓位和私有流全部通过才恢复
+`ready`；人工暂停及成交失衡等安全暂停不会被更新流程解除。Web 容器不会获得 Docker Socket 或任意
+宿主机命令权限。
 备份校验会先完整验证 SHA-256 与 AES-GCM，再静默解析 PostgreSQL archive；`pg_restore --list`
 成功读取 TOC 后提前关闭输入属于正常成功，不会输出整份对象清单或误报 `Broken pipe`。
 
