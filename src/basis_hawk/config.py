@@ -19,7 +19,7 @@ class AppConfig(BaseSettings):
     port: int = Field(default=8000, ge=1, le=65535)
     auth_required: bool = True
     secure_cookies: bool = True
-    session_hours: int = Field(default=12, ge=1, le=168)
+    session_hours: int = Field(default=168, ge=1, le=168)
     credential_master_key: SecretStr | None = None
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None

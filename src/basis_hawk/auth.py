@@ -61,7 +61,7 @@ class AuthService:
         database: Database,
         cipher: SecretCipher,
         *,
-        session_hours: int = 12,
+        session_hours: int = 168,
     ) -> None:
         self.database = database
         self.cipher = cipher

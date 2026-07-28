@@ -1,5 +1,5 @@
 import hashlib
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -63,6 +63,7 @@ async def test_login_session_and_csrf_protection() -> None:
         base_url="https://test",
     ) as client:
         assert (await client.get("/api/settings")).status_code == 401
+        login_started_at = datetime.now(UTC)
         login = await client.post(
             "/api/auth/login",
             json={
@@ -72,6 +73,12 @@ async def test_login_session_and_csrf_protection() -> None:
             },
         )
         assert login.status_code == 200
+        expires_at = datetime.fromisoformat(login.json()["expires_at"])
+        assert login_started_at + timedelta(days=7) <= expires_at
+        assert expires_at <= datetime.now(UTC) + timedelta(days=7)
+        set_cookie_headers = login.headers.get_list("set-cookie")
+        assert len(set_cookie_headers) == 2
+        assert all("Max-Age=604800" in header for header in set_cookie_headers)
         assert (await client.get("/api/auth/session")).json() == {"username": "admin"}
         settings = (await client.get("/api/settings")).json()
         assert (await client.put("/api/settings", json=settings)).status_code == 403

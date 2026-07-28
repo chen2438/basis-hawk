@@ -166,6 +166,9 @@ docker compose run --rm api basis-hawk admin-create --username admin
 
 管理员密码使用 Argon2id，TOTP 密钥和后续交易所凭据使用 AES-256-GCM；关联数据绑定管理员或交易所环境，
 数据库只保存密文、nonce 和密钥版本。主密钥不得写入仓库、日志或数据库。
+`BASIS_HAWK_SESSION_HOURS` 默认及生产示例均为 `168`，即 7 天；登录时同一值同时写入数据库
+`admin_sessions.expires_at` 和两个 Cookie 的 `Max-Age`。修改该配置只影响此后创建的新会话，
+不会延长或缩短数据库中已经存在的会话。
 TOTP 泄露或身份验证器丢失时，在 VPS 上运行：
 
 ```bash
