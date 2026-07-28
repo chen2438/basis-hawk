@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from basis_hawk.accounts import (
     AccountSnapshot,
     LimitIocOrder,
+    OrderSubmission,
     PerpMarginMode,
     PositionMode,
     PrivateAccountClient,
@@ -221,31 +222,57 @@ class LiveExecutionService:
             prepared_legs = {
                 item.leg: item for item in prepared[1] if item.leg in {"spot", "perp"}
             }
-            ordered_legs = [prepared_legs["spot"], prepared_legs["perp"]]
-            results = await asyncio.gather(
-                *(
-                    client.place_limit_ioc(
-                        LimitIocOrder(
-                            market=leg.market,
-                            symbol=leg.symbol,
-                            side=leg.side,
-                            quantity=leg.quantity,
-                            limit_price=leg.limit_price,
-                            client_order_id=leg.client_order_id,
-                            reduce_only=leg.reduce_only,
-                            position_mode=(
-                                snapshot.position_mode
-                                if leg.market == "perp"
-                                else PositionMode.UNKNOWN
-                            ),
-                        )
+            async def submit(leg: OrderLegRow) -> OrderSubmission:
+                return await client.place_limit_ioc(
+                    LimitIocOrder(
+                        market=leg.market,
+                        symbol=leg.symbol,
+                        side=leg.side,
+                        quantity=leg.quantity,
+                        limit_price=leg.limit_price,
+                        client_order_id=leg.client_order_id,
+                        reduce_only=leg.reduce_only,
+                        position_mode=(
+                            snapshot.position_mode
+                            if leg.market == "perp"
+                            else PositionMode.UNKNOWN
+                        ),
                     )
-                    for leg in ordered_legs
-                ),
-                return_exceptions=True,
+                )
+
+            gate_sandbox = (
+                exchange == Exchange.GATE
+                and environment == ExchangeEnvironment.SANDBOX
             )
+            ordered_legs = (
+                [prepared_legs["perp"], prepared_legs["spot"]]
+                if gate_sandbox
+                else [prepared_legs["spot"], prepared_legs["perp"]]
+            )
+            if gate_sandbox:
+                results: list[OrderSubmission | BaseException] = []
+                for index, leg in enumerate(ordered_legs):
+                    try:
+                        result = await submit(leg)
+                    except BaseException as exc:
+                        results.append(exc)
+                        for skipped in ordered_legs[index + 1 :]:
+                            await self.database.mark_order_submission_rejected(
+                                order_leg_id=skipped.id,
+                                failure_code="gate_prior_leg_not_submitted",
+                            )
+                        break
+                    else:
+                        results.append(result)
+                processed_legs = ordered_legs[: len(results)]
+            else:
+                results = await asyncio.gather(
+                    *(submit(leg) for leg in ordered_legs),
+                    return_exceptions=True,
+                )
+                processed_legs = ordered_legs
             uncertain = 0
-            for leg, result in zip(ordered_legs, results, strict=True):
+            for leg, result in zip(processed_legs, results, strict=True):
                 if isinstance(result, BaseException):
                     if _definitive_order_rejection(result):
                         await self.database.mark_order_submission_rejected(

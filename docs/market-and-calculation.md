@@ -75,7 +75,9 @@ Bitget Classic 与 UTA 在下单前通过只读账户接口识别并在进程内
 张数，卖出开空为负、买入平空为正，并显式发送 `X-Gate-Size-Decimal: 1`。整张数量在 JSON 中发送
 整数，只有确实包含小数张的合约才发送十进制字符串，避免 `enable_decimal=false` 的 VINE、BAN 等
 合约拒绝形如 `"1190.000000000000000000"` 的字符串数量。REST 永续下单使用默认完整响应，不发送
-Gate TestNet 不兼容的 `action_mode=ACK`。Gate 经典
+Gate TestNet 不兼容的 `action_mode=ACK`。Gate TestNet 对同一账户的并发私有下单存在间歇拒绝，
+因此 Sandbox 配对单先提交永续腿，确认接口接受后再提交现货腿；首腿失败则明确不提交第二腿。
+Gate 实盘及其他交易所仍并发提交。Gate 经典
 账户继续使用 `account=spot` 与逐仓永续；已双重确认的组合保证金账户改用 `account=unified`。普通
 单向/双向及组合保证金永续订单都省略 Gate 仅允许简单分仓模式写入的 `pos_margin_mode`；经典账户的
 逐仓模式已由发单前逐合约配置及回读确认，组合保证金则由账户模式决定跨仓。Gate 会以

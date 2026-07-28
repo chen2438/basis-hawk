@@ -86,11 +86,15 @@ class FakeLiveAccountClient:
         self,
         database: Database,
         *,
+        exchange: Exchange = Exchange.OKX,
+        environment: ExchangeEnvironment = ExchangeEnvironment.LIVE,
         fail_market: str | None = None,
         fail_configuration: bool = False,
         positions: list[RemotePosition] | None = None,
     ) -> None:
         self.database = database
+        self.exchange = exchange
+        self.environment = environment
         self.fail_market = fail_market
         self.fail_configuration = fail_configuration
         self.positions = positions or []
@@ -100,8 +104,8 @@ class FakeLiveAccountClient:
 
     async def snapshot(self) -> AccountSnapshot:
         return AccountSnapshot(
-            exchange=Exchange.OKX,
-            environment=ExchangeEnvironment.LIVE,
+            exchange=self.exchange,
+            environment=self.environment,
             observed_at=datetime.now(UTC),
             spot_usdt_available=Decimal("1000"),
             perp_usdt_available=Decimal("1000"),
@@ -114,8 +118,8 @@ class FakeLiveAccountClient:
 
     async def trading_state(self) -> RemoteTradingState:
         return RemoteTradingState(
-            exchange=Exchange.OKX,
-            environment=ExchangeEnvironment.LIVE,
+            exchange=self.exchange,
+            environment=self.environment,
             observed_at=datetime.now(UTC),
             open_orders=[],
             positions=self.positions,
@@ -166,14 +170,17 @@ class FakeLiveAccountClient:
 
 async def _planned_live_intent(
     database: Database,
+    *,
+    exchange: Exchange = Exchange.OKX,
+    environment: ExchangeEnvironment = ExchangeEnvironment.LIVE,
 ) -> tuple[CredentialService, str]:
     credentials = CredentialService(
         database,
         SecretCipher(SecretCipher.generate_key()),
     )
     await credentials.save(
-        exchange=Exchange.OKX,
-        environment=ExchangeEnvironment.LIVE,
+        exchange=exchange,
+        environment=environment,
         label="primary",
         secrets=ExchangeSecrets(
             api_key="test-api-key",
@@ -183,12 +190,12 @@ async def _planned_live_intent(
         actor="test",
     )
     intent, _ = await TradeLedger(database).plan_live_open(
-        opportunity=_opportunity(),
-        pair=_pair(),
+        opportunity=_opportunity().model_copy(update={"exchange": exchange}),
+        pair=_pair().model_copy(update={"exchange": exchange}),
         notional_usdt=Decimal("100"),
         idempotency_key=uuid.uuid4(),
         settings=ScannerSettings(),
-        environment=ExchangeEnvironment.LIVE,
+        environment=environment,
         leverage=2,
     )
     return credentials, intent.id
@@ -271,6 +278,36 @@ async def test_live_executor_persists_both_submissions_before_parallel_orders() 
         ("ORDER-USDT-SWAP", 2, PositionMode.ONE_WAY)
     ]
     assert client.closed is True
+    await database.close()
+
+
+async def test_gate_sandbox_submits_perp_before_spot_without_parallel_requests() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials, intent_id = await _planned_live_intent(
+        database,
+        exchange=Exchange.GATE,
+        environment=ExchangeEnvironment.SANDBOX,
+    )
+    await database.set_execution_control(state="ready", reason="test")
+    client = FakeLiveAccountClient(
+        database,
+        exchange=Exchange.GATE,
+        environment=ExchangeEnvironment.SANDBOX,
+    )
+
+    result = await LiveExecutionService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    ).run_once()
+
+    assert result.submitted == 1
+    assert result.uncertain == 0
+    assert [item.market for item in client.placed] == ["perp", "spot"]
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    assert {item.status for item in stored[1]} == {"acknowledged"}
     await database.close()
 
 
