@@ -3149,7 +3149,7 @@ class GateAccountClient(PrivateAccountClient):
             )
         return InternalTransferSubmission(
             transfer_id=remote_id,
-            status="pending",
+            status="completed",
         )
 
     async def internal_transfer_status(
@@ -3161,34 +3161,19 @@ class GateAccountClient(PrivateAccountClient):
         amount: Decimal,
         created_at: datetime,
     ) -> RemoteInternalTransfer:
-        del created_at
+        del client_transfer_id, created_at
         _gate_transfer_accounts(direction)
-        query: dict[str, object] = {"client_order_id": client_transfer_id}
-        if transfer_id:
-            query["tx_id"] = transfer_id
-        payload = await self._get("/api/v4/wallet/order_status", **query)
-        if not isinstance(payload, dict):
+        if not transfer_id:
             raise PrivateRequestError(
-                "Gate internal transfer lookup is incomplete"
+                "Gate internal transfer response identifier is missing"
             )
-        returned_id = str(payload.get("tx_id") or "")
-        if not returned_id or (transfer_id and returned_id != transfer_id):
-            raise PrivateRequestError(
-                "Gate internal transfer lookup does not match the request"
-            )
-        raw_status = str(payload.get("status") or "").upper()
-        status: Literal["pending", "completed", "failed", "unknown"]
-        if raw_status == "SUCCESS":
-            status = "completed"
-        elif raw_status == "PENDING":
-            status = "pending"
-        elif raw_status in {"FAIL", "PARTIAL_SUCCESS"}:
-            status = "failed"
-        else:
-            status = "unknown"
+        # Gate documents a successful POST /wallet/transfers response with
+        # tx_id as a completed transfer between this account's trading
+        # balances. GET /wallet/order_status is only for main/sub-account
+        # transfers and must not be used to query this operation.
         return RemoteInternalTransfer(
-            transfer_id=returned_id,
-            status=status,
+            transfer_id=transfer_id,
+            status="completed",
             direction=direction,
             amount=amount,
         )

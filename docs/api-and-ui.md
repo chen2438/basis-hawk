@@ -147,7 +147,9 @@
   `Idempotency-Key`。新请求要求全局 `ready`、凭据存在、账户不是共享余额模式且数据库额度非零；
   成功后只创建 `planned` 账本并立即暂停交易，由唯一 worker 提交。相同键与相同请求在暂停后仍可
   安全重试，换参数复用同一键会冲突。计划事务锁定限额设置行后再检查单次和 UTC 日累计用量，因此
-  管理员并发修改限额不会绕过边界。请求模型不存在地址、链、UID 或跨所目标。
+  管理员并发修改限额不会绕过边界。请求模型不存在地址、链、UID 或跨所目标。Gate 的
+  `POST /wallet/transfers` 成功响应会返回 `tx_id` 并表示本次交易账户划转已完成，worker 随即在同一
+  轮刷新账户余额确认到账；不会调用仅供主子账户划转使用的 `GET /wallet/order_status`。
 - `POST /api/integrations/telegram/webhook`：唯一免管理员 Cookie/CSRF 的集成入口；必须携带与环境
   配置恒定时间匹配的 `X-Telegram-Bot-Api-Secret-Token`，消息 chat ID 也必须匹配管理员白名单。
   只接受最多 32 KiB 的 Telegram Update，并仅提供 `/status`、`/positions`、`/alerts`、`/health`

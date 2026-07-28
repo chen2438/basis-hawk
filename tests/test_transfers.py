@@ -287,44 +287,110 @@ async def test_transfer_worker_submits_once_and_confirms_arrival() -> None:
     await database.close()
 
 
-class _GateRecoveryClient:
-    async def internal_transfer_status(
+class _CompletedTransferClient(_TransferClient):
+    async def submit_internal_transfer(
         self,
         *,
         transfer_id: str,
-        client_transfer_id: str,
         direction: str,
         amount: Decimal,
-        created_at: datetime,
-    ) -> RemoteInternalTransfer:
-        del client_transfer_id, created_at
-        assert transfer_id == ""
-        return RemoteInternalTransfer(
-            transfer_id="recovered-gate-id",
-            status="completed",
+    ) -> InternalTransferSubmission:
+        submission = await super().submit_internal_transfer(
+            transfer_id=transfer_id,
             direction=direction,
             amount=amount,
         )
+        return submission.model_copy(update={"status": "completed"})
 
-    async def snapshot(self) -> AccountSnapshot:
-        return AccountSnapshot(
+
+async def test_gate_transfer_confirms_arrival_in_submission_run() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = InternalTransferLedger(
+        database,
+        per_request_limit_usdt=Decimal("100"),
+        daily_limit_usdt=Decimal("100"),
+    )
+    row, _ = await ledger.plan(
+        InternalTransferRequest(
             exchange=Exchange.GATE,
             environment=ExchangeEnvironment.LIVE,
-            observed_at=datetime.now(UTC),
-            spot_usdt_available=Decimal("5"),
-            perp_usdt_available=Decimal("25"),
-            perp_usdt_equity=Decimal("25"),
-            shared_balance=False,
-            account_mode="classic",
-            position_mode=PositionMode.ONE_WAY,
-            trade_permission=True,
-        )
+            direction=InternalTransferDirection.SPOT_TO_PERP,
+            amount_usdt=Decimal("50"),
+        ),
+        idempotency_key=uuid.uuid4(),
+        actor="admin",
+    )
+    client = _CompletedTransferClient()
+    executor = InternalTransferExecutionService(
+        database,
+        _TransferCredentials(),  # type: ignore[arg-type]
+        account_client_factory=lambda *_: client,  # type: ignore[arg-type]
+    )
 
-    async def close(self) -> None:
-        return None
+    result = await executor.run_once()
+
+    assert result.action == "completed"
+    assert result.status == "completed"
+    assert client.submissions == 1
+    assert client.snapshots == 2
+    persisted = (await database.list_internal_transfers())[0]
+    assert persisted.id == row.id
+    assert persisted.exchange_transfer_id == "exchange-transfer-id"
+    assert persisted.status == "completed"
+    await database.close()
 
 
-async def test_gate_transfer_recovers_missing_ack_by_client_id() -> None:
+class _UncertainGateTransferClient(_TransferClient):
+    async def submit_internal_transfer(
+        self,
+        *,
+        transfer_id: str,
+        direction: str,
+        amount: Decimal,
+    ) -> InternalTransferSubmission:
+        del transfer_id, direction, amount
+        raise RuntimeError("simulated lost Gate response")
+
+
+async def test_gate_transfer_uncertain_submission_is_not_retried() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    ledger = InternalTransferLedger(
+        database,
+        per_request_limit_usdt=Decimal("100"),
+        daily_limit_usdt=Decimal("100"),
+    )
+    row, _ = await ledger.plan(
+        InternalTransferRequest(
+            exchange=Exchange.GATE,
+            environment=ExchangeEnvironment.LIVE,
+            direction=InternalTransferDirection.SPOT_TO_PERP,
+            amount_usdt=Decimal("50"),
+        ),
+        idempotency_key=uuid.uuid4(),
+        actor="admin",
+    )
+    client = _UncertainGateTransferClient()
+    executor = InternalTransferExecutionService(
+        database,
+        _TransferCredentials(),  # type: ignore[arg-type]
+        account_client_factory=lambda *_: client,  # type: ignore[arg-type]
+    )
+
+    result = await executor.run_once()
+
+    assert result.action == "submission_uncertain"
+    assert result.status == "manual_review"
+    persisted = (await database.list_internal_transfers())[0]
+    assert persisted.id == row.id
+    assert persisted.exchange_transfer_id is None
+    assert persisted.status == "manual_review"
+    assert persisted.error_code == "submission_ack_uncertain"
+    await database.close()
+
+
+async def test_gate_transfer_missing_ack_requires_manual_review() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()
     ledger = InternalTransferLedger(
@@ -347,16 +413,16 @@ async def test_gate_transfer_recovers_missing_ack_by_client_id() -> None:
         source_balance=Decimal("10"),
         target_balance=Decimal("20"),
     )
-    client = _GateRecoveryClient()
     executor = InternalTransferExecutionService(
         database,
         _TransferCredentials(),  # type: ignore[arg-type]
-        account_client_factory=lambda *_: client,  # type: ignore[arg-type]
+        account_client_factory=lambda *_: _TransferClient(),  # type: ignore[arg-type]
     )
 
     result = await executor.run_once()
-    assert result.status == "completed"
+    assert result.status == "manual_review"
     persisted = (await database.list_internal_transfers())[0]
-    assert persisted.exchange_transfer_id == "recovered-gate-id"
-    assert persisted.status == "completed"
+    assert persisted.exchange_transfer_id is None
+    assert persisted.status == "manual_review"
+    assert persisted.error_code == "submission_ack_missing"
     await database.close()

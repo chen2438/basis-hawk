@@ -372,13 +372,17 @@ Telegram 入站固定为 `POST /api/integrations/telegram/webhook`，这是唯�
 `transfer.limits_updated` 脱敏审计。计划事务锁定该设置行及全局执行控制，按 UTC 日累计所有非明确
 failed 金额，超限则不落库；因此运行中修改会立即生效且不能与新计划并发绕过。成功计划会立即暂停
 新交易并写入不含凭据的审计事件。私有适配层现已支持 Binance、Bitget Classic、Gate 和
-MEXC LIVE 的提交与远端状态查询；Bitget 和 Gate 还把本地 UUID 作为交易所防重 ID。OKX、Bybit 与
+MEXC LIVE 的提交；Binance、Bitget Classic 和 MEXC 使用各自官方历史/单号接口查询远端状态，
+Bitget 还把本地 UUID 作为交易所防重 ID。Gate `POST /wallet/transfers` 的成功响应和 `tx_id`
+已经表示同一账户内交易余额划转完成，随后只需确认目标余额；`GET /wallet/order_status` 仅用于
+主子账户划转，禁止用于现货↔永续划转。OKX、Bybit 与
 Bitget UTA 的当前交易账户共享现货和永续余额，因此明确返回无需划转。
 唯一 worker 每轮先处理最早的一笔 `submitted`/`pending`，没有待确认记录时才认领一笔 `planned`。
 认领事务要求全局已经暂停，并在调用交易所前写入提交前双侧余额、预期目标余额、`submitted_at` 和
-`submitted` 状态。网络调用后持久化远端 ID；若 ACK 不确定，仅 Bitget/Gate 可依靠客户端防重 ID
-查回远端 ID，Binance/MEXC 转 `manual_review`，不会重发。交易所状态成功后还必须重新读取账户快照，
-确认目标可用余额不低于预期值才置为 `completed`。远端状态或到账在 15 分钟内仍无法确认会转
+`submitted` 状态。网络调用后持久化远端 ID；若 ACK 不确定，仅 Bitget 可依靠客户端防重 ID
+查回远端 ID，Binance、Gate、MEXC 转 `manual_review`，不会重发。Gate 成功返回后会在同一 worker
+轮次立即刷新快照；所有交易所都必须确认目标可用余额不低于预期值才置为 `completed`。远端状态或到账
+在 15 分钟内仍无法确认会转
 `manual_review`；所有完成、失败和人工复核都写脱敏审计，执行状态继续保持暂停，必须由管理员发起
 全量对账恢复。
 真实意图额外固化 1–10 倍请求杠杆，旧记录迁移为安全默认值 1；

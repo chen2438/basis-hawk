@@ -96,7 +96,7 @@ class InternalTransferExecutionResult(BaseModel):
 
 
 class InternalTransferExecutionService:
-    _recoverable_without_ack = {Exchange.BITGET, Exchange.GATE}
+    _recoverable_without_ack = {Exchange.BITGET}
 
     def __init__(
         self,
@@ -236,6 +236,8 @@ class InternalTransferExecutionService:
                 transfer_id=row.id,
                 exchange_transfer_id=submission.transfer_id,
             )
+            if submission.status == "completed":
+                return await self._confirm_arrival(persisted, client)
             return InternalTransferExecutionResult(
                 transfer_id=row.id,
                 action="submitted",
@@ -327,46 +329,53 @@ class InternalTransferExecutionService:
                     action="confirmation_retry",
                     status=row.status,
                 )
-            try:
-                snapshot = await client.snapshot()
-            except Exception:
-                return InternalTransferExecutionResult(
-                    transfer_id=row.id,
-                    action="arrival_retry",
-                    status=row.status,
-                )
-            _, target_balance = _transfer_balances(row, snapshot)
-            if (
-                row.expected_target_balance is None
-                or target_balance < row.expected_target_balance
-            ):
-                if self._confirmation_timed_out(row):
-                    await self.database.finalize_internal_transfer(
-                        transfer_id=row.id,
-                        status="manual_review",
-                        error_code="arrival_confirmation_timeout",
-                    )
-                    return InternalTransferExecutionResult(
-                        transfer_id=row.id,
-                        action="blocked",
-                        status="manual_review",
-                    )
-                return InternalTransferExecutionResult(
-                    transfer_id=row.id,
-                    action="arrival_retry",
-                    status=row.status,
-                )
-            await self.database.finalize_internal_transfer(
-                transfer_id=row.id,
-                status="completed",
-            )
-            return InternalTransferExecutionResult(
-                transfer_id=row.id,
-                action="completed",
-                status="completed",
-            )
+            return await self._confirm_arrival(row, client)
         finally:
             await _close_quietly(client)
+
+    async def _confirm_arrival(
+        self,
+        row: InternalTransferRow,
+        client: PrivateAccountClient,
+    ) -> InternalTransferExecutionResult:
+        try:
+            snapshot = await client.snapshot()
+        except Exception:
+            return InternalTransferExecutionResult(
+                transfer_id=row.id,
+                action="arrival_retry",
+                status=row.status,
+            )
+        _, target_balance = _transfer_balances(row, snapshot)
+        if (
+            row.expected_target_balance is None
+            or target_balance < row.expected_target_balance
+        ):
+            if self._confirmation_timed_out(row):
+                await self.database.finalize_internal_transfer(
+                    transfer_id=row.id,
+                    status="manual_review",
+                    error_code="arrival_confirmation_timeout",
+                )
+                return InternalTransferExecutionResult(
+                    transfer_id=row.id,
+                    action="blocked",
+                    status="manual_review",
+                )
+            return InternalTransferExecutionResult(
+                transfer_id=row.id,
+                action="arrival_retry",
+                status=row.status,
+            )
+        await self.database.finalize_internal_transfer(
+            transfer_id=row.id,
+            status="completed",
+        )
+        return InternalTransferExecutionResult(
+            transfer_id=row.id,
+            action="completed",
+            status="completed",
+        )
 
     def _confirmation_timed_out(self, row: InternalTransferRow) -> bool:
         submitted_at = row.submitted_at or row.updated_at

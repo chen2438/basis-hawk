@@ -902,25 +902,22 @@ async def test_bitget_unified_internal_transfer_is_not_required() -> None:
 
 
 async def test_gate_internal_transfer_submission_and_confirmation() -> None:
+    requests: list[httpx.Request] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST":
-            body = __import__("json").loads(request.content)
-            assert body == {
-                "amount": "3.5",
-                "client_order_id": "local-transfer-id",
-                "currency": "USDT",
-                "from": "futures",
-                "settle": "usdt",
-                "to": "spot",
-            }
-            return httpx.Response(200, json={"tx_id": "gate-remote-id"})
-        assert request.url.path == "/api/v4/wallet/order_status"
-        assert request.url.params["client_order_id"] == "local-transfer-id"
-        assert request.url.params["tx_id"] == "gate-remote-id"
-        return httpx.Response(
-            200,
-            json={"tx_id": "gate-remote-id", "status": "SUCCESS"},
-        )
+        requests.append(request)
+        assert request.method == "POST"
+        assert request.url.path == "/api/v4/wallet/transfers"
+        body = __import__("json").loads(request.content)
+        assert body == {
+            "amount": "3.5",
+            "client_order_id": "local-transfer-id",
+            "currency": "USDT",
+            "from": "futures",
+            "settle": "usdt",
+            "to": "spot",
+        }
+        return httpx.Response(200, json={"tx_id": "gate-remote-id"})
 
     http = httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
@@ -938,6 +935,7 @@ async def test_gate_internal_transfer_submission_and_confirmation() -> None:
         amount=Decimal("3.5"),
     )
     assert submitted.transfer_id == "gate-remote-id"
+    assert submitted.status == "completed"
     confirmed = await client.internal_transfer_status(
         transfer_id=submitted.transfer_id,
         client_transfer_id="local-transfer-id",
@@ -946,6 +944,7 @@ async def test_gate_internal_transfer_submission_and_confirmation() -> None:
         created_at=datetime(2026, 7, 26, tzinfo=UTC),
     )
     assert confirmed.status == "completed"
+    assert len(requests) == 1
     await http.aclose()
 
 
