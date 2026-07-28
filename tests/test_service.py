@@ -9,6 +9,7 @@ from basis_hawk.models import (
     FundingObservation,
     InstrumentPair,
     MarketQuote,
+    Opportunity,
     ScannerSettings,
 )
 from basis_hawk.service import ScannerService, history_snapshot_bucket
@@ -102,6 +103,45 @@ def test_history_snapshot_bucket_uses_five_minute_intervals() -> None:
         tzinfo=UTC,
     )
     assert ScannerSettings().retention_days == 7
+
+
+def test_prioritizes_funding_history_by_projected_thirty_day_return() -> None:
+    service = ScannerService(
+        Database("sqlite+aiosqlite:///:memory:"),
+        {Exchange.BINANCE: FakeAdapter()},
+    )
+    pairs = [
+        InstrumentPair(
+            exchange=Exchange.BINANCE,
+            base_asset=base_asset,
+            spot_symbol=f"{base_asset}USDT",
+            perp_symbol=f"{base_asset}USDT",
+        )
+        for base_asset in ("LOW", "CURRENT", "PARTIAL", "UNKNOWN")
+    ]
+    service.pairs[Exchange.BINANCE] = pairs
+    service.current["binance:CURRENT"] = FundingObservation(
+        exchange=Exchange.BINANCE,
+        base_asset="CURRENT",
+        rate=Decimal("0.0004"),
+        funding_at=datetime.now(UTC),
+        interval_hours=Decimal("8"),
+    )
+    service.opportunities["binance:LOW"] = Opportunity.model_construct(
+        net_return=Decimal("0.01"),
+    )
+    service.opportunities["binance:PARTIAL"] = Opportunity.model_construct(
+        net_return=Decimal("0.02"),
+    )
+
+    prioritized = service._prioritized_history_pairs(Exchange.BINANCE)
+
+    assert [pair.base_asset for pair in prioritized] == [
+        "CURRENT",
+        "PARTIAL",
+        "LOW",
+        "UNKNOWN",
+    ]
 
 
 async def test_refreshes_and_recalculates() -> None:

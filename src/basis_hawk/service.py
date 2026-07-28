@@ -4,9 +4,14 @@ import asyncio
 import logging
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from time import monotonic
 
-from basis_hawk.calculations import build_opportunity
+from basis_hawk.calculations import (
+    annualize_current,
+    build_opportunity,
+    projected_net_return,
+)
 from basis_hawk.exchanges import (
     BinanceAdapter,
     BitgetAdapter,
@@ -155,7 +160,7 @@ class ScannerService:
             end = datetime.now(UTC)
             start = end - timedelta(days=7, hours=12)
             ready = 0
-            for pair in list(self.pairs[exchange]):
+            for pair in self._prioritized_history_pairs(exchange):
                 if self._stopping.is_set():
                     return
                 try:
@@ -192,6 +197,31 @@ class ScannerService:
                 update={"history_ready": ready}
             )
             await self._wait(900)
+
+    def _prioritized_history_pairs(self, exchange: Exchange) -> list[InstrumentPair]:
+        fee = self.settings.fees[exchange]
+
+        def projected_return(pair: InstrumentPair) -> Decimal | None:
+            opportunity = self.opportunities.get(pair.key)
+            if opportunity is not None and opportunity.net_return is not None:
+                return opportunity.net_return
+            current = self.current.get(pair.key)
+            if current is None:
+                return None
+            return projected_net_return(
+                annualize_current(current.rate, current.interval_hours),
+                fee,
+                self.settings.holding_period_days,
+            )
+
+        def priority(pair: InstrumentPair) -> tuple[bool, Decimal]:
+            estimated_return = projected_return(pair)
+            return (
+                estimated_return is None,
+                -estimated_return if estimated_return is not None else Decimal("0"),
+            )
+
+        return sorted(self.pairs[exchange], key=priority)
 
     async def refresh_catalog(self, exchange: Exchange) -> None:
         adapter = self.adapters[exchange]
