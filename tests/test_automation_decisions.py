@@ -33,6 +33,7 @@ def _config(**changes: object) -> AutoStrategyConfig:
         "minimum_apr_24h": Decimal("0.08"),
         "minimum_apr_7d": Decimal("0.06"),
         "minimum_net_return": Decimal("0.005"),
+        "minimum_opening_basis": Decimal("0"),
         "maximum_opening_basis": Decimal("0.03"),
         "minimum_two_leg_notional": Decimal("50"),
         "book_capacity_multiple": Decimal("2"),
@@ -141,6 +142,45 @@ def test_opening_selects_highest_net_return_that_passes_all_rules() -> None:
     assert evaluation.decision.action == "open"
     assert evaluation.decision.opportunity.key == "okx:HIGH"
     assert evaluation.decision.notional_usdt == Decimal("100")
+
+
+def test_opening_basis_must_stay_between_configured_bounds() -> None:
+    now = datetime.now(UTC)
+    below = _opportunity(
+        base_asset="BELOW",
+        observed_at=now,
+    ).model_copy(update={"executable_basis": Decimal("-0.001")})
+    above = _opportunity(
+        base_asset="ABOVE",
+        observed_at=now,
+    ).model_copy(update={"executable_basis": Decimal("0.031")})
+
+    below_result = evaluate_automatic_strategy(
+        config=_config(),
+        opportunities=[below],
+        positions=[],
+        daily_realized_pnl=Decimal("0"),
+        now=now,
+    )
+    above_result = evaluate_automatic_strategy(
+        config=_config(),
+        opportunities=[above],
+        positions=[],
+        daily_realized_pnl=Decimal("0"),
+        now=now,
+    )
+
+    assert below_result.decision is None
+    assert above_result.decision is None
+
+
+def test_legacy_strategy_without_minimum_basis_keeps_its_original_behavior() -> None:
+    values = _config().model_dump()
+    values.pop("minimum_opening_basis")
+
+    restored = AutoStrategyConfig.model_validate(values)
+
+    assert restored.minimum_opening_basis == Decimal("-0.999999999999")
 
 
 def test_opening_notional_shrinks_to_safe_book_capacity() -> None:

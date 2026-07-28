@@ -473,6 +473,7 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByText("自动策略完整配置")).toBeTruthy();
     expect(screen.getByText("资金与仓位")).toBeTruthy();
     expect(screen.getByText("开仓门槛")).toBeTruthy();
+    expect(screen.getByText("最低开仓基差")).toBeTruthy();
     expect(screen.getByText("退出与时间")).toBeTruthy();
     expect((screen.getByRole("button", { name: "启用最新策略" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/自动交易保持 disabled/)).toBeTruthy();
@@ -482,7 +483,9 @@ describe("Basis Hawk dashboard", () => {
       expect.objectContaining({ method: "PUT" }),
     ));
     const saveCall = vi.mocked(fetch).mock.calls.find(([url]) => url === "/api/automation/config");
-    expect(JSON.parse(String((saveCall?.[1] as RequestInit).body)).enabled_exchanges).toEqual(["binance"]);
+    const savedConfig = JSON.parse(String((saveCall?.[1] as RequestInit).body));
+    expect(savedConfig.enabled_exchanges).toEqual(["binance"]);
+    expect(savedConfig.minimum_opening_basis).toBe("0");
     confirmation.mockRestore();
   });
 

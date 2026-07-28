@@ -247,6 +247,7 @@ export interface AutoStrategyConfig {
   minimum_apr_24h: string;
   minimum_apr_7d: string;
   minimum_net_return: string;
+  minimum_opening_basis: string;
   maximum_opening_basis: string;
   minimum_two_leg_notional: string;
   book_capacity_multiple: string;

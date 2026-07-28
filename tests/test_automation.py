@@ -27,6 +27,7 @@ def strategy_config() -> dict[str, object]:
         "minimum_apr_24h": "0.08",
         "minimum_apr_7d": "0.05",
         "minimum_net_return": "0.005",
+        "minimum_opening_basis": "0",
         "maximum_opening_basis": "0.02",
         "minimum_two_leg_notional": "50",
         "book_capacity_multiple": "2",
@@ -95,6 +96,7 @@ async def test_automation_is_fail_closed_versioned_and_explicitly_enabled() -> N
         assert second.json()["strategy"]["version"] == 2
         strategy_id = second.json()["strategy"]["id"]
         assert second.json()["strategy"]["config"]["notional_per_trade"] == "150"
+        assert second.json()["strategy"]["config"]["minimum_opening_basis"] == "0"
 
         blocked = await client.post(
             "/api/automation/enable",
@@ -166,6 +168,15 @@ async def test_automation_rejects_incomplete_limits_and_missing_credentials() ->
             },
         )
         assert invalid.status_code == 422
+        invalid_basis_range = await client.put(
+            "/api/automation/config",
+            json={
+                **strategy_config(),
+                "minimum_opening_basis": "0.03",
+                "maximum_opening_basis": "0.02",
+            },
+        )
+        assert invalid_basis_range.status_code == 422
 
         saved = await client.put(
             "/api/automation/config",

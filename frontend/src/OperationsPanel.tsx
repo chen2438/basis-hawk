@@ -1090,7 +1090,8 @@ function AutomationView({
       ]} form={form} setDecimal={setDecimal} setInteger={setInteger} />
       <StrategyFields title="开仓门槛" fields={[
         ["minimum_current_apr", "当前最低 APR"], ["minimum_apr_24h", "24h 最低 APR"], ["minimum_apr_7d", "7d 最低 APR"],
-        ["minimum_net_return", "最低净收益"], ["maximum_opening_basis", "最大开仓基差"], ["normal_max_slippage", "普通最大滑点"],
+        ["minimum_net_return", "最低净收益"], ["minimum_opening_basis", "最低开仓基差"], ["maximum_opening_basis", "最大开仓基差"],
+        ["normal_max_slippage", "普通最大滑点"],
         ["minimum_liquidation_buffer", "最低清算缓冲"],
       ]} form={form} setDecimal={setDecimal} setInteger={setInteger} />
       <StrategyFields title="退出与时间" fields={[
@@ -1139,6 +1140,7 @@ function strategyForm(value?: AutoStrategyConfig): AutoStrategyConfig {
     minimum_apr_24h: "0.08",
     minimum_apr_7d: "0.05",
     minimum_net_return: "0.005",
+    minimum_opening_basis: "0",
     maximum_opening_basis: "0.02",
     minimum_two_leg_notional: "50",
     book_capacity_multiple: "2",

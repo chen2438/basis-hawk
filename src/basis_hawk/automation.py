@@ -56,6 +56,11 @@ class AutoStrategyConfig(BaseModel):
     minimum_apr_24h: Decimal
     minimum_apr_7d: Decimal
     minimum_net_return: Decimal
+    minimum_opening_basis: Decimal = Field(
+        default=Decimal("-0.999999999999"),
+        gt=Decimal("-1"),
+        lt=Decimal("1"),
+    )
     maximum_opening_basis: Decimal = Field(gt=Decimal("-1"), lt=Decimal("1"))
     minimum_two_leg_notional: Decimal = Field(gt=0)
     book_capacity_multiple: Decimal = Field(ge=1, le=100)
@@ -84,6 +89,10 @@ class AutoStrategyConfig(BaseModel):
         if self.minimum_two_leg_notional > self.notional_per_trade:
             raise ValueError(
                 "minimum two-leg notional cannot exceed trade notional"
+            )
+        if self.minimum_opening_basis > self.maximum_opening_basis:
+            raise ValueError(
+                "minimum opening basis cannot exceed maximum opening basis"
             )
         if self.emergency_max_slippage < self.normal_max_slippage:
             raise ValueError(
@@ -361,6 +370,7 @@ def _opening_rule_candidates(
             or opportunity.apr_24h < config.minimum_apr_24h
             or opportunity.apr_7d < config.minimum_apr_7d
             or opportunity.net_return < config.minimum_net_return
+            or opportunity.executable_basis < config.minimum_opening_basis
             or opportunity.executable_basis > config.maximum_opening_basis
         ):
             continue
