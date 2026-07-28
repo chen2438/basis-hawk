@@ -1740,6 +1740,22 @@ class Database:
         async with self.sessions() as session:
             return await session.get(PairedPositionRow, position_id)
 
+    async def paired_position_with_opening_intent(
+        self,
+        position_id: str,
+    ) -> tuple[PairedPositionRow, TradeIntentRow] | None:
+        async with self.sessions() as session:
+            result = await session.execute(
+                select(PairedPositionRow, TradeIntentRow)
+                .join(
+                    TradeIntentRow,
+                    TradeIntentRow.id == PairedPositionRow.opening_intent_id,
+                )
+                .where(PairedPositionRow.id == position_id)
+            )
+            row = result.one_or_none()
+            return (row[0], row[1]) if row is not None else None
+
     async def trade_intent(self, intent_id: str) -> tuple[TradeIntentRow, list[OrderLegRow]] | None:
         async with self.sessions() as session:
             row = await session.get(TradeIntentRow, intent_id)
@@ -3868,6 +3884,23 @@ class Database:
             return list(
                 await session.scalars(statement.order_by(PairedPositionRow.opened_at.desc()))
             )
+
+    async def list_paired_positions_with_opening_intents(
+        self,
+        *,
+        status: str | None = None,
+    ) -> list[tuple[PairedPositionRow, TradeIntentRow]]:
+        async with self.sessions() as session:
+            statement = select(PairedPositionRow, TradeIntentRow).join(
+                TradeIntentRow,
+                TradeIntentRow.id == PairedPositionRow.opening_intent_id,
+            )
+            if status is not None:
+                statement = statement.where(PairedPositionRow.status == status)
+            rows = await session.execute(
+                statement.order_by(PairedPositionRow.opened_at.desc())
+            )
+            return [(row[0], row[1]) for row in rows]
 
     async def active_open_intent_keys(
         self,

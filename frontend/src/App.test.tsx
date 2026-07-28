@@ -394,6 +394,8 @@ describe("Basis Hawk dashboard", () => {
       base_asset: "VINE",
       initial_quantity: "100",
       quantity: "100",
+      notional_usdt: "0.84",
+      leverage: 3,
       spot_entry_price: "0.0084",
       perp_entry_price: "0.0085",
       opening_fees_usdt: "0.01",
@@ -409,6 +411,9 @@ describe("Basis Hawk dashboard", () => {
       closed_at: null,
     }]} />);
     expect(screen.getByText("未实现 PnL（价格）")).toBeTruthy();
+    expect(screen.getByText("名义额（USDT）")).toBeTruthy();
+    expect(screen.getByText("0.84 USDT")).toBeTruthy();
+    expect(screen.getByText("3×")).toBeTruthy();
     expect(screen.getByText("0.0084 / 0.0086")).toBeTruthy();
     expect(screen.getByText("0.0085 / 0.0084")).toBeTruthy();
     expect(screen.getByText("0.03 USDT")).toBeTruthy();

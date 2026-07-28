@@ -181,6 +181,8 @@ async def test_rest_contract_and_settings() -> None:
         open_position = positions.json()["items"][0]
         position_id = open_position["id"]
         assert open_position["opening_intent_id"] == intent_id
+        assert Decimal(open_position["notional_usdt"]) == Decimal("100")
+        assert open_position["leverage"] == 1
         assert open_position["spot_exit_price"] == "99"
         assert open_position["perp_exit_price"] == "102"
         assert Decimal(open_position["unrealized_pnl_usdt"]) == (
@@ -469,6 +471,15 @@ async def test_live_close_requires_position_bound_preview_and_confirmation() -> 
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
     ) as client:
+        positions = await client.get(
+            "/api/trades/positions",
+            params={"status": "open"},
+        )
+        assert positions.status_code == 200
+        assert Decimal(
+            positions.json()["items"][0]["notional_usdt"]
+        ).quantize(Decimal("0.1")) == Decimal("100.1")
+        assert positions.json()["items"][0]["leverage"] == 2
         preview_response = await client.post(
             f"/api/trades/positions/{position_id}/close/preview",
             json={"maximum_slippage": "0.002"},

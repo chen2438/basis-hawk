@@ -85,6 +85,10 @@
 - `GET /api/trades/positions?status=open&include_valuation=true`：读取配对仓位；显式请求估值时，开放仓位
   同时返回可空的
   `spot_exit_price`、`perp_exit_price`、`unrealized_pnl_usdt` 和 `valuation_observed_at`。
+  每条仓位始终返回 `notional_usdt` 和 `leverage`：前者按剩余共同基础币 `quantity ×
+  spot_entry_price` 计算，表示按现货实际开仓均价折算的剩余名义额；后者来自对应不可变开仓意图，
+  表示真实下单前已确认的永续杠杆。原始 `quantity` 继续以基础币计价供精确平仓和审计使用，但前端
+  配对持仓表只显示 USDT 名义额和合约杠杆。
   `live`/`paper` 使用扫描器最新行情，Gate `sandbox` 直接读取 TestNet 行情；超过 15 秒或读取失败时
   估值字段为 `null`，持久化仓位仍正常返回。
 - `POST /api/trades/paper/positions/{uuid}/close`：使用现货 bid 卖出及永续 ask reduce-only

@@ -254,6 +254,8 @@ class PairedPositionView(BaseModel):
     base_asset: str
     initial_quantity: Decimal
     quantity: Decimal
+    notional_usdt: Decimal
+    leverage: int
     spot_entry_price: Decimal
     perp_entry_price: Decimal
     opening_fees_usdt: Decimal
@@ -271,6 +273,7 @@ class PairedPositionView(BaseModel):
     @field_serializer(
         "initial_quantity",
         "quantity",
+        "notional_usdt",
         "spot_entry_price",
         "perp_entry_price",
         "opening_fees_usdt",
@@ -1327,13 +1330,17 @@ class TradeLedger:
 
     async def positions(self, *, status: str | None = None) -> list[PairedPositionView]:
         return [
-            _position_view(item)
-            for item in await self.database.list_paired_positions(status=status)
+            _position_view(position, opening_intent)
+            for position, opening_intent in (
+                await self.database.list_paired_positions_with_opening_intents(
+                    status=status
+                )
+            )
         ]
 
     async def position(self, position_id: str) -> PairedPositionView | None:
-        row = await self.database.paired_position(position_id)
-        return _position_view(row) if row is not None else None
+        row = await self.database.paired_position_with_opening_intent(position_id)
+        return _position_view(row[0], row[1]) if row is not None else None
 
     async def fills(self, intent_id: str) -> list[FillView]:
         return [_fill_view(item) for item in await self.database.fills_for_intent(intent_id)]
@@ -1635,7 +1642,10 @@ def _pnl_realization_view(
     )
 
 
-def _position_view(row: PairedPositionRow) -> PairedPositionView:
+def _position_view(
+    row: PairedPositionRow,
+    opening_intent: TradeIntentRow,
+) -> PairedPositionView:
     return PairedPositionView(
         id=row.id,
         opening_intent_id=row.opening_intent_id,
@@ -1645,6 +1655,8 @@ def _position_view(row: PairedPositionRow) -> PairedPositionView:
         base_asset=row.base_asset,
         initial_quantity=row.initial_quantity,
         quantity=row.quantity,
+        notional_usdt=row.quantity * row.spot_entry_price,
+        leverage=opening_intent.leverage,
         spot_entry_price=row.spot_entry_price,
         perp_entry_price=row.perp_entry_price,
         opening_fees_usdt=row.opening_fees_usdt,

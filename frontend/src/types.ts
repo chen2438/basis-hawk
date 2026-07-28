@@ -105,6 +105,8 @@ export interface PairedPosition {
   base_asset: string;
   initial_quantity: string;
   quantity: string;
+  notional_usdt: string;
+  leverage: number;
   spot_entry_price: string;
   perp_entry_price: string;
   opening_fees_usdt: string;

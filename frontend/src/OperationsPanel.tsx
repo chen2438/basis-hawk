@@ -744,12 +744,12 @@ function TradePreview({
 export function PositionsView({ positions }: { positions: PairedPosition[] }) {
   return <div className="positions-view">
     <p className="position-valuation-note">
-      未实现 PnL 每 5 秒刷新，按当前现货买一卖出、永续卖一回补估算；仅含价格浮盈亏，不含资金费及开平仓手续费。
+      名义额按剩余共同数量 × 现货开仓均价折算为 USDT；未实现 PnL 每 5 秒刷新，按当前现货买一卖出、永续卖一回补估算；仅含价格浮盈亏，不含资金费及开平仓手续费。
     </p>
-    <div className="ops-table-wrap"><table><thead><tr><th>标的</th><th>环境</th><th>数量</th><th>现货开仓 / 平仓估值</th><th>永续开仓 / 平仓估值</th><th>未实现 PnL（价格）</th><th>已实现 PnL</th><th>状态</th><th>估值时间</th><th>开仓时间</th></tr></thead>
+    <div className="ops-table-wrap"><table><thead><tr><th>标的</th><th>环境</th><th>名义额（USDT）</th><th>合约杠杆</th><th>现货开仓 / 平仓估值</th><th>永续开仓 / 平仓估值</th><th>未实现 PnL（价格）</th><th>已实现 PnL</th><th>状态</th><th>估值时间</th><th>开仓时间</th></tr></thead>
     <tbody>{positions.map((item) => <tr key={item.id}>
       <td><div className="asset"><strong>{item.base_asset}</strong><span>{exchangeNames[item.exchange]}</span></div></td>
-      <td>{item.environment}</td><td>{amount(item.quantity)}</td>
+      <td>{item.environment}</td><td>{amount(item.notional_usdt)} USDT</td><td>{item.leverage}×</td>
       <td>{amount(item.spot_entry_price)} / {amount(item.spot_exit_price)}</td>
       <td>{amount(item.perp_entry_price)} / {amount(item.perp_exit_price)}</td>
       <td className={Number(item.unrealized_pnl_usdt ?? 0) >= 0 ? "positive" : "negative"}>
