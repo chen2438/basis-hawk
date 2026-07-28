@@ -25,6 +25,9 @@ CHUNK_SIZE = 1024 * 1024
 ARCHIVE_NAME_PATTERN = re.compile(
     r"^basis-hawk-\d{8}T\d{6}Z-(daily|weekly)\.bhbk$"
 )
+DAILY_ARCHIVE_NAME_PATTERN = re.compile(
+    r"^basis-hawk-(\d{8}T\d{6}Z)-daily\.bhbk$"
+)
 
 
 class BackupError(RuntimeError):
@@ -339,7 +342,38 @@ def restore_backup(path: Path, *, confirmed: bool, clean: bool) -> None:
     _pipe_decrypted(path, command, env)
 
 
+def seconds_until_next_backup(
+    directory: Path,
+    interval_seconds: int,
+    *,
+    now: datetime | None = None,
+) -> float:
+    current = (now or datetime.now(UTC)).astimezone(UTC)
+    latest: datetime | None = None
+    for path in directory.glob("basis-hawk-*-daily.bhbk"):
+        match = DAILY_ARCHIVE_NAME_PATTERN.fullmatch(path.name)
+        if match is None:
+            continue
+        timestamp = datetime.strptime(
+            match.group(1),
+            "%Y%m%dT%H%M%SZ",
+        ).replace(tzinfo=UTC)
+        if latest is None or timestamp > latest:
+            latest = timestamp
+    if latest is None:
+        return 0
+    archive_age = max(0, (current - latest).total_seconds())
+    return max(0, interval_seconds - archive_age)
+
+
 def run_loop(directory: Path, interval_seconds: int) -> None:
+    initial_delay = seconds_until_next_backup(directory, interval_seconds)
+    if initial_delay > 0:
+        print(
+            f"backup: next archive in {int(initial_delay)} seconds",
+            flush=True,
+        )
+        time.sleep(initial_delay)
     while True:
         try:
             path = create_backup(directory=directory)

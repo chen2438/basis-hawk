@@ -178,9 +178,7 @@ class SnapshotRow(Base):
 
 class LatestOpportunityRow(Base):
     __tablename__ = "latest_opportunities"
-    key: Mapped[str] = mapped_column(String(80), primary_key=True)
-    exchange: Mapped[str] = mapped_column(String(20), index=True)
-    base_asset: Mapped[str] = mapped_column(String(40))
+    exchange: Mapped[str] = mapped_column(String(20), primary_key=True)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     payload: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -5223,26 +5221,36 @@ class Database:
     ) -> None:
         if not opportunities:
             return
+        grouped: dict[str, list[Opportunity]] = {}
+        for item in opportunities:
+            grouped.setdefault(item.exchange.value, []).append(item)
         async with self.sessions() as session:
             now = datetime.now(UTC)
-            for item in opportunities:
-                row = await session.get(LatestOpportunityRow, item.key)
-                payload = item.model_dump_json()
+            for exchange, items in grouped.items():
+                row = await session.get(LatestOpportunityRow, exchange)
+                payload = (
+                    "["
+                    + ",".join(
+                        item.model_dump_json()
+                        for item in sorted(
+                            items,
+                            key=lambda value: value.base_asset,
+                        )
+                    )
+                    + "]"
+                )
+                observed_at = max(item.observed_at for item in items)
                 if row is None:
                     session.add(
                         LatestOpportunityRow(
-                            key=item.key,
-                            exchange=item.exchange.value,
-                            base_asset=item.base_asset,
-                            observed_at=item.observed_at,
+                            exchange=exchange,
+                            observed_at=observed_at,
                             payload=payload,
                             updated_at=now,
                         )
                     )
                 else:
-                    row.exchange = item.exchange.value
-                    row.base_asset = item.base_asset
-                    row.observed_at = item.observed_at
+                    row.observed_at = observed_at
                     row.payload = payload
                     row.updated_at = now
             await session.commit()
@@ -5260,16 +5268,18 @@ class Database:
                 )
             rows = list(
                 await session.scalars(
-                    statement.order_by(
-                        LatestOpportunityRow.exchange,
-                        LatestOpportunityRow.base_asset,
-                    )
+                    statement.order_by(LatestOpportunityRow.exchange)
                 )
             )
-        return [
-            Opportunity.model_validate_json(row.payload)
+        opportunities = [
+            Opportunity.model_validate(item)
             for row in rows
+            for item in json.loads(row.payload)
         ]
+        return sorted(
+            opportunities,
+            key=lambda item: (item.exchange.value, item.base_asset),
+        )
 
     async def save_funding(self, observations: list[FundingObservation]) -> None:
         if not observations:

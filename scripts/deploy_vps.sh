@@ -614,9 +614,13 @@ wait_for_command 120 "first encrypted backup" \
     'latest="$(ls -1t /backups/basis-hawk-*.bhbk | head -n 1)"; \
     python3 -m basis_hawk.backup verify "$latest"'
 
-log "pruning unused Docker build cache older than 24 hours"
-if ! "${DOCKER_COMMAND[@]}" builder prune --all --force --filter "until=24h"; then
+log "limiting unused Docker build cache to 1 GB"
+if ! "${DOCKER_COMMAND[@]}" builder prune --all --force --keep-storage "1GB"; then
     warn "Docker build cache cleanup failed; deployment remains healthy"
+fi
+log "pruning dangling Docker images left by previous application builds"
+if ! "${DOCKER_COMMAND[@]}" image prune --force; then
+    warn "dangling Docker image cleanup failed; deployment remains healthy"
 fi
 log "applying a 200 MB system journal limit"
 if ! configure_journal_limits; then

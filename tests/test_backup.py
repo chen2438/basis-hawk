@@ -18,6 +18,7 @@ from basis_hawk.backup import (
     delete_backup,
     delete_backups,
     encrypt_stream,
+    seconds_until_next_backup,
 )
 
 
@@ -57,6 +58,34 @@ def test_retention_keeps_newest_files_and_checksums(tmp_path: Path) -> None:
 
     assert len(list(tmp_path.glob("*-daily.bhbk"))) == 7
     assert len(list(tmp_path.glob("*-daily.bhbk.sha256"))) == 7
+
+
+def test_backup_loop_delays_until_the_interval_after_latest_archive(
+    tmp_path: Path,
+) -> None:
+    latest = tmp_path / "basis-hawk-20260726T120000Z-daily.bhbk"
+    latest.write_bytes(b"archive")
+
+    assert seconds_until_next_backup(
+        tmp_path,
+        86400,
+        now=datetime(2026, 7, 27, 6, 0, tzinfo=UTC),
+    ) == 21600
+    assert seconds_until_next_backup(
+        tmp_path,
+        86400,
+        now=datetime(2026, 7, 27, 12, 0, tzinfo=UTC),
+    ) == 0
+    assert seconds_until_next_backup(
+        tmp_path,
+        86400,
+        now=datetime(2026, 7, 26, 6, 0, tzinfo=UTC),
+    ) == 86400
+    assert seconds_until_next_backup(
+        tmp_path / "missing",
+        86400,
+        now=datetime(2026, 7, 27, 12, 0, tzinfo=UTC),
+    ) == 0
 
 
 def test_backup_status_reports_only_archive_metadata(tmp_path: Path) -> None:

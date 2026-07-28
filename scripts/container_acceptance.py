@@ -130,6 +130,59 @@ def main() -> int:
             api_image,
             "alembic",
             "upgrade",
+            "20260728_0029",
+        )
+        docker(
+            "exec",
+            postgres,
+            "psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            "basis_hawk",
+            "-d",
+            "basis_hawk",
+            "-c",
+            """
+            INSERT INTO latest_opportunities (
+                key, exchange, base_asset, observed_at, payload, updated_at
+            ) VALUES
+                (
+                    'binance:BTC', 'binance', 'BTC',
+                    '2026-07-29T00:01:00Z', '{"base_asset":"BTC"}',
+                    '2026-07-29T00:01:00Z'
+                ),
+                (
+                    'binance:ETH', 'binance', 'ETH',
+                    '2026-07-29T00:02:00Z', '{"base_asset":"ETH"}',
+                    '2026-07-29T00:02:00Z'
+                );
+            INSERT INTO opportunity_snapshots (
+                exchange, base_asset, observed_at, payload
+            ) VALUES
+                (
+                    'binance', 'BTC',
+                    '2026-07-29T00:01:00Z', '{}'
+                ),
+                (
+                    'binance', 'BTC',
+                    '2026-07-29T00:59:00Z', '{}'
+                );
+            """,
+        )
+        docker(
+            "run",
+            "--rm",
+            "--read-only",
+            "--tmpfs",
+            "/tmp",
+            "--network",
+            network,
+            "-e",
+            f"BASIS_HAWK_DATABASE_URL={database_url}",
+            api_image,
+            "alembic",
+            "upgrade",
             "head",
         )
         docker(
@@ -159,8 +212,47 @@ def main() -> int:
             "SELECT version_num FROM alembic_version;",
             capture=True,
         ).stdout.strip()
-        if revision != "20260728_0029":
+        if revision != "20260729_0030":
             raise RuntimeError(f"unexpected Alembic revision: {revision}")
+        migrated_cache = docker(
+            "exec",
+            postgres,
+            "psql",
+            "-At",
+            "-U",
+            "basis_hawk",
+            "-d",
+            "basis_hawk",
+            "-c",
+            """
+            SELECT
+                (SELECT count(*) FROM latest_opportunities),
+                (
+                    SELECT json_array_length(payload::json)
+                    FROM latest_opportunities
+                    WHERE exchange = 'binance'
+                ),
+                (SELECT count(*) FROM opportunity_snapshots);
+            """,
+            capture=True,
+        ).stdout.strip()
+        if migrated_cache != "1|2|1":
+            raise RuntimeError(
+                f"unexpected bounded-cache migration result: {migrated_cache}"
+            )
+        docker(
+            "exec",
+            postgres,
+            "psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            "basis_hawk",
+            "-d",
+            "basis_hawk",
+            "-c",
+            "TRUNCATE latest_opportunities, opportunity_snapshots;",
+        )
 
         intent_persistence_probe = f"""
 import asyncio
@@ -574,6 +666,7 @@ asyncio.run(main())
 
         print("container image build: ok")
         print("PostgreSQL 17 migration: ok")
+        print("bounded-cache data migration: ok")
         print("PostgreSQL model/schema drift: none")
         print("PostgreSQL parent-before-leg persistence: ok")
         print("API readiness: ok")

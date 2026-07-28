@@ -5,12 +5,13 @@ from decimal import Decimal
 from time import monotonic
 
 import httpx
+from sqlalchemy import func, select
 
 from basis_hawk.api import create_app
 from basis_hawk.exchanges.base import ExchangeAdapter
 from basis_hawk.models import Exchange, FundingObservation, InstrumentPair, MarketQuote
 from basis_hawk.service import ScannerService
-from basis_hawk.storage import Database
+from basis_hawk.storage import Database, LatestOpportunityRow
 
 
 class LoadAdapter(ExchangeAdapter):
@@ -121,6 +122,11 @@ async def test_six_exchange_universe_handles_three_thousand_candidates() -> None
     assert len(values) == 3000
     assert all(item.quality.value == "healthy" for item in values)
     assert len(await database.latest_opportunities()) == 3000
+    async with database.sessions() as session:
+        cache_rows = await session.scalar(
+            select(func.count()).select_from(LatestOpportunityRow)
+        )
+    assert cache_rows == 6
     assert elapsed < 20
 
     app = create_app(service, manage_lifecycle=False, auth_required=False)

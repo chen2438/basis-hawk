@@ -92,14 +92,14 @@ class FakeAdapter(ExchangeAdapter):
         return None
 
 
-def test_history_snapshot_bucket_uses_five_minute_intervals() -> None:
+def test_history_snapshot_bucket_uses_hourly_intervals() -> None:
     value = datetime(2026, 7, 27, 14, 58, 41, 123456, tzinfo=UTC)
     assert history_snapshot_bucket(value) == datetime(
         2026,
         7,
         27,
         14,
-        55,
+        0,
         tzinfo=UTC,
     )
     assert ScannerSettings().retention_days == 7

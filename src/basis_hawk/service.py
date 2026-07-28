@@ -35,12 +35,9 @@ from basis_hawk.storage import Database
 
 logger = logging.getLogger(__name__)
 
-HISTORY_SNAPSHOT_INTERVAL_MINUTES = 5
-
 
 def history_snapshot_bucket(value: datetime) -> datetime:
-    minute = value.minute - (value.minute % HISTORY_SNAPSHOT_INTERVAL_MINUTES)
-    return value.replace(minute=minute, second=0, microsecond=0)
+    return value.replace(minute=0, second=0, microsecond=0)
 
 
 def default_adapters(timeout: float = 10) -> dict[Exchange, ExchangeAdapter]:

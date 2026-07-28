@@ -17,7 +17,7 @@ export function SettingsPanel({ value, onSave, onClose }: { value: Settings; onS
         <label>每所候选数<input type="number" min="10" max="500" value={draft.universe_size} onChange={(e) => setDraft({ ...draft, universe_size: Number(e.target.value) })} /></label>
         <label>最低两腿成交额（USDT）<input type="number" min="0" value={draft.minimum_quote_volume} onChange={(e) => setDraft({ ...draft, minimum_quote_volume: e.target.value })} /></label>
         <label>收益估算持有期（天）<input type="number" min="1" max="365" value={draft.holding_period_days} onChange={(e) => setDraft({ ...draft, holding_period_days: Number(e.target.value) })} /></label>
-        <label>历史保留（天）<input type="number" min="1" max="365" value={draft.retention_days} onChange={(e) => setDraft({ ...draft, retention_days: Number(e.target.value) })} /></label>
+        <label>趋势历史保留（天，最多 7 天）<input type="number" min="1" max="7" value={draft.retention_days} onChange={(e) => setDraft({ ...draft, retention_days: Number(e.target.value) })} /></label>
       </div>
       <h3>Taker 费率估算</h3>
       <div className="fee-table">

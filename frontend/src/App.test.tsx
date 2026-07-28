@@ -127,7 +127,7 @@ describe("Basis Hawk dashboard", () => {
         }
         : url.includes("transfers") ? { items: [] }
         : url.includes("automation") ? { state: "disabled", reason: "disabled", updated_by: "system", updated_at: "2026-07-26T00:00:00Z", active_strategy: null, latest_strategy: null }
-        : { universe_size: 500, minimum_quote_volume: "1000000", holding_period_days: 30, retention_days: 30, fee_checked_at: "2026-07-23", fees: { binance: { spot_taker: "0.001", perp_taker: "0.0005" }, okx: { spot_taker: "0.001", perp_taker: "0.0005" }, mexc: { spot_taker: "0.0005", perp_taker: "0.0004" }, bybit: { spot_taker: "0.001", perp_taker: "0.00055" }, bitget: { spot_taker: "0.001", perp_taker: "0.0006" }, gate: { spot_taker: "0.001", perp_taker: "0.00075" } } };
+        : { universe_size: 500, minimum_quote_volume: "1000000", holding_period_days: 30, retention_days: 7, fee_checked_at: "2026-07-23", fees: { binance: { spot_taker: "0.001", perp_taker: "0.0005" }, okx: { spot_taker: "0.001", perp_taker: "0.0005" }, mexc: { spot_taker: "0.0005", perp_taker: "0.0004" }, bybit: { spot_taker: "0.001", perp_taker: "0.00055" }, bitget: { spot_taker: "0.001", perp_taker: "0.0006" }, gate: { spot_taker: "0.001", perp_taker: "0.00075" } } };
       return Promise.resolve({ ok: true, json: () => Promise.resolve(value) });
     }));
   });

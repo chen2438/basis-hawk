@@ -71,8 +71,9 @@ worker。重复部署识别已有 Alembic schema 后，先停止 API、worker �
 随后启动全部服务，依次验证 PostgreSQL、API liveness、六所行情目录 readiness 和最新加密备份；失败
 会保留容器与日志供排查，不删除数据库或卷。已有部署在停止应用服务后的备份、拉取、迁移或更新后
 对账步骤失败时，退出钩子会尽力用 `docker compose start` 重启原有 API、worker 和备份容器；恢复
-失败会明确告警，避免静默留下 Caddy 502。全部健康检查成功后，脚本清理超过 24 小时且未使用的
-Docker build cache；清理失败只告警，不把健康部署误报为失败。使用 systemd-journald 的宿主机还会安装
+失败会明确告警，避免静默留下 Caddy 502。全部健康检查成功后，脚本把 Docker build cache 压到
+1 GB，并清理已经失去标签的旧应用镜像；清理失败只告警，不把健康部署误报为失败。使用
+systemd-journald 的宿主机还会安装
 `/etc/systemd/journald.conf.d/basis-hawk.conf`，把持久日志上限设为 200 MB、至少保留 1 GB 空闲空间并
 限制为 7 天，然后压缩既有 journal。该设置不改变 SSH 密码登录，也不启用或修改 UFW。
 脚本默认不启用或修改 UFW。只有显式传入 `--enable-ufw` 时才会先放行当前 SSH 服务端口及
@@ -118,8 +119,9 @@ systemctl status basis-hawk-auto-update.timer
 journalctl -u basis-hawk-auto-update.service -u basis-hawk-update.service
 ```
 
-Compose 还提供独立非 root `backup` 服务。它使用与 PostgreSQL 17 服务端同版本的 `pg_dump`，启动后
-立即生成一次 custom archive，之后默认每 86400 秒生成一次。归档在写入命名卷时直接使用独立
+Compose 还提供独立非 root `backup` 服务。它使用与 PostgreSQL 17 服务端同版本的 `pg_dump`；没有
+归档的首次启动会立即生成一份 custom archive，已有归档时则从最近一份每日归档的 UTC 时间续算默认
+86400 秒周期，避免部署前安全备份与随后容器重启连续生成两份。归档在写入命名卷时直接使用独立
 `BASIS_HAWK_BACKUP_KEY` 做 AES-256-GCM 认证加密，明文数据库不会落盘；每份归档另有 SHA-256 文件，
 恢复验证还会校验 GCM tag 并让 `pg_restore --list` 解析完整归档。每日归档只保留最新 7 份，每周日
 另保留一份周归档并只保留最新 4 份。构建镜像时运行时代码显式归属固定的非 root 用户，即使远程
@@ -319,12 +321,13 @@ MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
 凭据；MEXC 不允许出现在 sandbox 策略，Gate sandbox 策略必须具有独立 Gate TestNet 凭据。暂停不会
 覆盖账户级 `execution_control`，因此后续仍可
 对账和人工平仓。每次创建版本、启用、暂停、恢复和禁用都写审计事件。
-`latest_opportunities` 以 `exchange:base_asset` 为主键保存最新完整机会 JSON、交易所、标的、行情时间和
-写入时间。API 行情进程每轮覆盖更新，不追加高频历史；`opportunity_snapshots` 继续承担 5 分钟级历史，
-默认保留 7 天。最新机会的行情时间不再单独建索引，表使用 70% fillfactor 和更积极的表级 autovacuum
-阈值，让约 5 秒一次的覆盖更新使用 HOT 更新并及时回收旧版本。引入该策略的迁移会在服务停止的升级
-窗口对 `latest_opportunities` 执行一次 `VACUUM FULL`，归还已经膨胀的磁盘空间；升级前加密备份仍先于
-该迁移完成。
+`latest_opportunities` 以交易所为主键，把该所最新完整机会聚合为一份 JSON 数组。约 3,000 条机会因此
+只需覆盖 6 行，而不是每 5 秒逐行更新 3,000 行；API 与 worker 仍读取相同的 `Opportunity`，行情时间、
+双腿盘口容量和规则语义不变。表使用 50% fillfactor、较小 TOAST tuple target，并对主表与 TOAST 设置
+5 条更新阈值的积极 autovacuum，及时回收压缩 JSON 的旧版本。`opportunity_snapshots` 改为每小时至多
+一条，保留期硬限制为 1–7 天。升级迁移在服务停止且加密备份完成后，把既有分钟快照按
+交易所/标的/小时只保留最后一条并执行 `VACUUM FULL ANALYZE`；旧实时表则通过重建为聚合表直接归还
+已经膨胀的关系文件空间。
 唯一 worker 通过该表和 `instruments` 目录获得跨进程一致的机会与精度，仍以行情 `observed_at` 而不是
 `updated_at` 判断 15 秒新鲜度。
 `pnl_realizations` 为每个已完成的平仓意图保存一条不可重复的实现事件，包括共同平仓数量、毛盈亏、
