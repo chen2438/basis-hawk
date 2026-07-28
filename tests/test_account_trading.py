@@ -1294,8 +1294,8 @@ async def test_gate_places_spot_and_perp_ioc_orders_with_contract_size_types() -
             market="spot",
             symbol="ORDER_USDT",
             side="buy",
-            quantity=Decimal("20"),
-            limit_price=Decimal("0.05"),
+            quantity=Decimal("20.000000000000000000"),
+            limit_price=Decimal("0.050000000000000000"),
             client_order_id="t-bh-open-spot",
         )
     )
@@ -1304,8 +1304,8 @@ async def test_gate_places_spot_and_perp_ioc_orders_with_contract_size_types() -
             market="perp",
             symbol="ORDER_USDT",
             side="sell",
-            quantity=Decimal("20"),
-            limit_price=Decimal("0.051"),
+            quantity=Decimal("20.000000000000000000"),
+            limit_price=Decimal("0.051000000000000000"),
             client_order_id="t-bh-open-perp",
             position_mode=PositionMode.HEDGE,
         )
@@ -1315,8 +1315,8 @@ async def test_gate_places_spot_and_perp_ioc_orders_with_contract_size_types() -
             market="perp",
             symbol="ORDER_USDT",
             side="buy",
-            quantity=Decimal("10.5"),
-            limit_price=Decimal("0.052"),
+            quantity=Decimal("10.500000000000000000"),
+            limit_price=Decimal("0.052000000000000000"),
             client_order_id="t-bh-close-perp",
             reduce_only=True,
             position_mode=PositionMode.HEDGE,
@@ -1338,11 +1338,13 @@ async def test_gate_places_spot_and_perp_ioc_orders_with_contract_size_types() -
     }
     assert requests[1][1]["size"] == -20
     assert isinstance(requests[1][1]["size"], int)
+    assert requests[1][1]["price"] == "0.051"
     assert requests[1][1]["reduce_only"] is False
     assert "action_mode" not in requests[1][1]
     assert "pos_margin_mode" not in requests[1][1]
     assert requests[2][1]["size"] == "10.5"
     assert isinstance(requests[2][1]["size"], str)
+    assert requests[2][1]["price"] == "0.052"
     assert requests[2][1]["reduce_only"] is True
     assert "action_mode" not in requests[2][1]
     assert "pos_margin_mode" not in requests[2][1]

@@ -350,6 +350,10 @@ def _hmac_base64(secret: str, value: str) -> str:
     ).decode()
 
 
+def _plain_decimal(value: Decimal) -> str:
+    return format(value.normalize(), "f")
+
+
 def _safe_remote_error_code(response: httpx.Response) -> str | None:
     try:
         body = response.json()
@@ -3441,8 +3445,8 @@ class GateAccountClient(PrivateAccountClient):
                 "type": "limit",
                 "account": self._spot_account(),
                 "side": order.side,
-                "amount": format(order.quantity, "f"),
-                "price": format(order.limit_price, "f"),
+                "amount": _plain_decimal(order.quantity),
+                "price": _plain_decimal(order.limit_price),
                 "time_in_force": "ioc",
             }
         else:
@@ -3453,12 +3457,12 @@ class GateAccountClient(PrivateAccountClient):
             wire_quantity: int | str = (
                 int(signed_quantity)
                 if signed_quantity == signed_quantity.to_integral_value()
-                else format(signed_quantity, "f")
+                else _plain_decimal(signed_quantity)
             )
             body = {
                 "contract": order.symbol,
                 "size": wire_quantity,
-                "price": format(order.limit_price, "f"),
+                "price": _plain_decimal(order.limit_price),
                 "tif": "ioc",
                 "text": order.client_order_id,
                 "reduce_only": order.reduce_only,
