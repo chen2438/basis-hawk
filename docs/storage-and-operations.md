@@ -278,6 +278,8 @@ MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
 但 ACK 尚未关联时必须继续阻断。远端成交通过
 `(order_leg_id, exchange_trade_id)` 唯一约束幂等写入，避免不同交易所可能重复的数字成交 ID 冲突；
 写入前强制核对市场、标的、方向和订单 ID，随后从完整本地成交集合重算订单腿累计数量及加权均价。
+订单腿的 `updated_at` 只在交易所订单 ID、累计成交量、加权均价或状态实际变化，或者新增成交时更新；
+重复返回完全相同订单和成交集合的周期/事件对账保持原时间，避免历史订单因健康核对被反复置顶。
 每个账户最近的 `fill_reconciliation_complete` 和 `fill_count` 随启动快照持久化。
 本地订单腿已经处于 `submitted`、`acknowledged`、`partially_filled` 或 `unknown`，但下单 ACK
 未能保存交易所订单 ID 时，worker 会先使用持久化的客户端订单 ID 向对应交易所查单；已经有关联 ID 的

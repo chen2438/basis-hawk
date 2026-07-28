@@ -426,6 +426,10 @@ async def test_reconciliation_persists_remote_fills_idempotently() -> None:
     )
 
     await reconciler.run_once()
+    stored_after_first_run = await database.trade_intent(intent_id)
+    assert stored_after_first_run is not None
+    updated_at_after_first_run = stored_after_first_run[1][0].updated_at
+
     await reconciler.run_once()
 
     stored = await database.trade_intent(intent_id)
@@ -436,6 +440,7 @@ async def test_reconciliation_persists_remote_fills_idempotently() -> None:
     assert stored[1][0].average_price.quantize(Decimal("0.001")) == Decimal(
         "0.049"
     )
+    assert stored[1][0].updated_at == updated_at_after_first_run
     fills = await database.fills_for_intent(intent_id)
     assert len(fills) == 1
     assert fills[0].exchange_trade_id == "trade-1"
@@ -631,6 +636,14 @@ async def test_reconciliation_recovers_ack_lost_order_before_querying_fills() ->
     assert stored[1][0].exchange_order_id == "remote-ack-1"
     assert stored[1][0].status == "filled"
     assert stored[1][0].filled_quantity == Decimal("20")
+    updated_at_after_recovery = stored[1][0].updated_at
+    await database.reconcile_remote_order(
+        order_leg_id=legs[0].id,
+        order=remote_order,
+    )
+    stored_after_identical_query = await database.trade_intent(intent_id)
+    assert stored_after_identical_query is not None
+    assert stored_after_identical_query[1][0].updated_at == updated_at_after_recovery
     states = await database.reconciliation_states()
     assert states[0].order_reconciliation_complete is True
     assert states[0].recovered_order_count == 1

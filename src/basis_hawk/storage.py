@@ -1972,6 +1972,10 @@ class Database:
             )
             if leg is None:
                 raise ValueError("order leg was not found")
+            previous_exchange_order_id = leg.exchange_order_id
+            previous_filled_quantity = leg.filled_quantity
+            previous_average_price = leg.average_price
+            previous_status = leg.status
             for item in fills:
                 if not item.exchange_trade_id:
                     raise ValueError("remote fill is missing an exchange trade ID")
@@ -2059,15 +2063,31 @@ class Database:
                 )
                 or Decimal("0")
             )
-            leg.filled_quantity = filled_quantity
-            leg.average_price = (
+            average_price = (
                 filled_notional / filled_quantity if filled_quantity > 0 else None
             )
+            leg.filled_quantity = filled_quantity
+            leg.average_price = average_price
             if filled_quantity >= leg.quantity:
                 leg.status = "filled"
             elif filled_quantity > 0 and leg.status not in {"canceled", "failed"}:
                 leg.status = "partially_filled"
-            leg.updated_at = datetime.now(UTC)
+            average_price_changed = (
+                (previous_average_price is None) != (average_price is None)
+                or (
+                    previous_average_price is not None
+                    and average_price is not None
+                    and not _numeric_equal(previous_average_price, average_price)
+                )
+            )
+            if (
+                previous_exchange_order_id != leg.exchange_order_id
+                or not _numeric_equal(previous_filled_quantity, filled_quantity)
+                or average_price_changed
+                or previous_status != leg.status
+                or new_rows
+            ):
+                leg.updated_at = datetime.now(UTC)
             await session.commit()
             return len(new_rows)
 
@@ -2112,6 +2132,8 @@ class Database:
                 raise ValueError(
                     "remote order ID does not match the linked local order leg"
                 )
+            previous_exchange_order_id = leg.exchange_order_id
+            previous_status = leg.status
             leg.exchange_order_id = order.exchange_order_id
             remote_status = order.status.strip().lower()
             if remote_status in {
@@ -2137,7 +2159,11 @@ class Database:
                 # A query response proves exchange acceptance, not execution.
                 # Filled state remains derived from persisted trade records.
                 leg.status = "acknowledged"
-            leg.updated_at = datetime.now(UTC)
+            if (
+                previous_exchange_order_id != leg.exchange_order_id
+                or previous_status != leg.status
+            ):
+                leg.updated_at = datetime.now(UTC)
             await session.commit()
             return order.exchange_order_id
 

@@ -150,6 +150,7 @@ export interface OrderHistoryItem {
   filled_quantity: string;
   average_price: string | null;
   reduce_only: boolean;
+  created_at: string;
   updated_at: string;
 }
 

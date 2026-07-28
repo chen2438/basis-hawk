@@ -77,8 +77,43 @@ describe("Basis Hawk dashboard", () => {
           created_at: "2026-07-27T18:58:28Z",
           updated_at: "2026-07-27T18:58:28Z",
         }] }
-        : url.includes("trades/orders") ? { items: [] }
-        : url.includes("trades/fills") ? { items: [] }
+        : url.includes("trades/orders") ? { items: [{
+          id: "order-leg",
+          trade_intent_id: "failed-intent",
+          exchange: "gate",
+          environment: "live",
+          base_asset: "WET",
+          action: "open",
+          emergency: false,
+          leg: "spot",
+          market: "spot",
+          symbol: "WET_USDT",
+          side: "buy",
+          status: "filled",
+          quantity: "900",
+          filled_quantity: "900",
+          average_price: "0.066",
+          reduce_only: false,
+          created_at: "2026-07-27T18:58:28Z",
+          updated_at: "2026-07-27T18:58:30Z",
+        }] }
+        : url.includes("trades/fills") ? { items: [{
+          id: "fill",
+          trade_intent_id: "failed-intent",
+          exchange: "gate",
+          environment: "live",
+          base_asset: "WET",
+          action: "open",
+          leg: "spot",
+          symbol: "WET_USDT",
+          side: "buy",
+          quantity: "900",
+          price: "0.066",
+          fee_amount: "0.9",
+          fee_asset: "WET",
+          liquidity: "taker",
+          occurred_at: "2026-07-27T18:58:29Z",
+        }] }
         : url.includes("trades/pnl") ? { items: [] }
         : url.includes("trades/funding-income") ? { items: [] }
         : url.includes("transfers/limits") ? {
@@ -434,5 +469,9 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByRole("heading", { name: "实际资金费" })).toBeTruthy();
     expect(screen.getByText(/最近 100 条持久化开平仓请求/)).toBeTruthy();
     expect(screen.getByText("行情数据过期，订单未提交")).toBeTruthy();
+    expect(screen.getAllByText("failed-i")).toHaveLength(3);
+    expect(screen.getAllByText("创建时间")).toHaveLength(2);
+    expect(screen.getByText("状态更新时间")).toBeTruthy();
+    expect(screen.getByText("成交时间")).toBeTruthy();
   });
 });
