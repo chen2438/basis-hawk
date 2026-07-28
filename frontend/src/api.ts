@@ -48,6 +48,7 @@ export function apiErrorMessage(detail: unknown, fallback: string): string {
     "trade preview belongs to another administrator": "该预览票据不属于当前管理员，请重新生成预览",
     "trade preview was already confirmed with another idempotency key": "该预览票据已经确认，不能重复提交",
     "execution is not ready for automatic trading": "全局执行状态刚刚发生变化，当前不能启用或恢复自动交易；页面状态已刷新，请先完成划转或安全对账，并等待执行状态变为“就绪”",
+    "execution is not ready for software update": "当前存在对账、人工暂停或交易安全阻断，不能开始软件更新；请先处理当前原因并等待全局执行状态变为“就绪”",
     "internal transfers are disabled by zero limits": "内部划转额度为 0，当前已禁用；请先在本页设置单次和每日限额",
     "internal transfer exceeds the per-request limit": "划转金额超过当前单次限额",
     "internal transfer exceeds the UTC daily limit": "划转金额会超过当前 UTC 自然日累计限额",

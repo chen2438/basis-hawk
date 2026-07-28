@@ -276,7 +276,8 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByRole("button", { name: "交易所账户" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "软件更新" })).toBeTruthy();
     expect(screen.getByText("发现新版本")).toBeTruthy();
-    expect((screen.getByRole("button", { name: "立即更新" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "立即更新" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/处理完成并恢复“就绪”后才能更新软件/)).toBeTruthy();
     expect((screen.getAllByRole("button", { name: "删除旧备份" })[0] as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getAllByRole("button", { name: "删除旧备份" })[1] as HTMLButtonElement).disabled).toBe(false);
     const batchDelete = screen.getByRole("button", { name: "批量删除已选（0）" }) as HTMLButtonElement;
@@ -302,6 +303,13 @@ describe("Basis Hawk dashboard", () => {
       expect.objectContaining({ method: "POST" }),
     ));
     confirmation.mockRestore();
+  });
+
+  it("translates a software update safety-state conflict", () => {
+    expect(apiErrorMessage(
+      "execution is not ready for software update",
+      "fallback",
+    )).toContain("不能开始软件更新");
   });
 
   it("polls execution every three seconds only while reconciling", async () => {

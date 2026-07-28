@@ -315,9 +315,16 @@ function SystemView({
   const oldBackups = backup?.archives.filter((item) => !item.latest) ?? [];
   const allOldBackupsSelected = oldBackups.length > 0
     && oldBackups.every((item) => selectedBackups.includes(item.name));
+  const executionAllowsUpdate = execution.state === "ready"
+    || (
+      update?.state === "failed"
+      && execution.state === "paused"
+      && execution.reason === "software update requested"
+    );
   const updateCanApply = Boolean(
     update?.available_commit
-    && (update.state === "update_available" || update.state === "failed"),
+    && (update.state === "update_available" || update.state === "failed")
+    && executionAllowsUpdate,
   );
   return <>
     <div className="ops-summary">
@@ -356,6 +363,9 @@ function SystemView({
           }}>{update?.state === "failed" ? "重试更新" : "立即更新"}</button>
       </div>
       {!update?.enabled && <p className="warning-note">宿主机更新代理尚未安装；请先通过远程部署命令升级一次。</p>}
+      {update?.enabled && !executionAllowsUpdate && <p className="warning-note">
+        当前存在对账、人工暂停或交易安全阻断；处理完成并恢复“就绪”后才能更新软件。
+      </p>}
     </section>
     <section className="backup-manager">
       <header>

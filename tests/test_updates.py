@@ -199,6 +199,10 @@ async def test_update_api_checks_and_pauses_before_apply(
     database = Database("sqlite+aiosqlite:///:memory:")
     service = ScannerService(database, {})
     await service.initialize()
+    await database.set_execution_control(
+        state="ready",
+        reason="account reconciliation passed",
+    )
     try:
         app = create_app(service, manage_lifecycle=False, auth_required=False)
         async with httpx.AsyncClient(
@@ -233,6 +237,101 @@ async def test_update_api_checks_and_pauses_before_apply(
                 "software.update_check_requested",
                 "software.update_requested",
             }
+    finally:
+        await database.close()
+        get_config.cache_clear()
+
+
+async def test_update_api_does_not_overwrite_a_safety_pause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_directory = tmp_path / "request"
+    request_directory.mkdir()
+    status_directory = tmp_path / "status"
+    status_directory.mkdir()
+    status_file = status_directory / "status"
+    write_status(status_file)
+    monkeypatch.setenv(
+        "BASIS_HAWK_UPDATE_REQUEST_DIRECTORY",
+        str(request_directory),
+    )
+    monkeypatch.setenv("BASIS_HAWK_UPDATE_STATUS_FILE", str(status_file))
+    get_config.cache_clear()
+    database = Database("sqlite+aiosqlite:///:memory:")
+    service = ScannerService(database, {})
+    await service.initialize()
+    await database.set_execution_control(
+        state="paused",
+        reason="live paired fills are imbalanced",
+    )
+    try:
+        app = create_app(service, manage_lifecycle=False, auth_required=False)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            applied = await client.post(
+                "/api/operations/update/apply",
+                json={"target_commit": AVAILABLE, "confirmed": True},
+            )
+        assert applied.status_code == 409
+        assert applied.json()["detail"] == (
+            "execution is not ready for software update"
+        )
+        assert not (request_directory / "request").exists()
+        control = await database.execution_control()
+        assert control is not None
+        assert control.state == "paused"
+        assert control.reason == "live paired fills are imbalanced"
+        assert not await database.audit_events(limit=10)
+    finally:
+        await database.close()
+        get_config.cache_clear()
+
+
+async def test_failed_update_can_be_retried_from_its_own_pause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_directory = tmp_path / "request"
+    request_directory.mkdir()
+    status_directory = tmp_path / "status"
+    status_directory.mkdir()
+    status_file = status_directory / "status"
+    write_status(status_file, state="failed")
+    monkeypatch.setenv(
+        "BASIS_HAWK_UPDATE_REQUEST_DIRECTORY",
+        str(request_directory),
+    )
+    monkeypatch.setenv("BASIS_HAWK_UPDATE_STATUS_FILE", str(status_file))
+    get_config.cache_clear()
+    database = Database("sqlite+aiosqlite:///:memory:")
+    service = ScannerService(database, {})
+    await service.initialize()
+    await database.set_execution_control(
+        state="paused",
+        reason="software update requested",
+    )
+    try:
+        app = create_app(service, manage_lifecycle=False, auth_required=False)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            applied = await client.post(
+                "/api/operations/update/apply",
+                json={"target_commit": AVAILABLE, "confirmed": True},
+            )
+        assert applied.status_code == 200
+        assert "action=update" in (
+            request_directory / "request"
+        ).read_text(encoding="ascii")
+        events = await database.audit_events(limit=10)
+        assert len(events) == 1
+        details = events[0].details
+        assert details["target_commit"] == AVAILABLE
+        assert details["request_id"] == applied.json()["request_id"]
     finally:
         await database.close()
         get_config.cache_clear()

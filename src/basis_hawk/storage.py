@@ -1238,26 +1238,45 @@ class Database:
             await session.commit()
             return True
 
-    async def request_automatic_software_update(self, *, target: str) -> bool:
+    async def request_software_update(
+        self,
+        *,
+        target: str,
+        actor: str,
+        event_type: str,
+        allow_existing_pause: bool = False,
+        request_id: str | None = None,
+    ) -> bool:
         async with self.sessions() as session:
             row = await session.scalar(
                 select(ExecutionControlRow)
                 .where(ExecutionControlRow.id == 1)
                 .with_for_update()
             )
-            if row is None or row.state != "ready":
+            if row is None:
+                return False
+            already_paused = (
+                row.state == "paused"
+                and row.reason == "software update requested"
+            )
+            if row.state != "ready" and not (
+                allow_existing_pause and already_paused
+            ):
                 return False
             row.state = "paused"
             row.reason = "software update requested"
             row.updated_at = datetime.now(UTC)
+            audit_details = {"target_commit": target}
+            if request_id is not None:
+                audit_details["request_id"] = request_id
             session.add(
                 AuditEventRow(
                     id=str(uuid.uuid4()),
                     occurred_at=row.updated_at,
-                    event_type="software.automatic_update_requested",
-                    actor="system:auto-update-agent",
+                    event_type=event_type,
+                    actor=actor,
                     details=json.dumps(
-                        {"target_commit": target},
+                        audit_details,
                         separators=(",", ":"),
                         sort_keys=True,
                     ),
@@ -1265,6 +1284,13 @@ class Database:
             )
             await session.commit()
             return True
+
+    async def request_automatic_software_update(self, *, target: str) -> bool:
+        return await self.request_software_update(
+            target=target,
+            actor="system:auto-update-agent",
+            event_type="software.automatic_update_requested",
+        )
 
     async def _request_execution_reconciliation_in_session(
         self,

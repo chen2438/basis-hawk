@@ -920,18 +920,18 @@ def create_app(
                 detail="check for updates again before applying",
             )
         request_id = uuid4()
-        await scanner.database.set_execution_control(
-            state="paused",
-            reason="software update requested",
-        )
-        await scanner.database.append_audit(
-            "software.update_requested",
+        accepted = await scanner.database.request_software_update(
+            target=value.target_commit,
             actor=request_actor(request),
-            details={
-                "request_id": str(request_id),
-                "target_commit": value.target_commit,
-            },
+            event_type="software.update_requested",
+            allow_existing_pause=status["state"] == "failed",
+            request_id=str(request_id),
         )
+        if not accepted:
+            raise HTTPException(
+                status_code=409,
+                detail="execution is not ready for software update",
+            )
         try:
             enqueue_update(
                 config.update_request_directory,
