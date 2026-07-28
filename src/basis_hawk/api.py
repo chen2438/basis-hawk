@@ -2100,17 +2100,29 @@ def create_app(
             scanner.unsubscribe(queue)
 
     frontend = Path(__file__).resolve().parents[2] / "frontend" / "dist"
-    if frontend.exists():
-        app.mount("/assets", StaticFiles(directory=frontend / "assets"), name="assets")
+    frontend_index = frontend / "index.html"
+    frontend_assets = frontend / "assets"
+    if frontend_index.is_file() and frontend_assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=frontend_assets), name="assets")
 
         @app.get("/{path:path}", include_in_schema=False)
         async def single_page(path: str) -> FileResponse:
-            candidate = frontend / path
+            candidate = _safe_frontend_file(frontend, path)
             return FileResponse(
-                candidate if path and candidate.is_file() else frontend / "index.html"
+                candidate if candidate is not None else frontend_index
             )
 
     return app
+
+
+def _safe_frontend_file(frontend: Path, path: str) -> Path | None:
+    if not path:
+        return None
+    root = frontend.resolve()
+    candidate = (root / path).resolve()
+    if not candidate.is_relative_to(root) or not candidate.is_file():
+        return None
+    return candidate
 
 
 app = create_app()

@@ -4,6 +4,8 @@
 其余 HTTP 和 WebSocket API 均要求管理员会话。当前市场接口为 `/api/opportunities`、单机会
 `/history`、`/top-book`、`/api/exchanges/status`、`/api/settings` 和 `/api/ws/opportunities`。
 所有比例使用小数值字符串，例如 `0.001` 表示 `0.1%`。
+生产 SPA 回退只返回解析后仍位于 `frontend/dist` 内的普通文件；URL 编码父目录、绝对路径和解析到
+目录外的符号链接都回退到入口页，不能读取镜像中的源码、依赖清单或其他配置文件。
 机会对象同时返回开仓方向 `spot_ask`/`perp_bid` 与平仓方向 `spot_bid`/`perp_ask`，
 以及开仓方向现货卖一、永续买一各自的名义容量和两腿较小的可执行容量。右侧详情选中机会后调用
 `GET /api/opportunities/{exchange}/{base_asset}/top-book` 刷新该标的一档；Gate 因批量 ticker
