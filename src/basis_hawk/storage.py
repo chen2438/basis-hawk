@@ -2963,6 +2963,13 @@ class Database:
                     or compensation is None
                     or not _numeric_equal(compensated_base, excess_base)
                     or compensation.average_price is None
+                    or (
+                        common_base > 0
+                        and (
+                            primary["spot"].average_price is None
+                            or primary["perp"].average_price is None
+                        )
+                    )
                 ):
                     intent.status = "manual_review"
                     await self._pause_live_settlement(session, now)

@@ -3,7 +3,12 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from basis_hawk.accounts import RemoteFill
-from basis_hawk.storage import Database, PairedPositionRow, TradeIntentRow
+from basis_hawk.storage import (
+    Database,
+    OrderLegRow,
+    PairedPositionRow,
+    TradeIntentRow,
+)
 
 
 async def _live_intent(
@@ -695,4 +700,73 @@ async def test_unfilled_live_compensation_requires_manual_review() -> None:
     assert settled[0].status == "manual_review"
     assert settled[1] is not None
     assert settled[1].status == "closing"
+    await database.close()
+
+
+async def test_live_close_missing_primary_price_requires_manual_review() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    intent_id, _, legs, now = await _live_close_intent(database)
+    await database.persist_remote_fills(
+        order_leg_id=legs["spot"],
+        fills=[
+            RemoteFill(
+                exchange_trade_id="missing-primary-price-spot",
+                exchange_order_id="close-spot",
+                client_order_id=None,
+                market="spot",
+                symbol="ORDER-USDT",
+                side="sell",
+                quantity=Decimal("20"),
+                price=Decimal("0.05"),
+                fee_amount=Decimal("0"),
+                fee_asset="",
+                liquidity="taker",
+                occurred_at=now,
+            )
+        ],
+    )
+    async with database.sessions() as session:
+        perp = await session.get(OrderLegRow, legs["perp"])
+        assert perp is not None
+        perp.status = "filled"
+        perp.filled_quantity = Decimal("1")
+        perp.average_price = None
+        await session.commit()
+
+    first = await database.settle_live_close(intent_id=intent_id)
+    assert first is not None and first[0].status == "compensating"
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    compensation = next(
+        item for item in stored[1] if item.leg == "spot_compensation"
+    )
+    await database.persist_remote_fills(
+        order_leg_id=compensation.id,
+        fills=[
+            RemoteFill(
+                exchange_trade_id="missing-primary-price-compensation",
+                exchange_order_id="remote-missing-primary-price",
+                client_order_id=compensation.client_order_id,
+                market="spot",
+                symbol="ORDER-USDT",
+                side="buy",
+                quantity=Decimal("10"),
+                price=Decimal("0.051"),
+                fee_amount=Decimal("0"),
+                fee_asset="",
+                liquidity="taker",
+                occurred_at=now,
+            )
+        ],
+    )
+
+    settled = await database.settle_live_close(intent_id=intent_id)
+
+    assert settled is not None and settled[1] is not None
+    assert settled[0].status == "manual_review"
+    assert settled[1].status == "closing"
+    control = await database.execution_control()
+    assert control is not None
+    assert control.state == "paused"
     await database.close()
