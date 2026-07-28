@@ -119,8 +119,9 @@
 - 已完成：Bitget 连接前只读识别 Classic V2/UTA V3，按账户代际选择生产/模拟盘私有域名和订单、成交、
   仓位、账户频道，文本 ping/pong 保活并装配 worker；识别不清时不连接且不跨代回退。
 - 已完成：Gate LIVE/SANDBOX 现货订单/成交与 USDT 永续订单/成交/仓位双私有连接，按环境选择官方
-  REST 与 WebSocket 地址，订阅前只读获取永续用户 ID，永续数量使用十进制协议头，双连接均通过协议
-  ping/pong 验证并装配 worker；两套凭据、连接、对账和交易意图按环境完全隔离且不得跨环境拼腿。
+  REST 与 WebSocket 地址，订阅前只读获取永续用户 ID，永续数量使用十进制协议头；整张在 JSON 中
+  发送整数，只有小数张才发送字符串，兼容 `enable_decimal=false` 合约。双连接均通过协议 ping/pong
+  验证并装配 worker；两套凭据、连接、对账和交易意图按环境完全隔离且不得跨环境拼腿。
 - 已完成：MEXC LIVE 现货 listenKey 私有订单/成交/账户 Protobuf 订阅与合约签名登录私有流，现货
   listenKey 每 30 分钟续期并在关闭时释放，两条连接均使用官方应用层 ping/pong 并装配 worker；
   沙盒明确拒绝且不回退实盘。

@@ -3426,9 +3426,14 @@ class GateAccountClient(PrivateAccountClient):
             signed_quantity = (
                 order.quantity if order.side == "buy" else -order.quantity
             )
+            wire_quantity: int | str = (
+                int(signed_quantity)
+                if signed_quantity == signed_quantity.to_integral_value()
+                else format(signed_quantity, "f")
+            )
             body = {
                 "contract": order.symbol,
-                "size": format(signed_quantity, "f"),
+                "size": wire_quantity,
                 "price": format(order.limit_price, "f"),
                 "tif": "ioc",
                 "text": order.client_order_id,

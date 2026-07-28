@@ -72,7 +72,9 @@ OKX 客户端订单 ID 必须是不超过
 Bitget Classic 与 UTA 在下单前通过只读账户接口识别并在进程内固定代际；写失败后禁止切换 V2/V3
 重试，以免形成重复订单。Bitget 单向 reduce-only 请求可能按官方规则不返回交易所订单 ID，此时必须
 依靠已持久化的客户端订单 ID 找回，不能重发。Gate 客户端订单 ID 必须以 `t-` 开头，后缀最多 28 字节；永续订单按目录合约乘数换算
-后的十进制张数发送，卖出开空为负、买入平空为正，并显式发送 `X-Gate-Size-Decimal: 1`。Gate 经典
+张数，卖出开空为负、买入平空为正，并显式发送 `X-Gate-Size-Decimal: 1`。整张数量在 JSON 中发送
+整数，只有确实包含小数张的合约才发送十进制字符串，避免 `enable_decimal=false` 的 VINE、BAN 等
+合约拒绝形如 `"1190.000000000000000000"` 的字符串数量。Gate 经典
 账户继续使用 `account=spot` 与逐仓永续；已双重确认的组合保证金账户改用 `account=unified`，永续
 省略 Gate 仅允许简单分仓模式写入的 `pos_margin_mode`，由账户模式本身决定跨仓。Gate 会以
 `USER_PORTFOLIO_MARGIN` 拒绝组合保证金账户的逐合约杠杆接口，因此该模式只接受保守的 1x 策略

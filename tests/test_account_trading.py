@@ -1256,7 +1256,7 @@ async def test_bitget_normalizes_hedge_close_and_rejects_bad_ack() -> None:
     await http.aclose()
 
 
-async def test_gate_places_spot_and_perp_ioc_orders_with_decimal_size() -> None:
+async def test_gate_places_spot_and_perp_ioc_orders_with_contract_size_types() -> None:
     requests: list[tuple[str, dict[str, object], httpx.Headers]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1304,7 +1304,7 @@ async def test_gate_places_spot_and_perp_ioc_orders_with_decimal_size() -> None:
             market="perp",
             symbol="ORDER_USDT",
             side="sell",
-            quantity=Decimal("20.5"),
+            quantity=Decimal("20"),
             limit_price=Decimal("0.051"),
             client_order_id="t-bh-open-perp",
             position_mode=PositionMode.HEDGE,
@@ -1336,10 +1336,12 @@ async def test_gate_places_spot_and_perp_ioc_orders_with_decimal_size() -> None:
         "time_in_force": "ioc",
         "type": "limit",
     }
-    assert requests[1][1]["size"] == "-20.5"
+    assert requests[1][1]["size"] == -20
+    assert isinstance(requests[1][1]["size"], int)
     assert requests[1][1]["reduce_only"] is False
     assert requests[1][1]["action_mode"] == "ACK"
     assert requests[2][1]["size"] == "10.5"
+    assert isinstance(requests[2][1]["size"], str)
     assert requests[2][1]["reduce_only"] is True
     await http.aclose()
 
