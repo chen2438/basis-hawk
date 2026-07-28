@@ -11,7 +11,9 @@ from basis_hawk.automation import (
 from basis_hawk.credentials import ExchangeEnvironment
 from basis_hawk.models import (
     Exchange,
+    FundingObservation,
     InstrumentPair,
+    MarketQuote,
     Opportunity,
     Quality,
 )
@@ -399,6 +401,53 @@ class _GateDepthAdapter:
     async def instruments(self) -> list[InstrumentPair]:
         return self.pairs
 
+    async def quotes(self, pairs: list[InstrumentPair]) -> list[MarketQuote]:
+        now = datetime.now(UTC)
+        return [
+            MarketQuote(
+                exchange=Exchange.GATE,
+                base_asset=pair.base_asset,
+                observed_at=now,
+                spot_bid=Decimal("9.99"),
+                spot_bid_qty=Decimal("0"),
+                spot_ask=Decimal("10"),
+                spot_ask_qty=Decimal("0"),
+                perp_bid=Decimal("10.10"),
+                perp_bid_qty=Decimal("20"),
+                perp_ask=Decimal("10.11"),
+                perp_ask_qty=Decimal("20"),
+                spot_quote_volume_24h=Decimal("2000000"),
+                perp_quote_volume_24h=Decimal("3000000"),
+            )
+            for pair in pairs
+        ]
+
+    async def current_funding(
+        self,
+        pairs: list[InstrumentPair],
+    ) -> list[FundingObservation]:
+        now = datetime.now(UTC)
+        return [
+            FundingObservation(
+                exchange=Exchange.GATE,
+                base_asset=pair.base_asset,
+                rate=Decimal("0.0002"),
+                funding_at=now,
+                observed_at=now,
+                interval_hours=Decimal("8"),
+            )
+            for pair in pairs
+        ]
+
+    async def funding_history(
+        self,
+        pair: InstrumentPair,
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> list[FundingObservation]:
+        return []
+
     async def executable_quote(self, pair, quote):
         self.calls.append(pair.base_asset)
         return quote.model_copy(
@@ -451,6 +500,10 @@ async def test_gate_automatic_service_fetches_bounded_sandbox_depth() -> None:
                 "perp_symbol": f"GATE{index:02d}_USDT",
                 "top_book_notional": Decimal("0"),
                 "close_top_book_notional": Decimal("0"),
+                "apr_24h": None,
+                "apr_7d": None,
+                "net_return": None,
+                "quality": Quality.WARMING,
             }
         )
         for index in range(GATE_AUTOMATIC_DEPTH_CANDIDATES + 5)

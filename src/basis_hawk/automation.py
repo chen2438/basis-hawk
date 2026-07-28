@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -10,6 +11,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
+from basis_hawk.calculations import (
+    annualize_current,
+    build_opportunity,
+    projected_net_return,
+)
 from basis_hawk.credentials import ExchangeEnvironment
 from basis_hawk.exchanges import ExchangeAdapter, GateAdapter
 from basis_hawk.executable_quotes import (
@@ -18,7 +24,10 @@ from basis_hawk.executable_quotes import (
 )
 from basis_hawk.models import (
     Exchange,
+    FeeRate,
+    FundingObservation,
     InstrumentPair,
+    MarketQuote,
     Opportunity,
     Quality,
 )
@@ -604,9 +613,16 @@ class AutomaticTradingService:
             ExchangeEnvironment(config.environment)
         )
         depth_pair_by_key = pair_by_key
+        sandbox_funding_by_key: dict[str, FundingObservation] = {}
+        sandbox_fee: FeeRate | None = None
+        sandbox_holding_days = 30
         if config.environment == ExchangeEnvironment.SANDBOX.value:
             try:
                 sandbox_pairs = await adapter.instruments()
+                sandbox_quotes, sandbox_funding = await asyncio.gather(
+                    adapter.quotes(sandbox_pairs),
+                    adapter.current_funding(sandbox_pairs),
+                )
             except (RuntimeError, ValueError):
                 await adapter.close()
                 logger.info(
@@ -620,9 +636,43 @@ class AutomaticTradingService:
             depth_pair_by_key = {
                 pair.key: pair
                 for pair in sandbox_pairs
-                if pair.key in pair_by_key
             }
             pair_by_key.update(depth_pair_by_key)
+            sandbox_funding_by_key = {
+                f"{item.exchange.value}:{item.base_asset}": item
+                for item in sandbox_funding
+            }
+            quote_by_key = {
+                f"{item.exchange.value}:{item.base_asset}": item
+                for item in sandbox_quotes
+            }
+            settings = await self.database.load_settings()
+            sandbox_fee = settings.fees[Exchange.GATE]
+            sandbox_holding_days = settings.holding_period_days
+            sandbox_opportunities = []
+            for key, pair in depth_pair_by_key.items():
+                quote = quote_by_key.get(key)
+                funding = sandbox_funding_by_key.get(key)
+                if quote is None or funding is None:
+                    continue
+                try:
+                    sandbox_opportunities.append(
+                        _gate_sandbox_fallback_opportunity(
+                            pair=pair,
+                            quote=quote,
+                            funding=funding,
+                            fee=sandbox_fee,
+                            holding_days=sandbox_holding_days,
+                            now=now,
+                        )
+                    )
+                except ValueError:
+                    continue
+            opportunities = [
+                item
+                for item in opportunities
+                if item.exchange != Exchange.GATE
+            ] + sandbox_opportunities
         opportunity_by_key = {
             item.key: item
             for item in opportunities
@@ -688,12 +738,55 @@ class AutomaticTradingService:
                         pair,
                         market_quote_from_opportunity(opportunity),
                     )
-                    refreshed[opportunity.key] = (
-                        opportunity_with_executable_quote(
-                            opportunity,
+                    if (
+                        config.environment
+                        == ExchangeEnvironment.SANDBOX.value
+                    ):
+                        funding = sandbox_funding_by_key[
+                            opportunity.key
+                        ]
+                        try:
+                            history = await adapter.funding_history(
+                                pair,
+                                start=now - timedelta(days=8),
+                                end=now,
+                            )
+                        except (RuntimeError, ValueError):
+                            history = []
+                        refreshed_item = build_opportunity(
+                            pair,
                             quote,
+                            funding,
+                            history,
+                            sandbox_fee,
+                            holding_days=sandbox_holding_days,
+                            now=now,
                         )
-                    )
+                        if (
+                            refreshed_item.quality != Quality.STALE
+                            and (
+                                refreshed_item.apr_24h is None
+                                or refreshed_item.apr_7d is None
+                                or refreshed_item.net_return is None
+                                or refreshed_item.quality
+                                == Quality.WARMING
+                            )
+                        ):
+                            refreshed_item = (
+                                _gate_sandbox_apply_history_fallback(
+                                    refreshed_item,
+                                    fee=sandbox_fee,
+                                    holding_days=sandbox_holding_days,
+                                )
+                            )
+                        refreshed[opportunity.key] = refreshed_item
+                    else:
+                        refreshed[opportunity.key] = (
+                            opportunity_with_executable_quote(
+                                opportunity,
+                                quote,
+                            )
+                        )
                 except (RuntimeError, ValueError):
                     logger.info(
                         "automatic Gate depth unavailable",
@@ -709,6 +802,69 @@ class AutomaticTradingService:
             refreshed.get(opportunity.key, opportunity)
             for opportunity in opportunities
         ]
+
+
+def _gate_sandbox_fallback_opportunity(
+    *,
+    pair: InstrumentPair,
+    quote: MarketQuote,
+    funding: FundingObservation,
+    fee: FeeRate,
+    holding_days: int,
+    now: datetime,
+) -> Opportunity:
+    opportunity = build_opportunity(
+        pair,
+        quote,
+        funding,
+        [],
+        fee,
+        holding_days=holding_days,
+        now=now,
+    )
+    if opportunity.quality == Quality.STALE:
+        return opportunity
+    return _gate_sandbox_apply_history_fallback(
+        opportunity,
+        fee=fee,
+        holding_days=holding_days,
+    )
+
+
+def _gate_sandbox_apply_history_fallback(
+    opportunity: Opportunity,
+    *,
+    fee: FeeRate,
+    holding_days: int,
+) -> Opportunity:
+    fallback_apr = annualize_current(
+        opportunity.current_funding_rate,
+        opportunity.funding_interval_hours,
+    )
+    return opportunity.model_copy(
+        update={
+            "apr_24h": (
+                opportunity.apr_24h
+                if opportunity.apr_24h is not None
+                else fallback_apr
+            ),
+            "apr_7d": (
+                opportunity.apr_7d
+                if opportunity.apr_7d is not None
+                else fallback_apr
+            ),
+            "net_return": (
+                opportunity.net_return
+                if opportunity.net_return is not None
+                else projected_net_return(
+                    fallback_apr,
+                    fee,
+                    holding_days,
+                )
+            ),
+            "quality": Quality.HEALTHY,
+        }
+    )
 
 
 def _opening_portfolio_block(
