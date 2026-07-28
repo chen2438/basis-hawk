@@ -557,6 +557,7 @@ async def test_live_executor_records_definitive_http_rejection() -> None:
                 raise PrivateRequestError(
                     "private account request rejected with HTTP 400",
                     status_code=400,
+                    remote_code="invalid_param_value",
                 )
             return await super().place_limit_ioc(order)
 
@@ -574,6 +575,10 @@ async def test_live_executor_records_definitive_http_rejection() -> None:
     assert {item.market: item.status for item in stored[1]} == {
         "spot": "acknowledged",
         "perp": "failed",
+    }
+    assert {item.market: item.failure_code for item in stored[1]} == {
+        "spot": None,
+        "perp": "okx_invalid_param_value",
     }
     control = await database.execution_control()
     assert control is not None

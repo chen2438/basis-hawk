@@ -112,6 +112,20 @@ export const tradeFailureReason = (item: TradeIntent) =>
     : item.status === "failed"
       ? "升级前记录，未保存失败原因"
       : "—";
+const orderFailureReasons: Record<string, string> = {
+  gate_invalid_argument: "Gate 拒绝了订单参数",
+  gate_invalid_param_value: "Gate 拒绝了订单参数值",
+  gate_insufficient_available: "Gate 可用余额或保证金不足",
+  gate_contract_not_found: "Gate 未找到该永续合约",
+  gate_contract_not_tradable: "Gate 当前不允许交易该永续合约",
+};
+const orderFailureReason = (item: OrderHistoryItem) =>
+  item.failure_code
+    ? (orderFailureReasons[item.failure_code]
+      ?? `交易所拒绝代码：${item.failure_code}`)
+    : item.status === "failed"
+      ? "升级前记录，未保存拒绝原因"
+      : "—";
 
 export function OperationsPanel({
   opportunities,
@@ -745,13 +759,14 @@ function TradeLedgerView({
     </section>
     <section>
       <header><div><h3>订单腿</h3><p>最近 100 条现货、永续及补偿订单状态；意图编号可与上下表对应。</p></div><strong>{orders.length}</strong></header>
-      <div className="ops-table-wrap"><table><thead><tr><th>创建时间</th><th>状态更新时间</th><th>意图</th><th>交易所</th><th>标的</th><th>订单腿</th><th>方向</th><th>数量</th><th>成交</th><th>均价</th><th>状态</th></tr></thead>
+      <div className="ops-table-wrap"><table><thead><tr><th>创建时间</th><th>状态更新时间</th><th>意图</th><th>交易所</th><th>标的</th><th>订单腿</th><th>方向</th><th>数量</th><th>成交</th><th>均价</th><th>状态</th><th>失败原因</th></tr></thead>
         <tbody>{orders.map((item) => <tr key={item.id}>
           <td>{time(item.created_at)}</td><td>{time(item.updated_at)}</td><td title={item.trade_intent_id}>{shortId(item.trade_intent_id)}</td>
           <td>{exchangeNames[item.exchange]}</td><td>{item.base_asset}</td>
           <td>{item.leg} · {item.symbol}</td><td>{item.side}{item.reduce_only ? " · reduce-only" : ""}</td>
           <td>{amount(item.quantity)}</td><td>{amount(item.filled_quantity)}</td><td>{amount(item.average_price)}</td>
           <td><span className={`status-pill ${item.status}`}>{item.status}</span></td>
+          <td>{orderFailureReason(item)}</td>
         </tr>)}</tbody>
       </table>{!orders.length && <div className="empty">尚无订单记录</div>}</div>
     </section>

@@ -1340,9 +1340,50 @@ async def test_gate_places_spot_and_perp_ioc_orders_with_contract_size_types() -
     assert isinstance(requests[1][1]["size"], int)
     assert requests[1][1]["reduce_only"] is False
     assert requests[1][1]["action_mode"] == "ACK"
+    assert "pos_margin_mode" not in requests[1][1]
     assert requests[2][1]["size"] == "10.5"
     assert isinstance(requests[2][1]["size"], str)
     assert requests[2][1]["reduce_only"] is True
+    assert "pos_margin_mode" not in requests[2][1]
+    await http.aclose()
+
+
+async def test_gate_sanitizes_rejected_order_label_without_response_message() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "label": "INVALID_PARAM_VALUE",
+                "message": "sensitive exchange detail",
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://gate.test",
+    )
+    client = GateAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        client=http,
+    )
+
+    with pytest.raises(PrivateRequestError) as captured:
+        await client.place_limit_ioc(
+            LimitIocOrder(
+                market="perp",
+                symbol="VINE_USDT",
+                side="sell",
+                quantity=Decimal("1184"),
+                limit_price=Decimal("0.00843"),
+                client_order_id="t-bh-vine-perp",
+                position_mode=PositionMode.ONE_WAY,
+            )
+        )
+
+    assert captured.value.status_code == 400
+    assert captured.value.remote_code == "invalid_param_value"
+    assert "sensitive exchange detail" not in str(captured.value)
     await http.aclose()
 
 

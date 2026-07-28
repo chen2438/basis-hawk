@@ -47,9 +47,11 @@ class PrivateRequestError(RuntimeError):
         message: str,
         *,
         status_code: int | None = None,
+        remote_code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.remote_code = remote_code
 
 
 class UnsupportedEnvironmentError(RuntimeError):
@@ -348,6 +350,27 @@ def _hmac_base64(secret: str, value: str) -> str:
     ).decode()
 
 
+def _safe_remote_error_code(response: httpx.Response) -> str | None:
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    for key in ("label", "code", "retCode"):
+        value = body.get(key)
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            continue
+        normalized = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(value).strip().lower(),
+        ).strip("_")
+        if normalized:
+            return normalized[:64]
+    return None
+
+
 async def _json_request(
     client: httpx.AsyncClient,
     method: str,
@@ -375,6 +398,7 @@ async def _json_request(
         raise PrivateRequestError(
             f"private account request rejected with HTTP {response.status_code}",
             status_code=response.status_code,
+            remote_code=_safe_remote_error_code(response),
         )
     try:
         return response.json()
@@ -3440,8 +3464,6 @@ class GateAccountClient(PrivateAccountClient):
                 "reduce_only": order.reduce_only,
                 "action_mode": "ACK",
             }
-            if self._account_mode != "portfolio":
-                body["pos_margin_mode"] = "isolated"
         result = await self._post(path, body=body)
         if not isinstance(result, dict):
             raise PrivateRequestError("Gate order submission returned no result")

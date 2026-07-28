@@ -117,6 +117,7 @@ class OrderLegView(BaseModel):
     client_order_id: str
     exchange_order_id: str | None
     status: OrderLegStatus
+    failure_code: str | None
     quantity: Decimal
     base_multiplier: Decimal
     limit_price: Decimal
@@ -1528,6 +1529,7 @@ def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:
                 client_order_id=item.client_order_id,
                 exchange_order_id=item.exchange_order_id,
                 status=OrderLegStatus(item.status),
+                failure_code=item.failure_code,
                 quantity=item.quantity,
                 base_multiplier=item.base_multiplier,
                 limit_price=item.limit_price,
@@ -1567,6 +1569,7 @@ def _order_history_view(
             client_order_id=row.client_order_id,
             exchange_order_id=row.exchange_order_id,
             status=OrderLegStatus(row.status),
+            failure_code=row.failure_code,
             quantity=row.quantity,
             base_multiplier=row.base_multiplier,
             limit_price=row.limit_price,

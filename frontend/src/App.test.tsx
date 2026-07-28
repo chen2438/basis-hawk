@@ -89,7 +89,8 @@ describe("Basis Hawk dashboard", () => {
           market: "spot",
           symbol: "WET_USDT",
           side: "buy",
-          status: "filled",
+          status: "failed",
+          failure_code: "gate_invalid_param_value",
           quantity: "900",
           filled_quantity: "900",
           average_price: "0.066",
@@ -472,6 +473,7 @@ describe("Basis Hawk dashboard", () => {
     await user.click(await screen.findByRole("button", { name: "交易账本" }));
     expect(screen.getByRole("heading", { name: "交易意图" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "订单腿" })).toBeTruthy();
+    expect(screen.getByText("Gate 拒绝了订单参数值")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "成交明细" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "已实现盈亏" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "实际资金费" })).toBeTruthy();

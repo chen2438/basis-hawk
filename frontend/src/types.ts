@@ -147,6 +147,7 @@ export interface OrderHistoryItem {
   symbol: string;
   side: string;
   status: string;
+  failure_code: string | null;
   quantity: string;
   filled_quantity: string;
   average_price: string | null;

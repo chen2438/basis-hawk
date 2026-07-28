@@ -252,6 +252,7 @@ async def test_global_trade_ledgers_are_bounded_filterable_and_decimal_safe() ->
         )
         assert orders.status_code == 200
         assert len(orders.json()["items"]) == 4
+        assert all(item["failure_code"] is None for item in orders.json()["items"])
         assert {item["trade_intent_id"] for item in orders.json()["items"]} == {
             opening.id,
             closing.id,

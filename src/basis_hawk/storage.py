@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -715,6 +716,7 @@ class OrderLegRow(Base):
     client_order_id: Mapped[str] = mapped_column(String(100), unique=True)
     exchange_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str] = mapped_column(String(30))
+    failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     base_multiplier: Mapped[Decimal] = mapped_column(
         Numeric(38, 18),
@@ -2548,7 +2550,10 @@ class Database:
         self,
         *,
         order_leg_id: str,
+        failure_code: str,
     ) -> None:
+        if not re.fullmatch(r"[a-z0-9_]{1,100}", failure_code):
+            raise ValueError("order rejection code is invalid")
         async with self.sessions() as session:
             leg = await session.scalar(
                 select(OrderLegRow)
@@ -2559,6 +2564,7 @@ class Database:
                 raise ValueError("order leg was not found")
             if leg.status == "submitted":
                 leg.status = "failed"
+                leg.failure_code = failure_code
                 leg.updated_at = datetime.now(UTC)
             control = await session.get(ExecutionControlRow, 1)
             reason = (

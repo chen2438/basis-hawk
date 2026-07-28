@@ -249,7 +249,11 @@ class LiveExecutionService:
                 if isinstance(result, BaseException):
                     if _definitive_order_rejection(result):
                         await self.database.mark_order_submission_rejected(
-                            order_leg_id=leg.id
+                            order_leg_id=leg.id,
+                            failure_code=_order_rejection_code(
+                                Exchange(prepared[0].exchange),
+                                result,
+                            ),
                         )
                     else:
                         await self.database.mark_order_submission_unknown(
@@ -273,6 +277,18 @@ class LiveExecutionService:
                 await client.close()
             except Exception:
                 pass
+
+
+def _order_rejection_code(
+    exchange: Exchange,
+    error: BaseException,
+) -> str:
+    if isinstance(error, PrivateRequestError):
+        if error.remote_code:
+            return f"{exchange.value}_{error.remote_code}"[:100]
+        if error.status_code is not None:
+            return f"{exchange.value}_http_{error.status_code}"
+    return f"{exchange.value}_order_rejected"
 
 
 def _definitive_order_rejection(error: BaseException) -> bool:
