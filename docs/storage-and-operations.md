@@ -495,8 +495,9 @@ upgrade/current。
 ```
 
 该命令只生成一次性数据库密码、凭据主密钥和备份密钥，使用随机后缀创建临时网络、PostgreSQL 17
-容器和备份卷；构建正式 API/前端镜像与专用备份镜像后，实际执行全部 Alembic 迁移、API ready 检查、
-真实意图父记录与双订单腿外键写入、API 进程重启、PostgreSQL 重启及连接池恢复、advisory lock 排他
+容器和备份卷；构建正式 API/前端镜像与专用备份镜像后，实际执行全部 Alembic 迁移和 `alembic check`
+模型/数据库漂移检查、API ready 检查、真实意图父记录与双订单腿外键写入、API 进程重启、PostgreSQL
+重启及连接池恢复、advisory lock 排他
 worker、单轮 worker、AES-GCM 归档验证、空库恢复和非空库拒绝覆盖。应用及备份运行均使用只读根文件
 系统和 `/tmp` tmpfs。无论成功或失败都只按本次随机名称清理资源，不会连接 Compose 项目、读取真实
 凭据或接触交易所。CI 的

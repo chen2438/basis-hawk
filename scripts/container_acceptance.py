@@ -132,6 +132,20 @@ def main() -> int:
             "upgrade",
             "head",
         )
+        docker(
+            "run",
+            "--rm",
+            "--read-only",
+            "--tmpfs",
+            "/tmp",
+            "--network",
+            network,
+            "-e",
+            f"BASIS_HAWK_DATABASE_URL={database_url}",
+            api_image,
+            "alembic",
+            "check",
+        )
         revision = docker(
             "exec",
             postgres,
@@ -560,6 +574,7 @@ asyncio.run(main())
 
         print("container image build: ok")
         print("PostgreSQL 17 migration: ok")
+        print("PostgreSQL model/schema drift: none")
         print("PostgreSQL parent-before-leg persistence: ok")
         print("API readiness: ok")
         print("API process restart recovery: ok")
