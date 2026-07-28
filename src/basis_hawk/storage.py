@@ -2680,25 +2680,24 @@ class Database:
                 primary["perp"].filled_quantity
                 * primary["perp"].base_multiplier
             )
-            if not _numeric_equal(spot_base, perp_base):
-                spot_base_fee = (
-                    await session.scalar(
-                        select(func.sum(FillRow.fee_amount)).where(
-                            FillRow.order_leg_id == primary["spot"].id,
-                            func.upper(FillRow.fee_asset)
-                            == intent.base_asset.upper(),
-                        )
+            spot_base_fee = (
+                await session.scalar(
+                    select(func.sum(FillRow.fee_amount)).where(
+                        FillRow.order_leg_id == primary["spot"].id,
+                        func.upper(FillRow.fee_asset)
+                        == intent.base_asset.upper(),
                     )
-                    or Decimal("0")
                 )
-                if primary["spot"].side == "buy":
-                    spot_base -= spot_base_fee
-                else:
-                    spot_base += spot_base_fee
-                if spot_base < 0:
-                    raise ValueError(
-                        "spot base-asset fees exceed the filled quantity"
-                    )
+                or Decimal("0")
+            )
+            if primary["spot"].side == "buy":
+                spot_base -= spot_base_fee
+            else:
+                spot_base += spot_base_fee
+            if spot_base < 0:
+                raise ValueError(
+                    "spot base-asset fees exceed the filled quantity"
+                )
             common_base = min(spot_base, perp_base)
             now = datetime.now(UTC)
             changed = True
