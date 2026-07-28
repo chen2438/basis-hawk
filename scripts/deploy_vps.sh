@@ -19,6 +19,7 @@ RECONCILE_AFTER_UPDATE=false
 AUTO_UPDATE_MODE="preserve"
 TEMPORARY_ENVIRONMENT_FILE=""
 ADMIN_TOTP_URI=""
+SERVICES_STOPPED=false
 
 cleanup() {
     if [[ -n "${TEMPORARY_ENVIRONMENT_FILE}" ]]; then
@@ -28,6 +29,14 @@ cleanup() {
 
 finish() {
     local status="$?"
+    if ((status != 0)) && ${SERVICES_STOPPED}; then
+        warn "deployment failed after stopping application services; attempting to restart the previous containers"
+        if "${COMPOSE_COMMAND[@]}" start api worker backup >/dev/null; then
+            warn "previous application containers were restarted; inspect the deployment error before retrying"
+        else
+            warn "previous application containers could not be restarted; inspect Docker and deployment logs immediately"
+        fi
+    fi
     cleanup
     if [[ -n "${ADMIN_TOTP_URI}" ]]; then
         printf '\n'
@@ -525,6 +534,7 @@ existing_schema="$(
 if [[ -n "${existing_schema//[[:space:]]/}" ]]; then
     log "existing database detected; entering maintenance mode and creating a pre-upgrade backup"
     "${COMPOSE_COMMAND[@]}" stop worker api backup >/dev/null 2>&1 || true
+    SERVICES_STOPPED=true
     "${COMPOSE_COMMAND[@]}" run --rm backup create
 fi
 
@@ -588,6 +598,7 @@ fi
 
 log "starting API, worker, backup, and Caddy"
 "${COMPOSE_COMMAND[@]}" up -d --remove-orphans
+SERVICES_STOPPED=false
 wait_for_command 180 "API liveness" \
     "${COMPOSE_COMMAND[@]}" exec -T api python -c \
     "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/live')"

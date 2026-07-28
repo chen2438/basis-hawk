@@ -69,7 +69,9 @@ SSH 会话启动时，bootstrap 会在读取完脚本后把部署脚本的标准
 worker。重复部署识别已有 Alembic schema 后，先停止 API、worker 和定时 backup，并用刚重建的独立
 备份镜像创建认证加密归档；只有备份成功后才拉取 PostgreSQL/Caddy 镜像、刷新数据库容器并执行迁移。
 随后启动全部服务，依次验证 PostgreSQL、API liveness、六所行情目录 readiness 和最新加密备份；失败
-会保留容器与日志供排查，不删除数据库或卷。全部健康检查成功后，脚本清理超过 24 小时且未使用的
+会保留容器与日志供排查，不删除数据库或卷。已有部署在停止应用服务后的备份、拉取、迁移或更新后
+对账步骤失败时，退出钩子会尽力用 `docker compose start` 重启原有 API、worker 和备份容器；恢复
+失败会明确告警，避免静默留下 Caddy 502。全部健康检查成功后，脚本清理超过 24 小时且未使用的
 Docker build cache；清理失败只告警，不把健康部署误报为失败。使用 systemd-journald 的宿主机还会安装
 `/etc/systemd/journald.conf.d/basis-hawk.conf`，把持久日志上限设为 200 MB、至少保留 1 GB 空闲空间并
 限制为 7 天，然后压缩既有 journal。该设置不改变 SSH 密码登录，也不启用或修改 UFW。

@@ -52,6 +52,10 @@ def fake_vps_commands(tmp_path: Path) -> tuple[dict[str, str], Path]:
         """#!/usr/bin/env bash
 printf '%s\\n' "$*" >>"$FAKE_DOCKER_LOG"
 command_line="$*"
+if [[ -n "${FAKE_DOCKER_FAIL_CONTAINS:-}" ]] \
+    && [[ "$command_line" == *"$FAKE_DOCKER_FAIL_CONTAINS"* ]]; then
+    exit 1
+fi
 if [[ "$command_line" == *"to_regclass"* ]] \
     && [[ "${FAKE_EXISTING_SCHEMA:-0}" == "1" ]]; then
     printf 'alembic_version\\n'
@@ -296,6 +300,41 @@ def test_update_deployment_requests_reconciliation_before_worker_start(
     )
     worker_start_index = commands.index("up -d --remove-orphans")
     assert reconciliation_index < worker_start_index
+
+
+def test_failed_existing_deployment_restarts_previous_services(
+    tmp_path: Path,
+) -> None:
+    project = deployment_fixture(tmp_path)
+    prepared = run_script(
+        "--project-dir",
+        str(project),
+        "--domain",
+        "hawk.example.com",
+        "--prepare-env-only",
+    )
+    assert prepared.returncode == 0, prepared.stderr
+    environment, log_path = fake_vps_commands(tmp_path)
+    environment["FAKE_EXISTING_SCHEMA"] = "1"
+    environment["FAKE_ADMIN_COUNT"] = "1"
+    environment["FAKE_DOCKER_FAIL_CONTAINS"] = (
+        "basis-hawk update-reconcile --required"
+    )
+
+    result = run_script(
+        "--project-dir",
+        str(project),
+        "--reconcile-after-update",
+        "--yes",
+        environment=environment,
+    )
+
+    assert result.returncode != 0
+    commands = log_path.read_text(encoding="utf-8")
+    assert "stop worker api backup" in commands
+    assert "run --rm api basis-hawk update-reconcile --required" in commands
+    assert "start api worker backup" in commands
+    assert "previous application containers were restarted" in result.stderr
 
 
 def test_first_deployment_prints_totp_uri_after_completion(
