@@ -130,6 +130,18 @@ describe("Basis Hawk dashboard", () => {
     )).toBe("预览票据已超过 60 秒有效期，请重新生成预览");
   });
 
+  it("turns an automatic-trading readiness race into an actionable Chinese message", () => {
+    expect(apiErrorMessage(
+      "execution is not ready for automatic trading",
+      "操作失败",
+    )).toBe(
+      "全局执行状态刚刚发生变化，当前不能启用或恢复自动交易；页面状态已刷新，请先完成划转或安全对账，并等待执行状态变为“就绪”",
+    );
+    expect(executionReason(
+      "internal account transfer requires balance confirmation",
+    )).toBe("内部划转正在等待交易所处理及余额到账确认");
+  });
+
   it("renders the read-only Chinese scanner", async () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("资金费机会，一眼看清。")).toBeTruthy());

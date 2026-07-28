@@ -62,6 +62,19 @@ const updateStateNames: Record<UpdateStatus["state"], string> = {
   succeeded: "更新完成",
   failed: "更新失败",
 };
+const executionStateNames: Record<string, string> = {
+  ready: "就绪",
+  reconciling: "对账中",
+  blocked: "已阻断",
+  paused: "已暂停",
+};
+const executionReasonNames: Record<string, string> = {
+  "all configured accounts passed startup reconciliation": "所有已配置账户均已通过安全对账",
+  "internal account transfer requires balance confirmation": "内部划转正在等待交易所处理及余额到账确认",
+  "startup account reconciliation is running": "正在执行账户、订单、成交和仓位安全对账",
+  "administrator requested a fresh safety reconciliation": "管理员已请求重新进行安全对账",
+  "software update requested": "软件更新已请求，交易保持暂停",
+};
 const tradeFailureReasons: Record<string, string> = {
   market_data_expired: "行情数据过期，订单未提交",
   no_fills: "现货与永续均未成交",
@@ -85,6 +98,7 @@ const tradeFailureReasons: Record<string, string> = {
   preflight_internal_error: "订单预检发生未分类内部错误",
 };
 export const executionReason = (reason: string) => {
+  if (executionReasonNames[reason]) return executionReasonNames[reason];
   const match = /^live_order_preflight:([^:]+):([^:]+)$/.exec(reason);
   if (!match) return reason;
   const exchange = match[1] as Exchange;
@@ -205,6 +219,11 @@ export function OperationsPanel({
       await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "操作失败");
+      try {
+        await refresh();
+      } catch {
+        // Preserve the original action error while a transient refresh fails.
+      }
     } finally {
       setBusy(false);
     }
@@ -990,7 +1009,10 @@ function AutomationView({
         }}>禁用</button>
       </div>
     </div>
-    {execution?.state !== "ready" && <p className="loading-note">当前全局执行不是 ready：可以保存新版本，但不能启用或恢复自动交易。</p>}
+    {execution?.state !== "ready" && <p className="loading-note">
+      当前全局执行{execution ? `为“${executionStateNames[execution.state] ?? execution.state}”` : "状态尚未读取"}：
+      {execution ? executionReason(execution.reason) : "请稍后刷新"}。可以保存新版本，但只有执行状态变为“就绪”后才能启用或恢复自动交易。
+    </p>}
     <form className="strategy-editor" onSubmit={save}>
       <header><div><h3>自动策略完整配置</h3><p>比例均填写小数，例如 0.10 表示 10%。单笔金额会按盘口容量和剩余敞口在上限内动态缩小；每次保存都会创建新版本。</p></div>
         <button className="button secondary" disabled={busy || !form.enabled_exchanges.length}>保存新版本</button>
