@@ -99,7 +99,8 @@ Demo 模式入口。
 多腿任务控制面位于 `/api/v2/execution-tasks`：
 
 - `POST /api/v2/execution-tasks` 要求 UUID `Idempotency-Key`，原子创建任务及 2–16 条有序腿；同一键
-  同一请求返回原任务，不同请求返回 409。非纸面腿的账户必须存在并与任务环境匹配；
+  同一请求返回原任务，不同请求返回 409。每条腿必须显式选择六所之一；非纸面腿的账户必须存在，
+  并同时与腿交易所和任务环境匹配；
 - `GET /api/v2/execution-tasks` 和 `GET /api/v2/execution-tasks/{task_id}` 返回任务、乐观锁版本、
   有序腿和脱敏预检摘要；
 - `POST /api/v2/execution-tasks/{task_id}/preflight` 逐个账户读取余额快照与完整订单/仓位状态，永续

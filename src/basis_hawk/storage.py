@@ -1021,6 +1021,7 @@ class ExecutionTaskLegRow(Base):
         index=True,
         nullable=True,
     )
+    exchange: Mapped[str] = mapped_column(String(20), index=True)
     ordinal: Mapped[int] = mapped_column(Integer)
     role: Mapped[str] = mapped_column(String(20))
     market_type: Mapped[str] = mapped_column(String(20))
@@ -1067,6 +1068,10 @@ class ExecutionTaskLegRow(Base):
         CheckConstraint(
             "role IN ('anchor', 'hedge')",
             name="ck_execution_task_leg_role",
+        ),
+        CheckConstraint(
+            "exchange IN ('binance', 'okx', 'mexc', 'bybit', 'bitget', 'gate')",
+            name="ck_execution_task_leg_exchange",
         ),
         CheckConstraint(
             "market_type IN ('spot', 'perpetual')",

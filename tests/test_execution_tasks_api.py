@@ -39,6 +39,7 @@ def _task_payload(
         "legs": [
             {
                 "account_id": account_id,
+                "exchange": "binance",
                 "role": "anchor",
                 "market_type": "spot",
                 "side": "buy",
@@ -54,6 +55,7 @@ def _task_payload(
             },
             {
                 "account_id": account_id,
+                "exchange": "binance",
                 "role": "hedge",
                 "market_type": "perpetual",
                 "side": "sell",
@@ -235,6 +237,18 @@ async def test_live_task_preflight_is_account_scoped_and_sanitized() -> None:
             ),
         )
         assert wrong_environment.status_code == 422
+
+        wrong_exchange_payload = _task_payload(
+            environment="live",
+            account_id=account.id,
+        )
+        wrong_exchange_payload["legs"][0]["exchange"] = "okx"
+        wrong_exchange = await client.post(
+            "/api/v2/execution-tasks",
+            headers={"Idempotency-Key": str(uuid4())},
+            json=wrong_exchange_payload,
+        )
+        assert wrong_exchange.status_code == 422
 
         created = await client.post(
             "/api/v2/execution-tasks",

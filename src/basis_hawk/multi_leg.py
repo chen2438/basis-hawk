@@ -5,6 +5,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
+from basis_hawk.models import Exchange
+
 
 class ExecutionEnvironment(StrEnum):
     PAPER = "paper"
@@ -113,6 +115,7 @@ class MakerPolicy(DecimalPayload):
 
 class ExecutionTaskLegSpec(DecimalPayload):
     account_id: str | None = None
+    exchange: Exchange
     role: LegRole
     market_type: MarketType
     side: LegSide
@@ -195,4 +198,3 @@ class ExecutionTaskSpec(DecimalPayload):
     @property
     def anchor(self) -> ExecutionTaskLegSpec:
         return next(leg for leg in self.legs if leg.role == LegRole.ANCHOR)
-

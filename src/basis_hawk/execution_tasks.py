@@ -47,6 +47,7 @@ class ExecutionTaskLegView(DecimalPayload):
     id: str
     ordinal: int
     account_id: str | None
+    exchange: str
     role: str
     market_type: str
     side: str
@@ -163,6 +164,7 @@ class ExecutionTaskService:
                     "id": str(uuid.uuid4()),
                     "task_id": task_id,
                     "account_id": leg.account_id,
+                    "exchange": leg.exchange.value,
                     "ordinal": ordinal,
                     "role": leg.role.value,
                     "market_type": leg.market_type.value,
@@ -300,6 +302,14 @@ class ExecutionTaskService:
                 raise ExecutionTaskValidationError(
                     f"account {account_id} environment does not match the task"
                 )
+            if any(
+                leg.account_id == account_id
+                and leg.exchange != summary.exchange
+                for leg in spec.legs
+            ):
+                raise ExecutionTaskValidationError(
+                    f"account {account_id} exchange does not match its task leg"
+                )
 
     async def _preflight_payload(
         self,
@@ -434,6 +444,7 @@ def _view(
                 id=leg.id,
                 ordinal=leg.ordinal,
                 account_id=leg.account_id,
+                exchange=leg.exchange,
                 role=leg.role,
                 market_type=leg.market_type,
                 side=leg.side,

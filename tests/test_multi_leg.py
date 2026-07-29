@@ -23,6 +23,7 @@ from basis_hawk.storage import Database
 def _spot_anchor(*, account_id: str | None = None) -> ExecutionTaskLegSpec:
     return ExecutionTaskLegSpec(
         account_id=account_id,
+        exchange="binance",
         role=LegRole.ANCHOR,
         market_type=MarketType.SPOT,
         side=LegSide.BUY,
@@ -41,6 +42,7 @@ def _perpetual_hedge(
 ) -> ExecutionTaskLegSpec:
     return ExecutionTaskLegSpec(
         account_id=account_id,
+        exchange="binance",
         role=LegRole.HEDGE,
         market_type=MarketType.PERPETUAL,
         side=LegSide.SELL,
@@ -154,4 +156,3 @@ async def test_v2_storage_tables_are_part_of_sqlite_test_schema() -> None:
         "strategy_pnl_events",
         "adl_snapshots",
     }.issubset(table_names)
-
