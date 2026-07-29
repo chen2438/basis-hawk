@@ -173,11 +173,7 @@ class ExecutionTaskService:
                     "quote_asset": leg.quote_asset.upper(),
                     "symbol": leg.symbol,
                     "target_quantity": leg.target_quantity,
-                    "resolved_base_quantity": (
-                        leg.target_quantity
-                        if spec.quantity_mode.value == "base"
-                        else None
-                    ),
+                    "resolved_base_quantity": None,
                     "signed_base_ratio": None,
                     "per_order_quantity": leg.per_order_quantity,
                     "order_mode": leg.order_mode.value,

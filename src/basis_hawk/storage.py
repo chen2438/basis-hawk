@@ -2301,6 +2301,22 @@ class Database:
             by_leg = {item.id: item for item in leg_rows}
             if set(by_leg) != {str(item["task_leg_id"]) for item in fills}:
                 raise ValueError("paper execution must fill every task leg exactly once")
+            base_by_leg = {
+                str(item["task_leg_id"]): (
+                    Decimal(str(item["native_quantity"]))
+                    * Decimal(str(item["base_multiplier"]))
+                )
+                for item in fills
+            }
+            anchor = next(item for item in leg_rows if item.role == "anchor")
+            anchor_quantity = base_by_leg[anchor.id]
+            for leg in leg_rows:
+                leg.resolved_base_quantity = base_by_leg[leg.id]
+                leg.signed_base_ratio = (
+                    (Decimal("1") if leg.side == "buy" else Decimal("-1"))
+                    * base_by_leg[leg.id]
+                    / anchor_quantity
+                )
             now = datetime.now(UTC)
             strategy: ArbitrageStrategyRow | None = None
             if task.create_strategy:
@@ -2429,6 +2445,7 @@ class Database:
         run_id: str,
         failure_code: str,
         worker_id: str,
+        manual_review: bool = False,
     ) -> None:
         async with self.sessions() as session:
             task = await session.scalar(
@@ -2444,16 +2461,610 @@ class Database:
             if task is None or run is None or run.task_id != task_id:
                 raise ValueError("execution task or run was not found")
             now = datetime.now(UTC)
-            task.status = "failed"
+            task.status = "manual_review" if manual_review else "failed"
             task.failure_code = failure_code
             task.version += 1
             task.updated_at = now
-            run.status = "failed"
+            run.status = "manual_review" if manual_review else "failed"
             run.failure_code = failure_code
             run.worker_id = worker_id
             run.finished_at = now
             run.updated_at = now
             await session.commit()
+
+    async def claim_live_execution_task(
+        self,
+        *,
+        worker_id: str,
+    ) -> (
+        tuple[
+            ExecutionTaskRow,
+            list[ExecutionTaskLegRow],
+            ExecutionRunRow,
+            list[ExecutionOrderRow],
+        ]
+        | None
+    ):
+        async with self.sessions() as session:
+            control = await session.scalar(
+                select(ExecutionControlRow)
+                .where(ExecutionControlRow.id == 1)
+                .with_for_update()
+            )
+            candidates = list(
+                await session.scalars(
+                    select(ExecutionTaskRow)
+                    .where(
+                        ExecutionTaskRow.environment.in_({"sandbox", "live"}),
+                        ExecutionTaskRow.status.in_(
+                            {"queued", "running", "hedging"}
+                        ),
+                    )
+                    .order_by(ExecutionTaskRow.created_at)
+                    .with_for_update(skip_locked=True)
+                    .limit(10)
+                )
+            )
+            row = next(
+                (
+                    item
+                    for item in candidates
+                    if item.status != "queued"
+                    or (control is not None and control.state == "ready")
+                ),
+                None,
+            )
+            if row is None:
+                return None
+            now = datetime.now(UTC)
+            run = await session.scalar(
+                select(ExecutionRunRow)
+                .where(
+                    ExecutionRunRow.task_id == row.id,
+                    ExecutionRunRow.status.in_({"queued", "running"}),
+                )
+                .order_by(ExecutionRunRow.run_number.desc())
+                .with_for_update()
+                .limit(1)
+            )
+            if run is None:
+                maximum_run = await session.scalar(
+                    select(func.max(ExecutionRunRow.run_number)).where(
+                        ExecutionRunRow.task_id == row.id
+                    )
+                )
+                run = ExecutionRunRow(
+                    id=str(uuid.uuid4()),
+                    task_id=row.id,
+                    run_number=int(maximum_run or 0) + 1,
+                    status="running",
+                    worker_id=worker_id,
+                    failure_code=None,
+                    started_at=now,
+                    finished_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(run)
+                await session.flush()
+            else:
+                run.status = "running"
+                run.worker_id = worker_id
+                run.started_at = run.started_at or now
+                run.updated_at = now
+            if row.status == "queued":
+                row.status = "running"
+                row.version += 1
+            row.updated_at = now
+            legs = list(
+                await session.scalars(
+                    select(ExecutionTaskLegRow)
+                    .where(ExecutionTaskLegRow.task_id == row.id)
+                    .order_by(ExecutionTaskLegRow.ordinal)
+                )
+            )
+            orders = list(
+                await session.scalars(
+                    select(ExecutionOrderRow)
+                    .where(ExecutionOrderRow.run_id == run.id)
+                    .order_by(
+                        ExecutionOrderRow.created_at,
+                        ExecutionOrderRow.attempt_number,
+                        ExecutionOrderRow.chase_number,
+                    )
+                )
+            )
+            await session.commit()
+            return row, legs, run, orders
+
+    async def create_execution_order_attempt(
+        self,
+        *,
+        run_id: str,
+        task_leg_id: str,
+        client_order_id: str,
+        order_mode: str,
+        quantity: Decimal,
+        base_multiplier: Decimal,
+        limit_price: Decimal | None,
+        parent_order_id: str | None = None,
+    ) -> ExecutionOrderRow:
+        async with self.sessions() as session:
+            run = await session.scalar(
+                select(ExecutionRunRow)
+                .where(ExecutionRunRow.id == run_id)
+                .with_for_update()
+            )
+            leg = await session.get(ExecutionTaskLegRow, task_leg_id)
+            if run is None or leg is None or leg.task_id != run.task_id:
+                raise ValueError("execution run or task leg was not found")
+            active = await session.scalar(
+                select(ExecutionOrderRow)
+                .where(
+                    ExecutionOrderRow.run_id == run_id,
+                    ExecutionOrderRow.task_leg_id == task_leg_id,
+                    ExecutionOrderRow.status.in_(
+                        {
+                            "created",
+                            "submitted",
+                            "acknowledged",
+                            "partially_filled",
+                            "cancel_pending",
+                            "unknown",
+                        }
+                    ),
+                )
+                .with_for_update()
+                .limit(1)
+            )
+            if active is not None:
+                raise ValueError(
+                    "a nonterminal order already exists for this task leg"
+                )
+            parent: ExecutionOrderRow | None = None
+            if parent_order_id is not None:
+                parent = await session.scalar(
+                    select(ExecutionOrderRow)
+                    .where(
+                        ExecutionOrderRow.id == parent_order_id,
+                        ExecutionOrderRow.run_id == run_id,
+                        ExecutionOrderRow.task_leg_id == task_leg_id,
+                    )
+                    .with_for_update()
+                )
+                if parent is None:
+                    raise ValueError("parent execution order was not found")
+                if parent.status not in {
+                    "filled",
+                    "canceled",
+                    "rejected",
+                    "failed",
+                }:
+                    raise ValueError(
+                        "parent execution order is not terminal"
+                    )
+                attempt_number = parent.attempt_number
+                chase_number = parent.chase_number + 1
+            else:
+                maximum_attempt = await session.scalar(
+                    select(func.max(ExecutionOrderRow.attempt_number)).where(
+                        ExecutionOrderRow.run_id == run_id,
+                        ExecutionOrderRow.task_leg_id == task_leg_id,
+                    )
+                )
+                attempt_number = int(maximum_attempt or 0) + 1
+                chase_number = 0
+            now = datetime.now(UTC)
+            row = ExecutionOrderRow(
+                id=str(uuid.uuid4()),
+                run_id=run_id,
+                task_leg_id=task_leg_id,
+                parent_order_id=parent_order_id,
+                attempt_number=attempt_number,
+                chase_number=chase_number,
+                client_order_id=client_order_id,
+                exchange_order_id=None,
+                order_mode=order_mode,
+                status="created",
+                quantity=quantity,
+                base_multiplier=base_multiplier,
+                limit_price=limit_price,
+                filled_quantity=Decimal("0"),
+                average_price=None,
+                failure_code=None,
+                submitted_at=None,
+                terminal_at=None,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def execution_orders_for_run(
+        self,
+        run_id: str,
+    ) -> list[ExecutionOrderRow]:
+        async with self.sessions() as session:
+            return list(
+                await session.scalars(
+                    select(ExecutionOrderRow)
+                    .where(ExecutionOrderRow.run_id == run_id)
+                    .order_by(
+                        ExecutionOrderRow.created_at,
+                        ExecutionOrderRow.attempt_number,
+                        ExecutionOrderRow.chase_number,
+                    )
+                )
+            )
+
+    async def mark_execution_order_submitted(
+        self,
+        *,
+        order_id: str,
+        exchange_order_id: str | None,
+    ) -> ExecutionOrderRow:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ExecutionOrderRow)
+                .where(ExecutionOrderRow.id == order_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise ValueError("execution order was not found")
+            if row.status not in {"created", "unknown"}:
+                return row
+            now = datetime.now(UTC)
+            row.exchange_order_id = exchange_order_id
+            row.status = "submitted"
+            row.submitted_at = row.submitted_at or now
+            row.updated_at = now
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def mark_execution_order_unknown(
+        self,
+        *,
+        order_id: str,
+    ) -> ExecutionOrderRow:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ExecutionOrderRow)
+                .where(ExecutionOrderRow.id == order_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise ValueError("execution order was not found")
+            if row.status not in {"created", "submitted", "unknown"}:
+                return row
+            row.status = "unknown"
+            row.updated_at = datetime.now(UTC)
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def mark_execution_order_cancel_pending(
+        self,
+        *,
+        order_id: str,
+    ) -> ExecutionOrderRow:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ExecutionOrderRow)
+                .where(ExecutionOrderRow.id == order_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise ValueError("execution order was not found")
+            if row.status in {"filled", "canceled", "rejected", "failed"}:
+                return row
+            row.status = "cancel_pending"
+            row.updated_at = datetime.now(UTC)
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def apply_execution_order_observation(
+        self,
+        *,
+        order_id: str,
+        exchange_order_id: str | None,
+        status: str,
+        filled_quantity: Decimal,
+        average_price: Decimal | None,
+        fills: list[dict[str, Any]],
+    ) -> ExecutionOrderRow:
+        if status not in {
+            "acknowledged",
+            "partially_filled",
+            "cancel_pending",
+            "filled",
+            "canceled",
+            "rejected",
+            "failed",
+            "unknown",
+        }:
+            raise ValueError("unsupported execution order status")
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ExecutionOrderRow)
+                .where(ExecutionOrderRow.id == order_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise ValueError("execution order was not found")
+            if filled_quantity < row.filled_quantity:
+                raise ValueError("execution order fill quantity moved backwards")
+            if filled_quantity > row.quantity:
+                raise ValueError("execution order fills exceed requested quantity")
+            now = datetime.now(UTC)
+            for item in fills:
+                existing = await session.scalar(
+                    select(ExecutionFillRow).where(
+                        ExecutionFillRow.execution_order_id == order_id,
+                        ExecutionFillRow.exchange_trade_id
+                        == str(item["exchange_trade_id"]),
+                    )
+                )
+                if existing is not None:
+                    if (
+                        existing.quantity != Decimal(str(item["quantity"]))
+                        or existing.price != Decimal(str(item["price"]))
+                        or existing.fee_amount
+                        != Decimal(str(item["fee_amount"]))
+                        or existing.fee_asset != str(item["fee_asset"])
+                    ):
+                        raise ValueError(
+                            "execution fill changed after persistence"
+                        )
+                    continue
+                session.add(
+                    ExecutionFillRow(
+                        id=str(uuid.uuid4()),
+                        execution_order_id=order_id,
+                        exchange_trade_id=str(item["exchange_trade_id"]),
+                        quantity=Decimal(str(item["quantity"])),
+                        price=Decimal(str(item["price"])),
+                        fee_amount=Decimal(str(item["fee_amount"])),
+                        fee_asset=str(item["fee_asset"]),
+                        liquidity=str(item["liquidity"]),
+                        occurred_at=item["occurred_at"],
+                    )
+                )
+            row.exchange_order_id = exchange_order_id or row.exchange_order_id
+            row.status = status
+            row.filled_quantity = filled_quantity
+            row.average_price = average_price
+            row.updated_at = now
+            if status in {"filled", "canceled", "rejected", "failed"}:
+                row.terminal_at = now
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def set_execution_task_phase(
+        self,
+        *,
+        task_id: str,
+        status: str,
+    ) -> None:
+        if status not in {"running", "hedging"}:
+            raise ValueError("unsupported execution task phase")
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ExecutionTaskRow)
+                .where(ExecutionTaskRow.id == task_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise ValueError("execution task was not found")
+            if row.status not in {"running", "hedging"}:
+                raise ValueError("execution task is not active")
+            if row.status != status:
+                row.status = status
+                row.version += 1
+                row.updated_at = datetime.now(UTC)
+            await session.commit()
+
+    async def resolve_execution_task_leg_quantity(
+        self,
+        *,
+        task_leg_id: str,
+        base_quantity: Decimal,
+        signed_base_ratio: Decimal,
+    ) -> ExecutionTaskLegRow:
+        if base_quantity <= 0:
+            raise ValueError("resolved task-leg quantity must be positive")
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ExecutionTaskLegRow)
+                .where(ExecutionTaskLegRow.id == task_leg_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise ValueError("execution task leg was not found")
+            if row.resolved_base_quantity is not None:
+                if (
+                    row.resolved_base_quantity != base_quantity
+                    or row.signed_base_ratio != signed_base_ratio
+                ):
+                    raise ValueError(
+                        "resolved task-leg quantity cannot change"
+                    )
+                return row
+            row.resolved_base_quantity = base_quantity
+            row.signed_base_ratio = signed_base_ratio
+            row.updated_at = datetime.now(UTC)
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def complete_live_execution_task(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        worker_id: str,
+    ) -> bool:
+        async with self.sessions() as session:
+            task = await session.scalar(
+                select(ExecutionTaskRow)
+                .where(ExecutionTaskRow.id == task_id)
+                .with_for_update()
+            )
+            run = await session.scalar(
+                select(ExecutionRunRow)
+                .where(ExecutionRunRow.id == run_id)
+                .with_for_update()
+            )
+            if task is None or run is None or run.task_id != task_id:
+                raise ValueError("live execution task or run was not found")
+            if task.status == "completed":
+                return False
+            if task.status not in {"running", "hedging"}:
+                raise ValueError("live execution task is not active")
+            legs = list(
+                await session.scalars(
+                    select(ExecutionTaskLegRow)
+                    .where(ExecutionTaskLegRow.task_id == task_id)
+                    .order_by(ExecutionTaskLegRow.ordinal)
+                )
+            )
+            orders = list(
+                await session.scalars(
+                    select(ExecutionOrderRow).where(
+                        ExecutionOrderRow.run_id == run_id
+                    )
+                )
+            )
+            order_by_id = {item.id: item for item in orders}
+            fill_rows = list(
+                await session.scalars(
+                    select(ExecutionFillRow).where(
+                        ExecutionFillRow.execution_order_id.in_(
+                            list(order_by_id)
+                        )
+                    )
+                )
+            ) if order_by_id else []
+            fills_by_leg: dict[str, list[tuple[ExecutionOrderRow, ExecutionFillRow]]] = {
+                leg.id: [] for leg in legs
+            }
+            for fill in fill_rows:
+                order = order_by_id[fill.execution_order_id]
+                fills_by_leg[order.task_leg_id].append((order, fill))
+            aggregates: dict[str, tuple[Decimal, Decimal, Decimal]] = {}
+            for leg in legs:
+                values = fills_by_leg[leg.id]
+                base_quantity = sum(
+                    (
+                        fill.quantity * order.base_multiplier
+                        for order, fill in values
+                    ),
+                    Decimal("0"),
+                )
+                target = leg.resolved_base_quantity or leg.target_quantity
+                if base_quantity < target:
+                    raise ValueError(
+                        "live execution task is not fully filled"
+                    )
+                weighted_notional = sum(
+                    (
+                        fill.quantity
+                        * order.base_multiplier
+                        * fill.price
+                        for order, fill in values
+                    ),
+                    Decimal("0"),
+                )
+                fee_usdt = Decimal("0")
+                for _order, fill in values:
+                    if fill.fee_asset.upper() in {"USDT", "USD"}:
+                        fee_usdt += fill.fee_amount
+                    elif fill.fee_asset.upper() == task.base_asset.upper():
+                        fee_usdt += fill.fee_amount * fill.price
+                    else:
+                        raise ValueError(
+                            "live execution fee asset cannot be valued in USDT"
+                        )
+                aggregates[leg.id] = (
+                    base_quantity,
+                    weighted_notional / base_quantity,
+                    fee_usdt,
+                )
+            now = datetime.now(UTC)
+            if task.create_strategy:
+                strategy = ArbitrageStrategyRow(
+                    id=str(uuid.uuid4()),
+                    name=task.name,
+                    environment=task.environment,
+                    base_asset=task.base_asset,
+                    opening_task_id=task.id,
+                    closing_task_id=None,
+                    status="running",
+                    realized_pnl_usdt=Decimal("0"),
+                    funding_income_usdt=Decimal("0"),
+                    fees_usdt=sum(
+                        (value[2] for value in aggregates.values()),
+                        Decimal("0"),
+                    ),
+                    opened_at=now,
+                    closed_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(strategy)
+                await session.flush()
+                session.add_all(
+                    StrategyLegRow(
+                        id=str(uuid.uuid4()),
+                        strategy_id=strategy.id,
+                        opening_task_leg_id=leg.id,
+                        account_id=leg.account_id,
+                        ordinal=leg.ordinal,
+                        market_type=leg.market_type,
+                        side=leg.side,
+                        symbol=leg.symbol,
+                        initial_base_quantity=aggregates[leg.id][0],
+                        remaining_base_quantity=aggregates[leg.id][0],
+                        entry_price=aggregates[leg.id][1],
+                        exit_price=None,
+                        fees_usdt=aggregates[leg.id][2],
+                        realized_pnl_usdt=Decimal("0"),
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    for leg in legs
+                )
+            task.status = "completed"
+            task.version += 1
+            task.updated_at = now
+            run.status = "completed"
+            run.worker_id = worker_id
+            run.finished_at = now
+            run.updated_at = now
+            session.add(
+                AuditEventRow(
+                    id=str(uuid.uuid4()),
+                    occurred_at=now,
+                    event_type="execution_task.completed",
+                    actor=worker_id,
+                    details=json.dumps(
+                        {
+                            "task_id": task_id,
+                            "run_id": run_id,
+                            "paper": False,
+                            "leg_count": len(legs),
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            )
+            await session.commit()
+            return True
 
     async def current_account_snapshot(
         self,

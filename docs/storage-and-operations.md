@@ -338,6 +338,13 @@ relationship 模型的排序。UUID 幂等键和规范化请求指纹共同防�
 `strategy_legs`，兼容开启外键的 SQLite 测试和 PostgreSQL。所有腿成功后才一起把 run/task 标为
 completed；报价或规则失败则用固定 `paper_quote_unavailable` 终结 run/task，不持久化异常正文。
 
+实盘 worker 领取 sandbox/live queued/running/hedging 任务；新 queued 任务要求同一锁定事务看到全局
+execution ready，已有敞口的 running/hedging 任务即使全局暂停仍可继续查单和对冲。每条腿同时最多
+一个 created/submitted/acknowledged/partially_filled/cancel_pending/unknown 订单。追价子订单必须
+引用同 run、同腿且已终态的 parent，并复用 attempt、递增 chase；普通重试递增 attempt、chase 归零。
+远端成交按“本地订单+交易所 trade ID”幂等，数量不得倒退或超过订单。任务失败前重新读当前 run 的
+累计成交；非零敞口把 task/run 标为 manual_review，零成交才标 failed，二者均只保存固定失败码。
+
 `exchange_credentials` 取消“交易所+环境唯一”，改为“交易所+环境+标签唯一”，并用部分唯一索引分别
 保证每组最多一个默认交易账户和默认扫描账户；既有凭据迁移为两种默认账户。能力矩阵和账户费率以
 脱敏 JSON 持久化，密文、nonce 和关联数据规则不变。`/api/v2/accounts` 可通过稳定账户 ID 管理多行；
