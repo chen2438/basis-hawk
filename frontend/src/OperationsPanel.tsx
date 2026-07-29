@@ -118,6 +118,7 @@ const tradeFailureReasons: Record<string, string> = {
   balance_insufficient: "现货余额或永续保证金不足",
   perp_configuration_failed: "永续保证金模式或杠杆配置失败",
   close_state_mismatch: "远端持仓与待平配对仓位不一致",
+  spot_fee_mode_changed: "现货手续费扣款方式发生变化，请重新生成交易预览",
   preflight_internal_error: "订单预检发生未分类内部错误",
 };
 export const executionReason = (reason: string) => {

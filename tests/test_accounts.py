@@ -478,6 +478,11 @@ async def test_gate_account_snapshot_and_signature() -> None:
                     }
                 ],
             )
+        if request.url.path.endswith("/wallet/fee"):
+            return httpx.Response(
+                200,
+                json={"gt_discount": False, "debit_fee": 3},
+            )
         return httpx.Response(
             200,
             json={
@@ -504,6 +509,7 @@ async def test_gate_account_snapshot_and_signature() -> None:
     assert snapshot.perp_usdt_equity == 23
     assert snapshot.position_mode == PositionMode.ONE_WAY
     assert snapshot.trade_permission is True
+    assert snapshot.spot_buy_fee_in_base is True
     assert await client.user_id() == "20011"
     await http.aclose()
 
@@ -535,6 +541,11 @@ async def test_gate_portfolio_snapshot_uses_unified_margin_and_permissions() -> 
                         ],
                     }
                 ],
+            )
+        if request.url.path.endswith("/wallet/fee"):
+            return httpx.Response(
+                200,
+                json={"gt_discount": False, "debit_fee": 2},
             )
         if request.url.path.endswith("/unified/unified_mode"):
             return httpx.Response(
@@ -570,6 +581,7 @@ async def test_gate_portfolio_snapshot_uses_unified_margin_and_permissions() -> 
     assert snapshot.perp_usdt_available == Decimal("18.25")
     assert snapshot.perp_usdt_equity == Decimal("23.75")
     assert snapshot.trade_permission is True
+    assert snapshot.spot_buy_fee_in_base is False
     await http.aclose()
 
 
@@ -597,6 +609,11 @@ async def test_gate_portfolio_snapshot_blocks_disabled_usdt_futures() -> None:
                         ],
                     }
                 ],
+            )
+        if request.url.path.endswith("/wallet/fee"):
+            return httpx.Response(
+                200,
+                json={"gt_discount": False, "debit_fee": 3},
             )
         if request.url.path.endswith("/unified/unified_mode"):
             return httpx.Response(

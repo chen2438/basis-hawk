@@ -103,11 +103,14 @@ def size_paired_order(
     requested_notional: Decimal,
     spot_price: Decimal,
     perp_price: Decimal,
+    spot_base_fee_rate: Decimal = Decimal("0"),
 ) -> PairedOrderSize:
     if not pair.trading_rules_complete:
         raise OrderSizingError("instrument trading rules are incomplete")
     if requested_notional <= 0 or spot_price <= 0 or perp_price <= 0:
         raise OrderSizingError("notional and prices must be positive")
+    if spot_base_fee_rate < 0 or spot_base_fee_rate >= 1:
+        raise OrderSizingError("spot base fee rate must be between zero and one")
 
     common_increment = _decimal_lcm(
         pair.spot_quantity_increment,
@@ -117,6 +120,7 @@ def size_paired_order(
         pair,
         spot_price=spot_price,
         perp_price=perp_price,
+        spot_base_fee_rate=spot_base_fee_rate,
     )
     if requested_notional < minimum_notional:
         raise OrderSizingError(
@@ -128,11 +132,18 @@ def size_paired_order(
     increments = (target_base_quantity / common_increment).to_integral_value(
         rounding=ROUND_FLOOR
     )
-    base_quantity = increments * common_increment
-    if base_quantity <= 0:
+    spot_quantity = increments * common_increment
+    if spot_quantity <= 0:
         raise OrderSizingError("requested notional is below the common quantity step")
 
-    spot_quantity = base_quantity
+    expected_net_spot = spot_quantity * (
+        Decimal("1") - spot_base_fee_rate
+    )
+    perp_base_increment = pair.perp_base_quantity_increment
+    perp_increments = (
+        expected_net_spot / perp_base_increment
+    ).to_integral_value(rounding=ROUND_FLOOR)
+    base_quantity = perp_increments * perp_base_increment
     perp_quantity = base_quantity / pair.perp_contract_size
     if spot_quantity < pair.spot_min_quantity:
         raise OrderSizingError("spot quantity is below the exchange minimum")
@@ -164,29 +175,46 @@ def minimum_paired_order_notional(
     *,
     spot_price: Decimal,
     perp_price: Decimal,
+    spot_base_fee_rate: Decimal = Decimal("0"),
 ) -> Decimal:
     if not pair.trading_rules_complete:
         raise OrderSizingError("instrument trading rules are incomplete")
     if spot_price <= 0 or perp_price <= 0:
         raise OrderSizingError("prices must be positive")
+    if spot_base_fee_rate < 0 or spot_base_fee_rate >= 1:
+        raise OrderSizingError("spot base fee rate must be between zero and one")
     common_increment = _decimal_lcm(
         pair.spot_quantity_increment,
         pair.perp_base_quantity_increment,
     )
-    required_base_quantity = max(
+    required_spot_quantity = max(
         common_increment,
         pair.spot_min_quantity,
-        pair.perp_min_quantity * pair.perp_contract_size,
         (
             pair.spot_min_notional / spot_price
             if pair.spot_min_notional > 0
             else Decimal("0")
         ),
+    )
+    required_perp_base_quantity = max(
+        pair.perp_base_quantity_increment,
+        pair.perp_min_quantity * pair.perp_contract_size,
         (
             pair.perp_min_notional / perp_price
             if pair.perp_min_notional > 0
             else Decimal("0")
         ),
+    )
+    required_perp_increments = (
+        required_perp_base_quantity / pair.perp_base_quantity_increment
+    ).to_integral_value(rounding=ROUND_CEILING)
+    required_perp_base_quantity = (
+        required_perp_increments * pair.perp_base_quantity_increment
+    )
+    required_base_quantity = max(
+        required_spot_quantity,
+        required_perp_base_quantity
+        / (Decimal("1") - spot_base_fee_rate),
     )
     increments = (
         required_base_quantity / common_increment

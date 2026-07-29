@@ -155,6 +155,7 @@ class TradeIntentView(BaseModel):
     base_quantity: Decimal
     spot_fee_rate: Decimal
     perp_fee_rate: Decimal
+    spot_buy_fee_in_base: bool
     market_observed_at: datetime
     config_version: str
     version: int
@@ -324,6 +325,7 @@ class LiveOpenPreview(BaseModel):
     perp_base_multiplier: Decimal
     perp_usdt_margin_required: Decimal
     base_quantity: Decimal
+    spot_buy_fee_in_base: bool
     estimated_total_fees_usdt: Decimal
     worst_case_basis: Decimal
 
@@ -459,6 +461,7 @@ class TradeLedger:
         environment: ExchangeEnvironment,
         leverage: int = 1,
         maximum_slippage: Decimal = Decimal("0.001"),
+        spot_buy_fee_in_base: bool = False,
         now: datetime | None = None,
     ) -> LiveOpenPreview:
         if leverage < 1 or leverage > 10:
@@ -504,6 +507,11 @@ class TradeLedger:
                 requested_notional=notional_usdt,
                 spot_price=opportunity.spot_ask,
                 perp_price=opportunity.perp_bid,
+                spot_base_fee_rate=(
+                    settings.fees[opportunity.exchange].spot_taker
+                    if spot_buy_fee_in_base
+                    else Decimal("0")
+                ),
             )
             spot_limit = protective_limit_price(
                 reference_price=opportunity.spot_ask,
@@ -533,6 +541,7 @@ class TradeLedger:
                     "maximum_slippage": _canonical_decimal(
                         maximum_slippage
                     ),
+                    "spot_buy_fee_in_base": spot_buy_fee_in_base,
                 },
                 separators=(",", ":"),
                 sort_keys=True,
@@ -551,6 +560,7 @@ class TradeLedger:
                     ),
                     "instrument_rules": _instrument_rules_payload(pair),
                     "config_version": config_version,
+                    "spot_buy_fee_in_base": spot_buy_fee_in_base,
                 },
                 separators=(",", ":"),
                 sort_keys=True,
@@ -581,6 +591,7 @@ class TradeLedger:
                 perp_notional / Decimal(leverage) + perp_fee
             ),
             base_quantity=sizing.base_quantity,
+            spot_buy_fee_in_base=spot_buy_fee_in_base,
             estimated_total_fees_usdt=spot_fee + perp_fee,
             worst_case_basis=(perp_limit - spot_limit) / spot_limit,
         )
@@ -919,6 +930,7 @@ class TradeLedger:
         environment: ExchangeEnvironment,
         leverage: int = 1,
         maximum_slippage: Decimal = Decimal("0.001"),
+        spot_buy_fee_in_base: bool = False,
         spot_limit_price: Decimal | None = None,
         perp_limit_price: Decimal | None = None,
         now: datetime | None = None,
@@ -935,6 +947,7 @@ class TradeLedger:
                 and row.base_asset == opportunity.base_asset
                 and row.requested_notional == notional_usdt
                 and row.leverage == leverage
+                and row.spot_buy_fee_in_base == spot_buy_fee_in_base
             ):
                 return _view(row, legs), False
             raise IdempotencyConflict(
@@ -948,6 +961,7 @@ class TradeLedger:
             environment=environment,
             leverage=leverage,
             maximum_slippage=maximum_slippage,
+            spot_buy_fee_in_base=spot_buy_fee_in_base,
             now=now,
         )
         spot_order_limit = spot_limit_price or preview.spot_limit_price
@@ -981,6 +995,7 @@ class TradeLedger:
                 "base_quantity": preview.base_quantity,
                 "spot_fee_rate": fees.spot_taker,
                 "perp_fee_rate": fees.perp_taker,
+                "spot_buy_fee_in_base": spot_buy_fee_in_base,
                 "market_observed_at": opportunity.observed_at,
                 "config_version": preview.config_version,
                 "version": 1,
@@ -1537,6 +1552,7 @@ def _view(row: TradeIntentRow, legs: list[OrderLegRow]) -> TradeIntentView:
         base_quantity=row.base_quantity,
         spot_fee_rate=row.spot_fee_rate,
         perp_fee_rate=row.perp_fee_rate,
+        spot_buy_fee_in_base=row.spot_buy_fee_in_base,
         market_observed_at=row.market_observed_at,
         config_version=row.config_version,
         version=row.version,

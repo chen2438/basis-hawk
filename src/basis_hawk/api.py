@@ -1399,6 +1399,14 @@ def create_app(
                 status_code=409,
                 detail="instrument trading rules are not available",
             )
+        account_snapshot = await scanner.database.current_account_snapshot(
+            exchange=value.exchange.value,
+            environment=value.environment.value,
+        )
+        spot_buy_fee_in_base = bool(
+            account_snapshot is not None
+            and account_snapshot.spot_buy_fee_in_base is True
+        )
         try:
             preview = trade_ledger.preview_live_open(
                 opportunity=opportunity,
@@ -1408,6 +1416,7 @@ def create_app(
                 environment=value.environment,
                 leverage=value.leverage,
                 maximum_slippage=value.maximum_slippage,
+                spot_buy_fee_in_base=spot_buy_fee_in_base,
             )
         except TradeValidationError as exc:
             if (
@@ -1543,6 +1552,14 @@ def create_app(
                 status_code=409,
                 detail="trade preview was created by an older software version",
             )
+        account_snapshot = await scanner.database.current_account_snapshot(
+            exchange=exchange.value,
+            environment=environment.value,
+        )
+        spot_buy_fee_in_base = bool(
+            account_snapshot is not None
+            and account_snapshot.spot_buy_fee_in_base is True
+        )
         try:
             current_preview = trade_ledger.preview_live_open(
                 opportunity=opportunity,
@@ -1552,6 +1569,7 @@ def create_app(
                 environment=environment,
                 leverage=stored.leverage,
                 maximum_slippage=stored.maximum_slippage,
+                spot_buy_fee_in_base=spot_buy_fee_in_base,
             )
             await scanner.database.reserve_trade_preview(
                 preview_id=stored.id,
@@ -1568,6 +1586,7 @@ def create_app(
                 environment=environment,
                 leverage=stored.leverage,
                 maximum_slippage=stored.maximum_slippage,
+                spot_buy_fee_in_base=spot_buy_fee_in_base,
                 spot_limit_price=stored.spot_limit_price,
                 perp_limit_price=stored.perp_limit_price,
             )

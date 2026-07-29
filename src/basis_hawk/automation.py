@@ -577,6 +577,14 @@ class AutomaticTradingService:
         )
         settings = await self.database.load_settings()
         environment = ExchangeEnvironment(config.environment)
+        account_snapshot = await self.database.current_account_snapshot(
+            exchange=decision.opportunity.exchange.value,
+            environment=environment.value,
+        )
+        spot_buy_fee_in_base = bool(
+            account_snapshot is not None
+            and account_snapshot.spot_buy_fee_in_base is True
+        )
         try:
             if decision.action == "open":
                 if decision.notional_usdt is None:
@@ -592,6 +600,7 @@ class AutomaticTradingService:
                     environment=environment,
                     leverage=config.leverage,
                     maximum_slippage=config.normal_max_slippage,
+                    spot_buy_fee_in_base=spot_buy_fee_in_base,
                     now=now,
                 )
             else:

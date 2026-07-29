@@ -426,6 +426,10 @@ class AccountSnapshotRow(Base):
         default="isolated",
     )
     trade_permission: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    spot_buy_fee_in_base: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+    )
     __table_args__ = (
         Index(
             "ix_account_snapshot_history",
@@ -669,6 +673,10 @@ class TradeIntentRow(Base):
         Numeric(38, 18),
         default=Decimal("0"),
     )
+    spot_buy_fee_in_base: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+    )
     market_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     config_version: Mapped[str] = mapped_column(String(64))
     version: Mapped[int] = mapped_column(Integer, default=1)
@@ -690,7 +698,8 @@ class TradeIntentRow(Base):
             "'remote_open_orders', 'intent_missing', "
             "'intent_legs_invalid', 'remote_positions_present', "
             "'balance_insufficient', 'perp_configuration_failed', "
-            "'close_state_mismatch', 'preflight_internal_error')",
+            "'close_state_mismatch', 'spot_fee_mode_changed', "
+            "'preflight_internal_error')",
             name="ck_trade_intent_failure_code",
         ),
         CheckConstraint(
@@ -1131,6 +1140,7 @@ class Database:
                         position_mode=snapshot.position_mode.value,
                         perp_margin_mode=snapshot.perp_margin_mode.value,
                         trade_permission=snapshot.trade_permission,
+                        spot_buy_fee_in_base=snapshot.spot_buy_fee_in_base,
                     )
                 )
                 if trading_state is not None:
@@ -1387,6 +1397,26 @@ class Database:
     async def execution_control(self) -> ExecutionControlRow | None:
         async with self.sessions() as session:
             return await session.get(ExecutionControlRow, 1)
+
+    async def current_account_snapshot(
+        self,
+        *,
+        exchange: str,
+        environment: str,
+    ) -> AccountSnapshotRow | None:
+        async with self.sessions() as session:
+            return await session.scalar(
+                select(AccountSnapshotRow)
+                .join(
+                    AccountReconciliationRow,
+                    AccountReconciliationRow.snapshot_id
+                    == AccountSnapshotRow.id,
+                )
+                .where(
+                    AccountReconciliationRow.exchange == exchange,
+                    AccountReconciliationRow.environment == environment,
+                )
+            )
 
     async def create_strategy_version(
         self,
@@ -2837,12 +2867,31 @@ class Database:
                     "spot base-asset fees exceed the filled quantity"
                 )
             common_base = min(spot_base, perp_base)
+            planned_spot_residual_limit = (
+                primary["spot"].quantity
+                * primary["spot"].base_multiplier
+                - intent.base_quantity
+            )
+            fee_aware_open_is_hedged = (
+                intent.spot_buy_fee_in_base
+                and planned_spot_residual_limit > 0
+                and primary["spot"].filled_quantity
+                == primary["spot"].quantity
+                and primary["perp"].filled_quantity
+                == primary["perp"].quantity
+                and _numeric_equal(perp_base, intent.base_quantity)
+                and spot_base >= perp_base
+                and spot_base - perp_base < planned_spot_residual_limit
+            )
             now = datetime.now(UTC)
             changed = True
             if spot_base == 0 and perp_base == 0:
                 intent.status = "failed"
                 intent.failure_code = "no_fills"
-            elif not _numeric_equal(spot_base, perp_base):
+            elif (
+                not _numeric_equal(spot_base, perp_base)
+                and not fee_aware_open_is_hedged
+            ):
                 excess_leg = (
                     primary["spot"]
                     if spot_base > perp_base

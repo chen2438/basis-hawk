@@ -190,6 +190,11 @@ class LiveExecutionService:
             if set(primary) != {"spot", "perp"}:
                 raise LivePreflightError("intent_legs_invalid")
             if intent.action == "open":
+                if (
+                    intent.spot_buy_fee_in_base
+                    and snapshot.spot_buy_fee_in_base is not True
+                ):
+                    raise LivePreflightError("spot_fee_mode_changed")
                 try:
                     await LiveCompensationService._validate_paired_positions(
                         self,

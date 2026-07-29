@@ -48,6 +48,29 @@ def test_paired_order_size_uses_a_common_base_quantity_grid() -> None:
     assert result.perp_notional == Decimal("98.80")
 
 
+def test_paired_open_size_reduces_perpetual_for_spot_base_fee() -> None:
+    result = size_paired_order(
+        _pair(
+            spot_quantity_increment=Decimal("0.01"),
+            spot_min_quantity=Decimal("0"),
+            spot_min_notional=Decimal("0"),
+            perp_min_quantity=Decimal("0"),
+            perp_min_notional=Decimal("0"),
+        ),
+        requested_notional=Decimal("300"),
+        spot_price=Decimal("0.0813"),
+        perp_price=Decimal("0.0812"),
+        spot_base_fee_rate=Decimal("0.001"),
+    )
+
+    assert result.spot_quantity == Decimal("3690")
+    assert result.base_quantity == Decimal("3680")
+    assert result.perp_quantity == Decimal("368")
+    assert (
+        result.spot_quantity * Decimal("0.999") - result.base_quantity
+    ) == Decimal("6.310")
+
+
 def test_paired_order_size_handles_fractional_contract_grids() -> None:
     result = size_paired_order(
         _pair(

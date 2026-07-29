@@ -214,6 +214,11 @@ describe("Basis Hawk dashboard", () => {
     )).toContain(
       "Gate 实盘订单预检未通过：永续保证金模式或杠杆配置失败",
     );
+    expect(executionReason(
+      "live_order_preflight:gate:spot_fee_mode_changed",
+    )).toContain(
+      "现货手续费扣款方式发生变化，请重新生成交易预览",
+    );
     expect(tradeFailureReason({
       status: "planned",
       failure_code: "perp_configuration_failed",

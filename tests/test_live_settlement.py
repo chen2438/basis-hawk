@@ -15,6 +15,10 @@ async def _live_intent(
     database: Database,
     *,
     terminal_status: str = "acknowledged",
+    base_quantity: Decimal = Decimal("20"),
+    spot_quantity: Decimal = Decimal("20"),
+    perp_quantity: Decimal = Decimal("2"),
+    spot_buy_fee_in_base: bool = False,
 ) -> tuple[str, dict[str, str], datetime]:
     intent_id = str(uuid.uuid4())
     now = datetime.now(UTC)
@@ -30,9 +34,10 @@ async def _live_intent(
             "status": "executing",
             "leverage": 2,
             "requested_notional": Decimal("1"),
-            "base_quantity": Decimal("20"),
+            "base_quantity": base_quantity,
             "spot_fee_rate": Decimal("0.001"),
             "perp_fee_rate": Decimal("0.0005"),
+            "spot_buy_fee_in_base": spot_buy_fee_in_base,
             "market_observed_at": now,
             "config_version": "b" * 64,
             "version": 2,
@@ -50,7 +55,7 @@ async def _live_intent(
                 "client_order_id": "bhspot" + intent_id.replace("-", "")[:20],
                 "exchange_order_id": "remote-spot",
                 "status": terminal_status,
-                "quantity": Decimal("20"),
+                "quantity": spot_quantity,
                 "base_multiplier": Decimal("1"),
                 "limit_price": Decimal("0.05"),
                 "filled_quantity": Decimal("0"),
@@ -68,7 +73,7 @@ async def _live_intent(
                 "client_order_id": "bhperp" + intent_id.replace("-", "")[:20],
                 "exchange_order_id": "remote-perp",
                 "status": terminal_status,
-                "quantity": Decimal("2"),
+                "quantity": perp_quantity,
                 "base_multiplier": Decimal("10"),
                 "limit_price": Decimal("0.051"),
                 "filled_quantity": Decimal("0"),
@@ -616,6 +621,70 @@ async def test_live_settlement_fails_when_both_terminal_legs_have_zero_fills() -
     assert settled[0].status == "failed"
     assert settled[1] is None
     assert (await database.list_paired_positions()) == []
+    await database.close()
+
+
+async def test_live_open_accepts_planned_spot_base_fee_dust_without_compensation() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    await database.set_execution_control(state="ready", reason="test")
+    intent_id, legs, now = await _live_intent(
+        database,
+        terminal_status="canceled",
+        base_quantity=Decimal("3680"),
+        spot_quantity=Decimal("3690"),
+        perp_quantity=Decimal("368"),
+        spot_buy_fee_in_base=True,
+    )
+    await database.persist_remote_fills(
+        order_leg_id=legs["spot"],
+        fills=[
+            RemoteFill(
+                exchange_trade_id="spot-base-fee",
+                exchange_order_id="remote-spot",
+                client_order_id=None,
+                market="spot",
+                symbol="ORDER-USDT",
+                side="buy",
+                quantity=Decimal("3690"),
+                price=Decimal("0.0813"),
+                fee_amount=Decimal("3.69"),
+                fee_asset="ORDER",
+                liquidity="taker",
+                occurred_at=now,
+            )
+        ],
+    )
+    await database.persist_remote_fills(
+        order_leg_id=legs["perp"],
+        fills=[
+            RemoteFill(
+                exchange_trade_id="perp-fee-aware",
+                exchange_order_id="remote-perp",
+                client_order_id=None,
+                market="perp",
+                symbol="ORDER-USDT-SWAP",
+                side="sell",
+                quantity=Decimal("368"),
+                price=Decimal("0.0812"),
+                fee_amount=Decimal("0.149408"),
+                fee_asset="USDT",
+                liquidity="taker",
+                occurred_at=now,
+            )
+        ],
+    )
+
+    settled = await database.settle_live_open(intent_id=intent_id)
+
+    assert settled is not None and settled[1] is not None
+    assert settled[0].status == "hedged"
+    assert settled[1].quantity == Decimal("3680")
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    assert len(stored[1]) == 2
+    control = await database.execution_control()
+    assert control is not None and control.state == "ready"
     await database.close()
 
 

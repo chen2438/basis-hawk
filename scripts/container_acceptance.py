@@ -212,7 +212,7 @@ def main() -> int:
             "SELECT version_num FROM alembic_version;",
             capture=True,
         ).stdout.strip()
-        if revision != "20260729_0032":
+        if revision != "20260729_0033":
             raise RuntimeError(f"unexpected Alembic revision: {revision}")
         migrated_cache = docker(
             "exec",

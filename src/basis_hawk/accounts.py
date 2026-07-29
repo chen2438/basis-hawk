@@ -155,6 +155,7 @@ class AccountSnapshot(BaseModel):
     trade_permission: bool | None
     trade_block_reason: str | None = None
     perp_margin_mode: PerpMarginMode = PerpMarginMode.ISOLATED
+    spot_buy_fee_in_base: bool | None = None
 
     @field_serializer(
         "spot_usdt_available",
@@ -3048,6 +3049,26 @@ class GateAccountClient(PrivateAccountClient):
             self._get("/api/v4/spot/accounts", currency="USDT"),
             self._get("/api/v4/futures/usdt/accounts"),
         )
+        try:
+            account_fee = await self._get("/api/v4/wallet/fee")
+        except PrivateRequestError:
+            spot_buy_fee_in_base = None
+        else:
+            gt_discount = (
+                account_fee.get("gt_discount")
+                if isinstance(account_fee, dict)
+                else None
+            )
+            debit_fee = (
+                account_fee.get("debit_fee")
+                if isinstance(account_fee, dict)
+                else None
+            )
+            spot_buy_fee_in_base = (
+                gt_discount is False and debit_fee not in {1, 2}
+                if isinstance(gt_discount, bool) and type(debit_fee) is int
+                else None
+            )
         margin_mode = int(perp.get("margin_mode") or 0)
         if margin_mode not in {0, 2}:
             raise PrivateRequestError(
@@ -3119,6 +3140,7 @@ class GateAccountClient(PrivateAccountClient):
                     )
                 ),
                 perp_margin_mode=PerpMarginMode.CROSS,
+                spot_buy_fee_in_base=spot_buy_fee_in_base,
             )
         self._account_mode = "classic"
         spot_usdt = next(
@@ -3145,6 +3167,7 @@ class GateAccountClient(PrivateAccountClient):
             ),
             trade_permission=trade_permission,
             perp_margin_mode=PerpMarginMode.ISOLATED,
+            spot_buy_fee_in_base=spot_buy_fee_in_base,
         )
 
     async def submit_internal_transfer(

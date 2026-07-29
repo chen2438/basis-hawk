@@ -91,6 +91,7 @@ class FakeLiveAccountClient:
         fail_market: str | None = None,
         fail_configuration: bool = False,
         positions: list[RemotePosition] | None = None,
+        spot_buy_fee_in_base: bool | None = None,
     ) -> None:
         self.database = database
         self.exchange = exchange
@@ -98,6 +99,7 @@ class FakeLiveAccountClient:
         self.fail_market = fail_market
         self.fail_configuration = fail_configuration
         self.positions = positions or []
+        self.spot_buy_fee_in_base = spot_buy_fee_in_base
         self.placed: list[LimitIocOrder] = []
         self.configured: list[tuple[str, int, PositionMode]] = []
         self.closed = False
@@ -114,6 +116,7 @@ class FakeLiveAccountClient:
             account_mode="single:isolated",
             position_mode=PositionMode.ONE_WAY,
             trade_permission=True,
+            spot_buy_fee_in_base=self.spot_buy_fee_in_base,
         )
 
     async def trading_state(self) -> RemoteTradingState:
@@ -193,6 +196,7 @@ async def _planned_live_intent(
     *,
     exchange: Exchange = Exchange.OKX,
     environment: ExchangeEnvironment = ExchangeEnvironment.LIVE,
+    spot_buy_fee_in_base: bool = False,
 ) -> tuple[CredentialService, str]:
     credentials = CredentialService(
         database,
@@ -217,8 +221,37 @@ async def _planned_live_intent(
         settings=ScannerSettings(),
         environment=environment,
         leverage=2,
+        spot_buy_fee_in_base=spot_buy_fee_in_base,
     )
     return credentials, intent.id
+
+
+async def test_live_executor_rejects_changed_spot_fee_mode_before_submission() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials, intent_id = await _planned_live_intent(
+        database,
+        spot_buy_fee_in_base=True,
+    )
+    await database.set_execution_control(state="ready", reason="test")
+    client = FakeLiveAccountClient(
+        database,
+        spot_buy_fee_in_base=False,
+    )
+    executor = LiveExecutionService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+    )
+
+    result = await executor.run_once()
+
+    assert result.preflight_failed == 1
+    assert client.placed == []
+    stored = await database.trade_intent(intent_id)
+    assert stored is not None
+    assert stored[0].failure_code == "spot_fee_mode_changed"
+    await database.close()
 
 
 async def _planned_live_close(
