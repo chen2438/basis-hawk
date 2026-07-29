@@ -195,16 +195,22 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
           const status = statuses.find((item) => item.exchange === name);
           const progress = Math.min(100, Math.max(0, status?.history_progress_percent ?? 0));
           const downloadRate = status?.history_download_rate_per_minute;
-          const downloadLabel = downloadRate == null
-            ? "等待下载"
-            : `${downloadRate.toFixed(1)} 标的/分`;
+          const downloadLabel = status?.history_syncing
+            ? downloadRate == null
+              ? "正在检查历史"
+              : `下载 ${downloadRate.toFixed(1)} 标的/分`
+            : progress >= 100
+              ? "预热完成"
+              : downloadRate == null
+                ? "等待下轮"
+                : `上轮 ${downloadRate.toFixed(1)} 标的/分`;
           return <div className="exchange-status" key={name}>
             <span className={`status-dot ${status?.state ?? "starting"}`} />
             <div>
               <strong>{exchangeNames[name]}</strong>
               <small>{status ? `${status.instruments} 标的 · 行情 ${status.latency_ms ?? "—"}ms` : "正在连接"}</small>
               {status && <>
-                <small>预热 {progress.toFixed(1)}%（{status.history_ready}/{status.instruments}）· 下载 {downloadLabel}</small>
+                <small>预热 {progress.toFixed(1)}%（{status.history_ready}/{status.instruments}）· {downloadLabel}</small>
                 <span
                   className="history-progress"
                   role="progressbar"

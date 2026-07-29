@@ -175,8 +175,10 @@ class ScannerService:
                 persisted = await self.database.funding_history(
                     exchange.value, pair.base_asset, since=start
                 )
-                needs_remote = not persisted or end - persisted[0].funding_at < timedelta(
-                    days=6
+                needs_remote = self._history_needs_remote(
+                    pair,
+                    persisted,
+                    end=end,
                 )
                 if needs_remote:
                     fetched = await adapter.funding_history(pair, start=start, end=end)
@@ -211,6 +213,22 @@ class ScannerService:
             syncing=False,
         )
 
+    @staticmethod
+    def _history_needs_remote(
+        pair: InstrumentPair,
+        persisted: list[FundingObservation],
+        *,
+        end: datetime,
+    ) -> bool:
+        if not persisted:
+            return True
+        coverage = persisted[-1].funding_at - persisted[0].funding_at
+        freshness_limit = max(
+            timedelta(hours=12),
+            timedelta(hours=float(pair.funding_interval_hours) * 2),
+        )
+        return coverage < timedelta(days=6) or end - persisted[-1].funding_at > freshness_limit
+
     def _history_ready_count(self, exchange: Exchange) -> int:
         return sum(
             1
@@ -230,11 +248,7 @@ class ScannerService:
         total = len(self.pairs[exchange])
         ready = self._history_ready_count(exchange)
         elapsed = max(monotonic() - started, 0.001)
-        rate = (
-            round(downloaded * 60 / elapsed, 1)
-            if downloaded
-            else self.statuses[exchange].history_download_rate_per_minute
-        )
+        rate = round(downloaded * 60 / elapsed, 1) if downloaded else None
         progress = round(ready * 100 / total, 1) if total else 0.0
         self.statuses[exchange] = self.statuses[exchange].model_copy(
             update={

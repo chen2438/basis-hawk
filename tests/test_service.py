@@ -92,6 +92,15 @@ class FakeAdapter(ExchangeAdapter):
         return None
 
 
+class TrackingFakeAdapter(FakeAdapter):
+    def __init__(self) -> None:
+        self.history_calls = 0
+
+    async def funding_history(self, pair, *, start, end):
+        self.history_calls += 1
+        return await super().funding_history(pair, start=start, end=end)
+
+
 def test_history_snapshot_bucket_uses_hourly_intervals() -> None:
     value = datetime(2026, 7, 27, 14, 58, 41, 123456, tzinfo=UTC)
     assert history_snapshot_bucket(value) == datetime(
@@ -204,8 +213,33 @@ async def test_reports_live_history_download_rate_and_warmup_progress() -> None:
 
     previous_rate = status.history_download_rate_per_minute
     await service.refresh_history(Exchange.BINANCE)
-    assert (
-        service.statuses[Exchange.BINANCE].history_download_rate_per_minute
-        == previous_rate
+    assert previous_rate is not None
+    assert service.statuses[Exchange.BINANCE].history_download_rate_per_minute is None
+    await database.close()
+
+
+async def test_refetches_cached_history_that_is_not_ready_or_fresh() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    adapter = TrackingFakeAdapter()
+    service = ScannerService(database, {Exchange.BINANCE: adapter})
+    await service.initialize()
+    await service.refresh_catalog(Exchange.BINANCE)
+    now = datetime.now(UTC)
+    await database.save_funding(
+        [
+            FundingObservation(
+                exchange=Exchange.BINANCE,
+                base_asset="BTC",
+                rate=Decimal("0.0001"),
+                funding_at=funding_at,
+                settled=True,
+            )
+            for funding_at in (now - timedelta(days=6, hours=6), now - timedelta(days=1))
+        ]
     )
+
+    await service.refresh_history(Exchange.BINANCE)
+
+    assert adapter.history_calls == 1
+    assert service.statuses[Exchange.BINANCE].history_ready == 1
     await database.close()
