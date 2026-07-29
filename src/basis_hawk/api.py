@@ -43,7 +43,7 @@ from basis_hawk.exchanges import GateAdapter
 from basis_hawk.models import Exchange, Quality, ScannerSettings
 from basis_hawk.notifications import TelegramCommandService
 from basis_hawk.service import (
-    GateSandboxMarketService,
+    SandboxMarketService,
     ScannerService,
     default_adapters,
 )
@@ -235,14 +235,14 @@ def create_app(
         ]
         | None
     ) = None,
-    gate_sandbox_market: GateSandboxMarketService | None = None,
+    sandbox_market_service: SandboxMarketService | None = None,
 ) -> FastAPI:
     config = get_config()
     scanner = service or ScannerService(
         Database(config.database_url), default_adapters(config.http_timeout_seconds)
     )
     require_auth = config.auth_required if auth_required is None else auth_required
-    sandbox_market = gate_sandbox_market or GateSandboxMarketService(
+    sandbox_market = sandbox_market_service or SandboxMarketService(
         scanner,
         timeout=config.http_timeout_seconds,
     )
@@ -284,7 +284,7 @@ def create_app(
 
     app = FastAPI(title="Basis Hawk", version="0.1.0", lifespan=lifespan)
     app.state.scanner = scanner
-    app.state.gate_sandbox_market = sandbox_market
+    app.state.sandbox_market = sandbox_market
     app.state.auth_service = auth_service
     trade_ledger = TradeLedger(scanner.database)
     transfer_ledger = InternalTransferLedger(
@@ -562,7 +562,7 @@ def create_app(
             except (RuntimeError, ValueError) as exc:
                 raise HTTPException(
                     status_code=503,
-                    detail="Gate TestNet market is unavailable",
+                    detail="sandbox markets are unavailable",
                 ) from exc
         else:
             values = scanner.list_opportunities()
@@ -597,11 +597,6 @@ def create_app(
         if range not in durations:
             raise HTTPException(status_code=422, detail="range must be 24h, 7d, or 30d")
         if environment == ExchangeEnvironment.SANDBOX:
-            if exchange != Exchange.GATE:
-                raise HTTPException(
-                    status_code=404,
-                    detail="sandbox market is only available for Gate",
-                )
             return {
                 "exchange": exchange,
                 "base_asset": base_asset.upper(),
@@ -628,10 +623,9 @@ def create_app(
     ) -> dict[str, object]:
         try:
             if environment == ExchangeEnvironment.SANDBOX:
-                opportunity = (
-                    await sandbox_market.executable_opportunity(base_asset)
-                    if exchange == Exchange.GATE
-                    else None
+                opportunity = await sandbox_market.executable_opportunity(
+                    exchange,
+                    base_asset,
                 )
             else:
                 opportunity = await scanner.executable_opportunity(
@@ -656,13 +650,18 @@ def create_app(
     ) -> dict[str, object]:
         if environment == ExchangeEnvironment.SANDBOX:
             try:
-                status = await sandbox_market.status()
+                sandbox_statuses = await sandbox_market.statuses()
             except (RuntimeError, ValueError) as exc:
                 raise HTTPException(
                     status_code=503,
-                    detail="Gate TestNet market is unavailable",
+                    detail="sandbox markets are unavailable",
                 ) from exc
-            return {"items": [status.model_dump(mode="json")]}
+            return {
+                "items": [
+                    status.model_dump(mode="json")
+                    for status in sandbox_statuses
+                ]
+            }
         return {"items": [item.model_dump(mode="json") for item in scanner.statuses.values()]}
 
     @app.get("/api/system/execution")

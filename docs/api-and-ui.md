@@ -5,8 +5,10 @@
 `/history`、`/top-book`、`/api/exchanges/status`、`/api/settings` 和 `/api/ws/opportunities`。
 所有比例使用小数值字符串，例如 `0.001` 表示 `0.1%`。
 `GET /api/opportunities`、`/api/exchanges/status` 及单机会 `/history`、`/top-book` 接受可选
-`environment=live|sandbox`，省略时保持 `live`。`sandbox` 当前只返回 Gate TestNet；机会与状态使用
-同一份最多缓存 5 秒的只读快照，历史入口返回空列表且前端明确说明未持久化，按需一档也只访问 TestNet。
+`environment=live|sandbox`，省略时保持 `live`。`sandbox` 聚合 Binance Demo、OKX Demo、
+Bybit Testnet、Bitget Demo 与 Gate TestNet；机会与状态使用同一份最多缓存 5 秒的只读快照，每所
+独立降级，MEXC 状态明确返回不支持。历史入口返回空列表且前端明确说明未持久化，报价只访问所选
+测试环境，不得回退正式网。
 `/api/ws/opportunities` 继续只推送 LIVE 正式扫描器数据。
 生产 SPA 回退只返回解析后仍位于 `frontend/dist` 内的普通文件；URL 编码父目录、绝对路径和解析到
 目录外的符号链接都回退到入口页，不能读取镜像中的源码、依赖清单或其他配置文件。
@@ -55,10 +57,12 @@
 市场总览右侧机会详情把开仓报价正确标为“现货卖一”和“永续买一”，并在下一行分别展示两腿 USDT
 名义容量，再展示取小后的双腿可执行容量，便于在进入手动交易前识别限制腿。
 市场页顶栏提供 LIVE/SANDBOX 分段切换。切换会关闭旧详情、重置交易所筛选并从目标环境重新读取，
-SANDBOX 只显示 Gate TestNet 状态且醒目标注当前费率回退估算；运营页始终保留 LIVE 机会作为手动交易
-候选，不能因市场展示环境变化而混入测试网数据。机会表每个标的和详情面板均提供新窗口永续页面链接，
-链接由前端按受支持交易所、原生永续 symbol 和当前环境生成，不接受 API 返回的任意 URL；Gate
-Sandbox 固定指向 `https://testnet.gate.com/futures/USDT/{contract}`。
+SANDBOX 显示六所状态卡，其中五所读取官方 Demo/Testnet，MEXC 明确标为不支持，并醒目标注当前费率
+回退估算；运营页始终保留 LIVE 机会作为手动交易候选，不能因市场展示环境变化而混入测试网数据。
+机会表每个标的和详情面板均提供新窗口永续页面链接，链接由前端按受支持交易所、原生永续 symbol
+和当前环境生成，不接受 API 返回的任意 URL；Binance、Bybit 与 Gate Sandbox 分别指向
+`demo.binance.com`、`testnet.bybit.com` 与 `testnet.gate.com`，OKX 与 Bitget 使用交易所网页内的
+Demo 模式入口。
 
 交易所凭据接口为：
 

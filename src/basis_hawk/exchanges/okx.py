@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from basis_hawk.credentials import ExchangeEnvironment
 from basis_hawk.exchanges.base import ExchangeAdapter, PublicClient
 from basis_hawk.models import Exchange, FundingObservation, InstrumentPair, MarketQuote
 
@@ -11,8 +12,23 @@ from basis_hawk.models import Exchange, FundingObservation, InstrumentPair, Mark
 class OkxAdapter(ExchangeAdapter):
     name = "okx"
 
-    def __init__(self, *, timeout: float = 10) -> None:
-        self.http = PublicClient("https://www.okx.com", timeout=timeout, minimum_interval=0.11)
+    def __init__(
+        self,
+        *,
+        timeout: float = 10,
+        environment: ExchangeEnvironment = ExchangeEnvironment.LIVE,
+    ) -> None:
+        headers = (
+            {"x-simulated-trading": "1"}
+            if environment == ExchangeEnvironment.SANDBOX
+            else None
+        )
+        self.http = PublicClient(
+            "https://www.okx.com",
+            timeout=timeout,
+            minimum_interval=0.11,
+            headers=headers,
+        )
 
     async def instruments(self) -> list[InstrumentPair]:
         spot, swaps = await asyncio.gather(
@@ -77,6 +93,13 @@ class OkxAdapter(ExchangeAdapter):
             if pair.spot_symbol not in spots or pair.perp_symbol not in swaps:
                 continue
             s, p = spots[pair.spot_symbol], swaps[pair.perp_symbol]
+            required = (
+                s.get("ts"), s.get("bidPx"), s.get("bidSz"), s.get("askPx"),
+                s.get("askSz"), s.get("volCcy24h"), p.get("ts"), p.get("bidPx"),
+                p.get("bidSz"), p.get("askPx"), p.get("askSz"), p.get("volCcy24h"),
+            )
+            if any(value in (None, "") for value in required):
+                continue
             last = Decimal(p.get("last") or "0")
             results.append(
                 MarketQuote(

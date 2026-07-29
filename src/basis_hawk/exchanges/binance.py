@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from basis_hawk.credentials import ExchangeEnvironment
 from basis_hawk.exchanges.base import (
     ExchangeAdapter,
     PublicClient,
@@ -16,9 +17,21 @@ from basis_hawk.models import Exchange, FundingObservation, InstrumentPair, Mark
 class BinanceAdapter(ExchangeAdapter):
     name = "binance"
 
-    def __init__(self, *, timeout: float = 10) -> None:
-        self.spot = PublicClient("https://api.binance.com", timeout=timeout)
-        self.perp = PublicClient("https://fapi.binance.com", timeout=timeout)
+    def __init__(
+        self,
+        *,
+        timeout: float = 10,
+        environment: ExchangeEnvironment = ExchangeEnvironment.LIVE,
+    ) -> None:
+        sandbox = environment == ExchangeEnvironment.SANDBOX
+        self.spot = PublicClient(
+            "https://demo-api.binance.com" if sandbox else "https://api.binance.com",
+            timeout=timeout,
+        )
+        self.perp = PublicClient(
+            "https://demo-fapi.binance.com" if sandbox else "https://fapi.binance.com",
+            timeout=timeout,
+        )
 
     async def instruments(self) -> list[InstrumentPair]:
         spot_payload, perp_payload = await asyncio.gather(

@@ -23,7 +23,7 @@ from basis_hawk.models import (
     Opportunity,
     Quality,
 )
-from basis_hawk.service import GateSandboxMarketService, ScannerService
+from basis_hawk.service import SandboxMarketService, ScannerService
 from basis_hawk.storage import Database
 from basis_hawk.trading import PaperExecutionService, TradeLedger
 
@@ -255,7 +255,7 @@ async def test_rest_contract_and_settings() -> None:
     await database.close()
 
 
-async def test_market_environment_switch_uses_gate_testnet_data_only() -> None:
+async def test_market_environment_switch_uses_sandbox_market_data_only() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     service = ScannerService(database, {})
     await service.initialize()
@@ -328,16 +328,16 @@ async def test_market_environment_switch_uses_gate_testnet_data_only() -> None:
         async def close(self) -> None:
             pass
 
-    sandbox_market = GateSandboxMarketService(
+    sandbox_market = SandboxMarketService(
         service,
-        adapter=FakeGateSandboxAdapter(),  # type: ignore[arg-type]
+        adapters={Exchange.GATE: FakeGateSandboxAdapter()},  # type: ignore[dict-item]
         cache_seconds=60,
     )
     app = create_app(
         service,
         manage_lifecycle=False,
         auth_required=False,
-        gate_sandbox_market=sandbox_market,
+        sandbox_market_service=sandbox_market,
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -364,8 +364,13 @@ async def test_market_environment_switch_uses_gate_testnet_data_only() -> None:
             "/api/exchanges/status",
             params={"environment": "sandbox"},
         )
-        assert status.json()["items"][0]["exchange"] == "gate"
-        assert status.json()["items"][0]["instruments"] == 1
+        statuses = {
+            item["exchange"]: item
+            for item in status.json()["items"]
+        }
+        assert statuses["gate"]["instruments"] == 1
+        assert statuses["mexc"]["state"] == "unsupported"
+        assert len(statuses) == 6
 
         top_book = await client.get(
             "/api/opportunities/gate/AI16Z/top-book",

@@ -54,19 +54,54 @@ def default_adapters(timeout: float = 10) -> dict[Exchange, ExchangeAdapter]:
     }
 
 
-class GateSandboxMarketService:
-    """Short-lived, read-only Gate TestNet snapshot for the market page."""
+def default_sandbox_adapters(timeout: float = 10) -> dict[Exchange, ExchangeAdapter]:
+    """Official demo/testnet public markets that expose both spot and USDT perps."""
+    return {
+        Exchange.BINANCE: BinanceAdapter(
+            timeout=timeout,
+            environment=ExchangeEnvironment.SANDBOX,
+        ),
+        Exchange.OKX: OkxAdapter(
+            timeout=timeout,
+            environment=ExchangeEnvironment.SANDBOX,
+        ),
+        Exchange.BYBIT: BybitAdapter(
+            timeout=timeout,
+            environment=ExchangeEnvironment.SANDBOX,
+        ),
+        Exchange.BITGET: BitgetAdapter(
+            timeout=timeout,
+            environment=ExchangeEnvironment.SANDBOX,
+        ),
+        Exchange.GATE: GateAdapter(
+            timeout=timeout,
+            environment=ExchangeEnvironment.SANDBOX,
+        ),
+    }
+
+
+SANDBOX_MARKET_LABELS = {
+    Exchange.BINANCE: "Binance Demo",
+    Exchange.OKX: "OKX Demo",
+    Exchange.BYBIT: "Bybit Testnet",
+    Exchange.BITGET: "Bitget Demo",
+    Exchange.GATE: "Gate TestNet",
+}
+
+
+class SandboxMarketService:
+    """Short-lived, read-only demo/testnet snapshots for the market page."""
 
     def __init__(
         self,
         scanner: ScannerService,
         *,
-        adapter: ExchangeAdapter | None = None,
+        adapters: dict[Exchange, ExchangeAdapter] | None = None,
         cache_seconds: float = 5,
         timeout: float = 10,
     ) -> None:
         self.scanner = scanner
-        self.adapter = adapter
+        self.adapters = adapters
         self.cache_seconds = cache_seconds
         self.timeout = timeout
         self._lock = asyncio.Lock()
@@ -74,7 +109,15 @@ class GateSandboxMarketService:
         self._pairs: dict[str, InstrumentPair] = {}
         self._quotes: dict[str, MarketQuote] = {}
         self._opportunities: dict[str, Opportunity] = {}
-        self._status = ExchangeStatus(exchange=Exchange.GATE)
+        self._statuses = {
+            exchange: ExchangeStatus(exchange=exchange)
+            for exchange in Exchange
+        }
+        self._statuses[Exchange.MEXC] = ExchangeStatus(
+            exchange=Exchange.MEXC,
+            state="unsupported",
+            error="MEXC 暂无完整的现货与 USDT 永续测试环境",
+        )
         self.sequence = 0
 
     async def refresh(self) -> None:
@@ -84,97 +127,120 @@ class GateSandboxMarketService:
                 and monotonic() - self._refreshed_monotonic < self.cache_seconds
             ):
                 return
-            started = monotonic()
-            try:
-                if self.adapter is None:
-                    self.adapter = GateAdapter(
-                        timeout=self.timeout,
-                        environment=ExchangeEnvironment.SANDBOX,
-                    )
-                all_pairs = await self.adapter.instruments()
-                all_quotes = await self.adapter.quotes(all_pairs)
-                quote_by_key = {
-                    f"{quote.exchange.value}:{quote.base_asset}": quote
-                    for quote in all_quotes
-                }
-                settings = self.scanner.settings
-                eligible = [
-                    pair
-                    for pair in all_pairs
-                    if pair.key in quote_by_key
-                    and min(
+            if self.adapters is None:
+                self.adapters = default_sandbox_adapters(self.timeout)
+            await asyncio.gather(
+                *(
+                    self._refresh_exchange(exchange, adapter)
+                    for exchange, adapter in self.adapters.items()
+                )
+            )
+            self._refreshed_monotonic = monotonic()
+            self.sequence += 1
+
+    async def _refresh_exchange(
+        self,
+        exchange: Exchange,
+        adapter: ExchangeAdapter,
+    ) -> None:
+        started = monotonic()
+        try:
+            all_pairs = await adapter.instruments()
+            all_quotes = await adapter.quotes(all_pairs)
+            quote_by_key = {
+                f"{quote.exchange.value}:{quote.base_asset}": quote
+                for quote in all_quotes
+            }
+            settings = self.scanner.settings
+            eligible = [
+                pair
+                for pair in all_pairs
+                if pair.key in quote_by_key
+                and min(
+                    quote_by_key[pair.key].spot_quote_volume_24h,
+                    quote_by_key[pair.key].perp_quote_volume_24h,
+                )
+                >= settings.minimum_quote_volume
+            ]
+            eligible.sort(
+                key=lambda pair: (
+                    -min(
                         quote_by_key[pair.key].spot_quote_volume_24h,
                         quote_by_key[pair.key].perp_quote_volume_24h,
-                    )
-                    >= settings.minimum_quote_volume
-                ]
-                eligible.sort(
-                    key=lambda pair: (
-                        -min(
-                            quote_by_key[pair.key].spot_quote_volume_24h,
-                            quote_by_key[pair.key].perp_quote_volume_24h,
-                        ),
-                        pair.base_asset,
-                    )
+                    ),
+                    pair.base_asset,
                 )
-                selected = eligible[: settings.universe_size]
-                funding = await self.adapter.current_funding(selected)
-                funding_by_key = {
-                    f"{item.exchange.value}:{item.base_asset}": item
-                    for item in funding
-                }
-                now = datetime.now(UTC)
-                opportunities = {}
-                for pair in selected:
-                    current = funding_by_key.get(pair.key)
-                    if current is None:
-                        continue
-                    try:
-                        opportunities[pair.key] = build_sandbox_opportunity(
-                            pair,
-                            quote_by_key[pair.key],
-                            current,
-                            settings.fees[Exchange.GATE],
-                            holding_days=settings.holding_period_days,
-                            now=now,
-                        )
-                    except ValueError:
-                        continue
-                self._pairs = {pair.key: pair for pair in selected}
-                self._quotes = {
+            )
+            selected = eligible[: settings.universe_size]
+            funding = await adapter.current_funding(selected)
+            funding_by_key = {
+                f"{item.exchange.value}:{item.base_asset}": item
+                for item in funding
+            }
+            now = datetime.now(UTC)
+            opportunities: dict[str, Opportunity] = {}
+            for pair in selected:
+                current = funding_by_key.get(pair.key)
+                if current is None:
+                    continue
+                try:
+                    opportunities[pair.key] = build_sandbox_opportunity(
+                        pair,
+                        quote_by_key[pair.key],
+                        current,
+                        settings.fees[exchange],
+                        holding_days=settings.holding_period_days,
+                        now=now,
+                    )
+                except ValueError:
+                    continue
+            exchange_keys = {
+                key
+                for key, item in self._opportunities.items()
+                if item.exchange == exchange
+            }
+            for key in exchange_keys:
+                self._pairs.pop(key, None)
+                self._quotes.pop(key, None)
+                self._opportunities.pop(key, None)
+            self._pairs.update({pair.key: pair for pair in selected})
+            self._quotes.update(
+                {
                     pair.key: quote_by_key[pair.key]
                     for pair in selected
                     if pair.key in quote_by_key
                 }
-                self._opportunities = opportunities
-                self._refreshed_monotonic = monotonic()
-                self.sequence += 1
-                self._status = ExchangeStatus(
-                    exchange=Exchange.GATE,
-                    state="healthy",
-                    last_catalog_at=now,
-                    last_quote_at=max(
-                        (item.observed_at for item in opportunities.values()),
-                        default=now,
-                    ),
-                    last_funding_at=now,
-                    latency_ms=round((monotonic() - started) * 1000),
-                    instruments=len(opportunities),
-                )
-            except (RuntimeError, ValueError):
-                self._status = self._status.model_copy(
-                    update={
-                        "state": "degraded",
-                        "latency_ms": round((monotonic() - started) * 1000),
-                        "error": "Gate TestNet market unavailable",
-                    }
-                )
-                if not self._opportunities:
-                    raise
-                self._opportunities = {
-                    key: item.model_copy(update={"quality": Quality.STALE})
-                    for key, item in self._opportunities.items()
+            )
+            self._opportunities.update(opportunities)
+            self._statuses[exchange] = ExchangeStatus(
+                exchange=exchange,
+                state="healthy",
+                last_catalog_at=now,
+                last_quote_at=max(
+                    (item.observed_at for item in opportunities.values()),
+                    default=now,
+                ),
+                last_funding_at=now,
+                latency_ms=round((monotonic() - started) * 1000),
+                instruments=len(opportunities),
+            )
+        except Exception as exc:
+            logger.warning("%s sandbox market refresh failed: %s", exchange.value, exc)
+            self._statuses[exchange] = self._statuses[exchange].model_copy(
+                update={
+                    "state": "degraded",
+                    "latency_ms": round((monotonic() - started) * 1000),
+                    "error": f"{SANDBOX_MARKET_LABELS[exchange]} 行情暂不可用",
                 }
+            )
+            self._opportunities = {
+                key: (
+                    item.model_copy(update={"quality": Quality.STALE})
+                    if item.exchange == exchange
+                    else item
+                )
+                for key, item in self._opportunities.items()
+            }
 
     async def list_opportunities(self) -> list[Opportunity]:
         await self.refresh()
@@ -183,28 +249,31 @@ class GateSandboxMarketService:
             key=lambda item: (
                 item.quality != Quality.HEALTHY,
                 -(item.net_return if item.net_return is not None else item.current_apr),
+                item.exchange.value,
                 item.base_asset,
             ),
         )
 
-    async def status(self) -> ExchangeStatus:
+    async def statuses(self) -> list[ExchangeStatus]:
         await self.refresh()
-        return self._status
+        return [self._statuses[exchange] for exchange in Exchange]
 
     async def executable_opportunity(
         self,
+        exchange: Exchange,
         base_asset: str,
     ) -> Opportunity | None:
         await self.refresh()
-        key = f"{Exchange.GATE.value}:{base_asset.strip().upper()}"
+        key = f"{exchange.value}:{base_asset.strip().upper()}"
         opportunity = self._opportunities.get(key)
         pair = self._pairs.get(key)
         quote = self._quotes.get(key)
         if opportunity is None or pair is None or quote is None:
             return None
-        if self.adapter is None:
-            raise RuntimeError("Gate TestNet market adapter is unavailable")
-        executable_quote = await self.adapter.executable_quote(pair, quote)
+        adapter = (self.adapters or {}).get(exchange)
+        if adapter is None:
+            raise RuntimeError(f"{exchange.value} sandbox market adapter is unavailable")
+        executable_quote = await adapter.executable_quote(pair, quote)
         resolved = opportunity_with_executable_quote(
             opportunity,
             executable_quote,
@@ -214,8 +283,8 @@ class GateSandboxMarketService:
         return resolved
 
     async def close(self) -> None:
-        if self.adapter is not None:
-            await self.adapter.close()
+        if self.adapters is not None:
+            await asyncio.gather(*(adapter.close() for adapter in self.adapters.values()))
 
 
 class ScannerService:

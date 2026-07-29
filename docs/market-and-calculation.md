@@ -32,12 +32,18 @@ Gate Sandbox 自动策略直接从 Gate TestNet 读取标的目录、批量行�
 环境，实盘仍要求完整历史和 `healthy` 质量。TestNet 目录、规则、资金费或订单簿不可用时跳过。
 自动补偿同样重新读取 TestNet 目录和盘口，不得用实盘规则或深度为沙盒订单背书，也不得跨环境拼腿。
 
-市场总览的 SANDBOX 视图复用同一隔离语义，但只承担只读展示：后端按扫描设置从 Gate TestNet 获取
-现货/永续共同目录、批量 ticker 和当前资金费，按两腿 24 小时成交额筛选并保留最多 `universe_size`
-个标的；结果缓存 5 秒供机会列表与状态卡共同读取，选中标的时再从 TestNet 读取双腿一档。TestNet
-历史不写入正式网趋势表，所以图表明确显示暂无持久化历史，24h/7d APR 与净收益使用当前资金费回退
-估算；该回退只用于 Sandbox 展示和状态机验收。LIVE WebSocket、正式机会数据库、运营页手动交易候选
-和六所预热状态保持独立，切换页面不会把 TestNet 数据注入任何正式交易入口。
+市场总览的 SANDBOX 视图复用同一隔离语义，但只承担只读展示：后端按扫描设置分别从 Binance Demo、
+OKX Demo、Bybit Testnet、Bitget Demo 与 Gate TestNet 获取现货/永续共同目录、批量 ticker 和当前
+资金费，按每所两腿 24 小时成交额筛选并各自保留最多 `universe_size` 个标的。Binance 使用
+`demo-api.binance.com` 与 `demo-fapi.binance.com`，OKX 请求携带 `x-simulated-trading: 1`，
+Bybit 使用 `api-testnet.bybit.com`，Bitget 请求携带 `paptrading: 1`，Gate 使用
+`api-testnet.gateapi.io`；MEXC 没有完整的现货与 USDT 永续沙盒，状态卡明确显示不支持且不得用
+正式网数据代替。各所并发刷新且独立降级，单所失败只把该所旧机会标为陈旧；结果缓存 5 秒供机会列表
+与状态卡共同读取，选中标的时刷新可执行报价，Gate 另外读取双腿一档订单簿。
+
+测试环境历史不写入正式网趋势表，所以图表明确显示暂无持久化历史，24h/7d APR 与净收益使用当前
+资金费回退估算；该回退只用于 Sandbox 展示和状态机验收。LIVE WebSocket、正式机会数据库、运营页
+手动交易候选和六所预热状态保持独立，切换页面不会把测试环境数据注入任何正式交易入口。
 
 候选池先要求两腿 24 小时 USDT 成交额均达到 `minimum_quote_volume`（默认 1,000,000 USDT），
 再按 `min(spot_quote_volume_24h, perp_quote_volume_24h)` 降序确定，默认每所最多保留 500 个共同标的。

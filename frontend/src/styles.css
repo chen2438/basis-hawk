@@ -242,7 +242,7 @@ button, input, select { font: inherit; }
   border-radius: 9px;
   box-shadow: 0 5px 18px rgba(28, 63, 58, 0.04);
 }
-.status-strip.sandbox { grid-template-columns: minmax(280px, 1fr); }
+.status-strip.sandbox { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .exchange-status { display: flex; align-items: flex-start; gap: 11px; padding: 12px 17px; border-right: 1px solid var(--line); }
 .exchange-status:last-child { border: 0; }
 .exchange-status > div { flex: 1; min-width: 0; }
@@ -702,6 +702,7 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
   .workspace { grid-template-columns: minmax(0, 1fr); }
   .detail-card { display: none; }
   .status-strip { grid-template-columns: repeat(3, 1fr); }
+  .status-strip.sandbox { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .operations-content { padding-right: 18px; padding-left: 18px; }
   .operations-header { padding-right: 20px; padding-left: 20px; }
   .update-details { grid-template-columns: 1fr 1fr; }
@@ -716,6 +717,7 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
   .hero-grid { grid-template-columns: 1fr; }
   .metric { border-right: 0; border-bottom: 1px solid var(--line); }
   .status-strip { grid-template-columns: 1fr 1fr; }
+  .status-strip.sandbox { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ops-grid, .ops-summary, .strategy-field-grid { grid-template-columns: 1fr; }
   .ops-summary > div { border-right: 0; border-bottom: 1px solid var(--line); }
   .ops-summary > div:last-child { border-bottom: 0; }

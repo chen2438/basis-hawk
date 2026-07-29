@@ -19,9 +19,14 @@ class PublicClient:
         *,
         timeout: float = 10,
         minimum_interval: float = 0.05,
+        headers: dict[str, str] | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        self.client = client or httpx.AsyncClient(base_url=base_url, timeout=timeout)
+        self.client = client or httpx.AsyncClient(
+            base_url=base_url,
+            timeout=timeout,
+            headers=headers,
+        )
         self._owned = client is None
         self.minimum_interval = minimum_interval
         self._next_request = 0.0

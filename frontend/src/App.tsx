@@ -31,13 +31,13 @@ export function exchangeMarketUrl(item: Opportunity, environment: Environment): 
   const symbol = encodeURIComponent(item.perp_symbol);
   switch (item.exchange) {
     case "binance":
-      return `https://www.binance.com/en/futures/${symbol}`;
+      return `${environment === "sandbox" ? "https://demo.binance.com" : "https://www.binance.com"}/en/futures/${symbol}`;
     case "okx":
       return `https://www.okx.com/trade-swap/${item.perp_symbol.toLowerCase()}`;
     case "mexc":
       return `https://www.mexc.com/futures/${symbol}`;
     case "bybit":
-      return `https://www.bybit.com/trade/usdt/${symbol}`;
+      return `${environment === "sandbox" ? "https://testnet.bybit.com" : "https://www.bybit.com"}/trade/usdt/${symbol}`;
     case "bitget":
       return `https://www.bitget.com/futures/usdt/${symbol}`;
     case "gate":
@@ -175,7 +175,7 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
 
   const items = marketEnvironment === "live" ? liveItems : sandboxItems;
   const statuses = marketEnvironment === "live" ? liveStatuses : sandboxStatuses;
-  const marketExchanges: Exchange[] = marketEnvironment === "live" ? exchanges : ["gate"];
+  const marketExchanges: Exchange[] = exchanges;
 
   const filtered = useMemo(() => items
     .filter((item) => exchange === "all" || item.exchange === exchange)
@@ -256,9 +256,9 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
     {activePage === "market" ? <>
     <main className="market-main">
       <section className="hero">
-        <div><p className="eyebrow">{marketEnvironment.toUpperCase()} MARKET OVERVIEW</p><h1>资金费机会，一眼看清。</h1><p>{marketEnvironment === "live" ? "同所现货多头 × USDT 永续空头。基差与资金费分开衡量，收益估算透明可核。" : "Gate TestNet 独立标的与盘口。历史不足时仅用当前资金费估算，不代表正式网行情。"}</p></div>
+        <div><p className="eyebrow">{marketEnvironment.toUpperCase()} MARKET OVERVIEW</p><h1>资金费机会，一眼看清。</h1><p>{marketEnvironment === "live" ? "同所现货多头 × USDT 永续空头。基差与资金费分开衡量，收益估算透明可核。" : "五所官方 Demo / Testnet 行情独立读取；MEXC 暂无完整沙盒。历史不足时仅用当前资金费估算。"}</p></div>
         <div className="hero-grid">
-          <div className="metric"><span>有效机会</span><strong>{healthy.length}</strong><small>{marketEnvironment === "live" ? "六所共同交易对" : "Gate TestNet 共同交易对"}</small></div>
+          <div className="metric"><span>有效机会</span><strong>{healthy.length}</strong><small>{marketEnvironment === "live" ? "六所共同交易对" : "五所测试环境共同交易对"}</small></div>
           <div className="metric accent"><span>最佳 30 天估算</span><strong>{percent(best?.net_return ?? null)}</strong><small>{best ? `${exchangeNames[best.exchange]} · ${best.base_asset}` : "等待历史预热"}</small></div>
           <div className="metric"><span>扫描标的</span><strong>{sandboxLoading && !items.length ? "…" : items.length}</strong><small>5 秒价格刷新</small></div>
         </div>
@@ -284,7 +284,7 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
               <strong>{exchangeNames[name]}</strong>
               <small>{status ? `${status.instruments} 标的 · 行情 ${status.latency_ms ?? "—"}ms` : "正在连接"}</small>
               {status && (marketEnvironment === "sandbox" ? <>
-                <small>TestNet 当前资金费回退估算 · 不使用正式网行情</small>
+                <small>{status.error ?? "Demo / Testnet 当前资金费回退估算"}</small>
               </> : <>
                 <small>预热 {progress.toFixed(1)}%（{status.history_ready}/{status.instruments}）· {downloadLabel}</small>
                 <span

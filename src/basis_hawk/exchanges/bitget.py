@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from basis_hawk.credentials import ExchangeEnvironment
 from basis_hawk.exchanges.base import (
     ExchangeAdapter,
     PublicClient,
@@ -18,11 +19,21 @@ class BitgetAdapter(ExchangeAdapter):
     name = "bitget"
     product_type = "USDT-FUTURES"
 
-    def __init__(self, *, timeout: float = 10) -> None:
+    def __init__(
+        self,
+        *,
+        timeout: float = 10,
+        environment: ExchangeEnvironment = ExchangeEnvironment.LIVE,
+    ) -> None:
         self.http = PublicClient(
             "https://api.bitget.com",
             timeout=timeout,
             minimum_interval=0.06,
+            headers=(
+                {"paptrading": "1"}
+                if environment == ExchangeEnvironment.SANDBOX
+                else None
+            ),
         )
 
     @staticmethod

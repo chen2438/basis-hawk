@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from basis_hawk.credentials import ExchangeEnvironment
 from basis_hawk.exchanges.base import ExchangeAdapter, PublicClient
 from basis_hawk.models import Exchange, FundingObservation, InstrumentPair, MarketQuote
 
@@ -11,8 +12,21 @@ from basis_hawk.models import Exchange, FundingObservation, InstrumentPair, Mark
 class BybitAdapter(ExchangeAdapter):
     name = "bybit"
 
-    def __init__(self, *, timeout: float = 10) -> None:
-        self.http = PublicClient("https://api.bybit.com", timeout=timeout, minimum_interval=0.06)
+    def __init__(
+        self,
+        *,
+        timeout: float = 10,
+        environment: ExchangeEnvironment = ExchangeEnvironment.LIVE,
+    ) -> None:
+        self.http = PublicClient(
+            (
+                "https://api-testnet.bybit.com"
+                if environment == ExchangeEnvironment.SANDBOX
+                else "https://api.bybit.com"
+            ),
+            timeout=timeout,
+            minimum_interval=0.06,
+        )
 
     async def _instruments(self, category: str) -> list[dict[str, object]]:
         cursor = ""
@@ -121,25 +135,36 @@ class BybitAdapter(ExchangeAdapter):
         spots = {item["symbol"]: item for item in spot_items}
         perps = {item["symbol"]: item for item in perp_items}
         now = datetime.now(UTC)
-        return [
-            MarketQuote(
+        results: list[MarketQuote] = []
+        for pair in pairs:
+            if pair.spot_symbol not in spots or pair.perp_symbol not in perps:
+                continue
+            spot = spots[pair.spot_symbol]
+            perp = perps[pair.perp_symbol]
+            required = (
+                spot.get("bid1Price"), spot.get("bid1Size"), spot.get("ask1Price"),
+                spot.get("ask1Size"), spot.get("turnover24h"), perp.get("bid1Price"),
+                perp.get("bid1Size"), perp.get("ask1Price"), perp.get("ask1Size"),
+                perp.get("turnover24h"),
+            )
+            if any(value in (None, "") for value in required):
+                continue
+            results.append(MarketQuote(
                 exchange=Exchange.BYBIT,
                 base_asset=pair.base_asset,
                 observed_at=now,
-                spot_bid=Decimal(spots[pair.spot_symbol]["bid1Price"]),
-                spot_bid_qty=Decimal(spots[pair.spot_symbol]["bid1Size"]),
-                spot_ask=Decimal(spots[pair.spot_symbol]["ask1Price"]),
-                spot_ask_qty=Decimal(spots[pair.spot_symbol]["ask1Size"]),
-                perp_bid=Decimal(perps[pair.perp_symbol]["bid1Price"]),
-                perp_bid_qty=Decimal(perps[pair.perp_symbol]["bid1Size"]),
-                perp_ask=Decimal(perps[pair.perp_symbol]["ask1Price"]),
-                perp_ask_qty=Decimal(perps[pair.perp_symbol]["ask1Size"]),
-                spot_quote_volume_24h=Decimal(spots[pair.spot_symbol]["turnover24h"]),
-                perp_quote_volume_24h=Decimal(perps[pair.perp_symbol]["turnover24h"]),
-            )
-            for pair in pairs
-            if pair.spot_symbol in spots and pair.perp_symbol in perps
-        ]
+                spot_bid=Decimal(spot["bid1Price"]),
+                spot_bid_qty=Decimal(spot["bid1Size"]),
+                spot_ask=Decimal(spot["ask1Price"]),
+                spot_ask_qty=Decimal(spot["ask1Size"]),
+                perp_bid=Decimal(perp["bid1Price"]),
+                perp_bid_qty=Decimal(perp["bid1Size"]),
+                perp_ask=Decimal(perp["ask1Price"]),
+                perp_ask_qty=Decimal(perp["ask1Size"]),
+                spot_quote_volume_24h=Decimal(spot["turnover24h"]),
+                perp_quote_volume_24h=Decimal(perp["turnover24h"]),
+            ))
+        return results
 
     async def current_funding(self, pairs: list[InstrumentPair]) -> list[FundingObservation]:
         _, perp_items = await self._tickers()

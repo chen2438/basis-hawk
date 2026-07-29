@@ -282,7 +282,7 @@ describe("Basis Hawk dashboard", () => {
     );
   });
 
-  it("switches to the isolated Gate sandbox market and links to TestNet", async () => {
+  it("switches to aggregated sandbox markets and links to TestNet", async () => {
     const sandboxOpportunity = {
       exchange: "gate",
       base_asset: "AI16Z",
@@ -313,18 +313,32 @@ describe("Basis Hawk dashboard", () => {
         : url.includes("environment=sandbox") && url.includes("opportunities?")
           ? { items: [sandboxOpportunity], sequence: 2 }
           : url.includes("environment=sandbox") && url.includes("exchanges/status")
-            ? { items: [{
-              exchange: "gate",
-              state: "healthy",
-              last_quote_at: "2026-07-29T14:00:00Z",
-              latency_ms: 120,
-              error: null,
-              instruments: 1,
-              history_ready: 0,
-              history_progress_percent: 0,
-              history_download_rate_per_minute: null,
-              history_syncing: false,
-            }] }
+            ? { items: [
+              {
+                exchange: "gate",
+                state: "healthy",
+                last_quote_at: "2026-07-29T14:00:00Z",
+                latency_ms: 120,
+                error: null,
+                instruments: 1,
+                history_ready: 0,
+                history_progress_percent: 0,
+                history_download_rate_per_minute: null,
+                history_syncing: false,
+              },
+              {
+                exchange: "mexc",
+                state: "unsupported",
+                last_quote_at: null,
+                latency_ms: null,
+                error: "MEXC 暂无完整的现货与 USDT 永续测试环境",
+                instruments: 0,
+                history_ready: 0,
+                history_progress_percent: 0,
+                history_download_rate_per_minute: null,
+                history_syncing: false,
+              },
+            ] }
             : url.includes("opportunities?") ? { items: [], sequence: 1 }
             : url.includes("exchanges/status") ? { items: [] }
             : { universe_size: 500, minimum_quote_volume: "1000000", holding_period_days: 30, retention_days: 7, fee_checked_at: "2026-07-23", fees: {} };
@@ -340,7 +354,8 @@ describe("Basis Hawk dashboard", () => {
     expect(link.getAttribute("href")).toBe(
       "https://testnet.gate.com/futures/USDT/AI16Z_USDT",
     );
-    expect(screen.getByText("Gate TestNet 独立标的与盘口。历史不足时仅用当前资金费估算，不代表正式网行情。")).toBeTruthy();
+    expect(screen.getByText("五所官方 Demo / Testnet 行情独立读取；MEXC 暂无完整沙盒。历史不足时仅用当前资金费估算。")).toBeTruthy();
+    expect(screen.getByText("MEXC 暂无完整的现货与 USDT 永续测试环境")).toBeTruthy();
     expect(fetch).toHaveBeenCalledWith(
       "/api/opportunities?page_size=3000&environment=sandbox",
       expect.objectContaining({ credentials: "same-origin" }),
@@ -355,6 +370,9 @@ describe("Basis Hawk dashboard", () => {
     expect(exchangeMarketUrl(item, "live")).toBe(
       "https://www.binance.com/en/futures/BTCUSDT",
     );
+    expect(exchangeMarketUrl(item, "sandbox")).toBe(
+      "https://demo.binance.com/en/futures/BTCUSDT",
+    );
     expect(exchangeMarketUrl({ ...item, exchange: "okx", perp_symbol: "BTC-USDT-SWAP" }, "live")).toBe(
       "https://www.okx.com/trade-swap/btc-usdt-swap",
     );
@@ -363,6 +381,9 @@ describe("Basis Hawk dashboard", () => {
     );
     expect(exchangeMarketUrl({ ...item, exchange: "bybit" }, "live")).toBe(
       "https://www.bybit.com/trade/usdt/BTCUSDT",
+    );
+    expect(exchangeMarketUrl({ ...item, exchange: "bybit" }, "sandbox")).toBe(
+      "https://testnet.bybit.com/trade/usdt/BTCUSDT",
     );
     expect(exchangeMarketUrl({ ...item, exchange: "bitget" }, "live")).toBe(
       "https://www.bitget.com/futures/usdt/BTCUSDT",
