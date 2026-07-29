@@ -2191,6 +2191,270 @@ class Database:
             await session.refresh(row)
             return row
 
+    async def claim_paper_execution_task(
+        self,
+        *,
+        worker_id: str,
+    ) -> (
+        tuple[
+            ExecutionTaskRow,
+            list[ExecutionTaskLegRow],
+            ExecutionRunRow,
+        ]
+        | None
+    ):
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ExecutionTaskRow)
+                .where(
+                    ExecutionTaskRow.environment == "paper",
+                    ExecutionTaskRow.status.in_({"queued", "running"}),
+                )
+                .order_by(ExecutionTaskRow.created_at)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+            if row is None:
+                return None
+            now = datetime.now(UTC)
+            run = await session.scalar(
+                select(ExecutionRunRow)
+                .where(
+                    ExecutionRunRow.task_id == row.id,
+                    ExecutionRunRow.status.in_({"queued", "running"}),
+                )
+                .order_by(ExecutionRunRow.run_number.desc())
+                .with_for_update()
+                .limit(1)
+            )
+            if run is None:
+                maximum_run = await session.scalar(
+                    select(func.max(ExecutionRunRow.run_number)).where(
+                        ExecutionRunRow.task_id == row.id
+                    )
+                )
+                run = ExecutionRunRow(
+                    id=str(uuid.uuid4()),
+                    task_id=row.id,
+                    run_number=int(maximum_run or 0) + 1,
+                    status="running",
+                    worker_id=worker_id,
+                    failure_code=None,
+                    started_at=now,
+                    finished_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(run)
+                await session.flush()
+            else:
+                run.status = "running"
+                run.worker_id = worker_id
+                run.started_at = run.started_at or now
+                run.updated_at = now
+            if row.status == "queued":
+                row.status = "running"
+                row.version += 1
+            row.updated_at = now
+            legs = list(
+                await session.scalars(
+                    select(ExecutionTaskLegRow)
+                    .where(ExecutionTaskLegRow.task_id == row.id)
+                    .order_by(ExecutionTaskLegRow.ordinal)
+                )
+            )
+            await session.commit()
+            return row, legs, run
+
+    async def complete_paper_execution_task(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        fills: list[dict[str, Any]],
+        worker_id: str,
+    ) -> bool:
+        async with self.sessions() as session:
+            task = await session.scalar(
+                select(ExecutionTaskRow)
+                .where(ExecutionTaskRow.id == task_id)
+                .with_for_update()
+            )
+            run = await session.scalar(
+                select(ExecutionRunRow)
+                .where(ExecutionRunRow.id == run_id)
+                .with_for_update()
+            )
+            if task is None or run is None or run.task_id != task_id:
+                raise ValueError("paper execution task or run was not found")
+            if task.status == "completed":
+                return False
+            if task.status != "running" or run.status != "running":
+                raise ValueError("paper execution task is not running")
+            leg_rows = list(
+                await session.scalars(
+                    select(ExecutionTaskLegRow)
+                    .where(ExecutionTaskLegRow.task_id == task_id)
+                    .order_by(ExecutionTaskLegRow.ordinal)
+                )
+            )
+            by_leg = {item.id: item for item in leg_rows}
+            if set(by_leg) != {str(item["task_leg_id"]) for item in fills}:
+                raise ValueError("paper execution must fill every task leg exactly once")
+            now = datetime.now(UTC)
+            strategy: ArbitrageStrategyRow | None = None
+            if task.create_strategy:
+                strategy = ArbitrageStrategyRow(
+                    id=str(uuid.uuid4()),
+                    name=task.name,
+                    environment=task.environment,
+                    base_asset=task.base_asset,
+                    opening_task_id=task.id,
+                    closing_task_id=None,
+                    status="running",
+                    realized_pnl_usdt=Decimal("0"),
+                    funding_income_usdt=Decimal("0"),
+                    fees_usdt=sum(
+                        (Decimal(str(item["fee_usdt"])) for item in fills),
+                        Decimal("0"),
+                    ),
+                    opened_at=now,
+                    closed_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(strategy)
+                await session.flush()
+            for item in fills:
+                leg = by_leg[str(item["task_leg_id"])]
+                order_id = str(uuid.uuid4())
+                native_quantity = Decimal(str(item["native_quantity"]))
+                base_multiplier = Decimal(str(item["base_multiplier"]))
+                price = Decimal(str(item["price"]))
+                fee_usdt = Decimal(str(item["fee_usdt"]))
+                order_row = ExecutionOrderRow(
+                    id=order_id,
+                    run_id=run.id,
+                    task_leg_id=leg.id,
+                    parent_order_id=None,
+                    attempt_number=1,
+                    chase_number=0,
+                    client_order_id=f"paper-{order_id}",
+                    exchange_order_id=f"paper-{order_id}",
+                    order_mode=leg.order_mode,
+                    status="filled",
+                    quantity=native_quantity,
+                    base_multiplier=base_multiplier,
+                    limit_price=price,
+                    filled_quantity=native_quantity,
+                    average_price=price,
+                    failure_code=None,
+                    submitted_at=now,
+                    terminal_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(order_row)
+                await session.flush()
+                session.add(
+                    ExecutionFillRow(
+                        id=str(uuid.uuid4()),
+                        execution_order_id=order_id,
+                        exchange_trade_id=f"paper-{order_id}",
+                        quantity=native_quantity,
+                        price=price,
+                        fee_amount=fee_usdt,
+                        fee_asset="USDT",
+                        liquidity=(
+                            "maker" if leg.order_mode == "maker" else "taker"
+                        ),
+                        occurred_at=now,
+                    )
+                )
+                if strategy is not None:
+                    base_quantity = native_quantity * base_multiplier
+                    session.add(
+                        StrategyLegRow(
+                            id=str(uuid.uuid4()),
+                            strategy_id=strategy.id,
+                            opening_task_leg_id=leg.id,
+                            account_id=leg.account_id,
+                            ordinal=leg.ordinal,
+                            market_type=leg.market_type,
+                            side=leg.side,
+                            symbol=leg.symbol,
+                            initial_base_quantity=base_quantity,
+                            remaining_base_quantity=base_quantity,
+                            entry_price=price,
+                            exit_price=None,
+                            fees_usdt=fee_usdt,
+                            realized_pnl_usdt=Decimal("0"),
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+            await session.flush()
+            task.status = "completed"
+            task.version += 1
+            task.updated_at = now
+            run.status = "completed"
+            run.worker_id = worker_id
+            run.finished_at = now
+            run.updated_at = now
+            session.add(
+                AuditEventRow(
+                    id=str(uuid.uuid4()),
+                    occurred_at=now,
+                    event_type="execution_task.completed",
+                    actor=worker_id,
+                    details=json.dumps(
+                        {
+                            "task_id": task_id,
+                            "run_id": run_id,
+                            "paper": True,
+                            "leg_count": len(fills),
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            )
+            await session.commit()
+            return True
+
+    async def fail_execution_task_run(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        failure_code: str,
+        worker_id: str,
+    ) -> None:
+        async with self.sessions() as session:
+            task = await session.scalar(
+                select(ExecutionTaskRow)
+                .where(ExecutionTaskRow.id == task_id)
+                .with_for_update()
+            )
+            run = await session.scalar(
+                select(ExecutionRunRow)
+                .where(ExecutionRunRow.id == run_id)
+                .with_for_update()
+            )
+            if task is None or run is None or run.task_id != task_id:
+                raise ValueError("execution task or run was not found")
+            now = datetime.now(UTC)
+            task.status = "failed"
+            task.failure_code = failure_code
+            task.version += 1
+            task.updated_at = now
+            run.status = "failed"
+            run.failure_code = failure_code
+            run.worker_id = worker_id
+            run.finished_at = now
+            run.updated_at = now
+            await session.commit()
+
     async def current_account_snapshot(
         self,
         *,

@@ -27,6 +27,7 @@ from basis_hawk.live_execution import (
     LiveExecutionService,
 )
 from basis_hawk.models import Exchange
+from basis_hawk.multi_leg_execution import MultiLegPaperExecutionService
 from basis_hawk.storage import Database, OrderLegRow
 from basis_hawk.trading import PaperExecutionService
 from basis_hawk.transfers import InternalTransferExecutionService
@@ -91,6 +92,7 @@ class ReconciliationService:
             PrivateAccountClient,
         ] = create_account_client,
         paper_executor: PaperExecutionService | None = None,
+        multi_leg_paper_executor: MultiLegPaperExecutionService | None = None,
         live_executor: LiveExecutionService | None = None,
         live_compensator: LiveCompensationService | None = None,
         automatic_trader: AutomaticTradingService | None = None,
@@ -103,6 +105,10 @@ class ReconciliationService:
         self.credentials = credentials
         self.account_client_factory = account_client_factory
         self.paper_executor = paper_executor or PaperExecutionService(database)
+        self.multi_leg_paper_executor = (
+            multi_leg_paper_executor
+            or MultiLegPaperExecutionService(database)
+        )
         self.live_executor = live_executor or LiveExecutionService(
             database,
             credentials,
@@ -136,6 +142,7 @@ class ReconciliationService:
     async def run_once(self) -> ReconciliationResult:
         await self.transfer_executor.run_once()
         await self.paper_executor.run_once()
+        await self.multi_leg_paper_executor.run_once()
         await self.live_executor.run_once()
         await self.live_compensator.run_once()
         control = await self.database.execution_control()

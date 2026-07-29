@@ -332,6 +332,12 @@ relationship 模型的排序。UUID 幂等键和规范化请求指纹共同防�
 时间；启动事务锁定任务并同时检查到期时间、版本、状态及非纸面任务的全局执行控制，然后才切换 queued。
 取消只接受尚未开始的三种状态，运行后必须由 worker 的停止/补偿状态机处理。
 
+纸面 worker 用 `FOR UPDATE SKIP LOCKED` 领取最早 queued/running 任务；首次领取先创建
+`execution_runs` 父行并 flush，重启领取 running 任务时复用未终结 run。完成事务逐腿先 flush
+`execution_orders` 再写 `execution_fills`，需要建仓时同样先 flush `arbitrage_strategies` 再写
+`strategy_legs`，兼容开启外键的 SQLite 测试和 PostgreSQL。所有腿成功后才一起把 run/task 标为
+completed；报价或规则失败则用固定 `paper_quote_unavailable` 终结 run/task，不持久化异常正文。
+
 `exchange_credentials` 取消“交易所+环境唯一”，改为“交易所+环境+标签唯一”，并用部分唯一索引分别
 保证每组最多一个默认交易账户和默认扫描账户；既有凭据迁移为两种默认账户。能力矩阵和账户费率以
 脱敏 JSON 持久化，密文、nonce 和关联数据规则不变。`/api/v2/accounts` 可通过稳定账户 ID 管理多行；
