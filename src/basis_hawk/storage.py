@@ -5786,26 +5786,89 @@ class Database:
         ciphertext: str,
         nonce: str,
         key_version: int,
+        credential_id: str | None = None,
+        is_default: bool | None = None,
+        scanner_default: bool | None = None,
+        capabilities_payload: str | None = None,
+        fee_payload: str | None = None,
         reconciliation_reason: str | None = None,
     ) -> ExchangeCredentialRow:
         async with self.sessions() as session:
-            row = await session.scalar(
-                select(ExchangeCredentialRow).where(
-                    ExchangeCredentialRow.exchange == exchange,
-                    ExchangeCredentialRow.environment == environment,
+            account_rows = list(
+                await session.scalars(
+                    select(ExchangeCredentialRow)
+                    .where(
+                        ExchangeCredentialRow.exchange == exchange,
+                        ExchangeCredentialRow.environment == environment,
+                    )
+                    .order_by(
+                        ExchangeCredentialRow.is_default.desc(),
+                        ExchangeCredentialRow.created_at,
+                    )
                 )
             )
+            row = (
+                next(
+                    (item for item in account_rows if item.id == credential_id),
+                    None,
+                )
+                if credential_id is not None
+                else next(
+                    (item for item in account_rows if item.is_default),
+                    account_rows[0] if account_rows else None,
+                )
+            )
+            if credential_id is not None and row is None:
+                existing_id = await session.get(ExchangeCredentialRow, credential_id)
+                if existing_id is not None:
+                    raise ValueError("credential ID belongs to another account")
+            duplicate_label = next(
+                (
+                    item
+                    for item in account_rows
+                    if item.label == label and (row is None or item.id != row.id)
+                ),
+                None,
+            )
+            if duplicate_label is not None:
+                raise ValueError("credential label is already used for this exchange")
             now = datetime.now(UTC)
+            make_default = (
+                True
+                if not account_rows
+                else is_default if is_default is not None else False
+            )
+            make_scanner_default = (
+                True
+                if not account_rows
+                else scanner_default if scanner_default is not None else False
+            )
+            if make_default:
+                for item in account_rows:
+                    item.is_default = False
+            if make_scanner_default:
+                for item in account_rows:
+                    item.scanner_default = False
+            if (make_default or make_scanner_default) and account_rows:
+                await session.flush()
             if row:
                 row.label = label
                 row.masked_api_key = masked_api_key
                 row.ciphertext = ciphertext
                 row.nonce = nonce
                 row.key_version = key_version
+                if is_default is not None:
+                    row.is_default = is_default
+                if scanner_default is not None:
+                    row.scanner_default = scanner_default
+                if capabilities_payload is not None:
+                    row.capabilities_payload = capabilities_payload
+                if fee_payload is not None:
+                    row.fee_payload = fee_payload
                 row.updated_at = now
             else:
                 row = ExchangeCredentialRow(
-                    id=str(uuid.uuid4()),
+                    id=credential_id or str(uuid.uuid4()),
                     exchange=exchange,
                     environment=environment,
                     label=label,
@@ -5813,10 +5876,18 @@ class Database:
                     ciphertext=ciphertext,
                     nonce=nonce,
                     key_version=key_version,
+                    is_default=make_default,
+                    scanner_default=make_scanner_default,
+                    capabilities_payload=capabilities_payload or "{}",
+                    fee_payload=fee_payload or "{}",
                     created_at=now,
                     updated_at=now,
                 )
                 session.add(row)
+            if make_default:
+                row.is_default = True
+            if make_scanner_default:
+                row.scanner_default = True
             if reconciliation_reason is not None:
                 await self._request_execution_reconciliation_in_session(
                     session,
@@ -5831,11 +5902,24 @@ class Database:
     ) -> ExchangeCredentialRow | None:
         async with self.sessions() as session:
             return await session.scalar(
-                select(ExchangeCredentialRow).where(
+                select(ExchangeCredentialRow)
+                .where(
                     ExchangeCredentialRow.exchange == exchange,
                     ExchangeCredentialRow.environment == environment,
                 )
+                .order_by(
+                    ExchangeCredentialRow.is_default.desc(),
+                    ExchangeCredentialRow.created_at,
+                )
+                .limit(1)
             )
+
+    async def exchange_credential_by_id(
+        self,
+        credential_id: str,
+    ) -> ExchangeCredentialRow | None:
+        async with self.sessions() as session:
+            return await session.get(ExchangeCredentialRow, credential_id)
 
     async def list_exchange_credentials(self) -> list[ExchangeCredentialRow]:
         async with self.sessions() as session:
@@ -5843,9 +5927,101 @@ class Database:
                 select(ExchangeCredentialRow).order_by(
                     ExchangeCredentialRow.exchange,
                     ExchangeCredentialRow.environment,
+                    ExchangeCredentialRow.is_default.desc(),
+                    ExchangeCredentialRow.label,
                 )
             )
             return list(values)
+
+    async def set_exchange_credential_defaults(
+        self,
+        credential_id: str,
+        *,
+        trading_default: bool,
+        scanner_default: bool,
+        reconciliation_reason: str | None = None,
+    ) -> ExchangeCredentialRow | None:
+        async with self.sessions() as session:
+            row = await session.get(ExchangeCredentialRow, credential_id)
+            if row is None:
+                return None
+            account_rows = list(
+                await session.scalars(
+                    select(ExchangeCredentialRow).where(
+                        ExchangeCredentialRow.exchange == row.exchange,
+                        ExchangeCredentialRow.environment == row.environment,
+                    )
+                )
+            )
+            if trading_default:
+                for item in account_rows:
+                    item.is_default = False
+            else:
+                row.is_default = False
+            if scanner_default:
+                for item in account_rows:
+                    item.scanner_default = False
+            else:
+                row.scanner_default = False
+            if trading_default or scanner_default:
+                await session.flush()
+            if trading_default:
+                row.is_default = True
+            if scanner_default:
+                row.scanner_default = True
+            row.updated_at = datetime.now(UTC)
+            if reconciliation_reason is not None:
+                await self._request_execution_reconciliation_in_session(
+                    session,
+                    reason=reconciliation_reason,
+                )
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def delete_exchange_credential_by_id(
+        self,
+        credential_id: str,
+        *,
+        reconciliation_reason: str | None = None,
+    ) -> bool:
+        async with self.sessions() as session:
+            row = await session.get(ExchangeCredentialRow, credential_id)
+            if row is None:
+                return False
+            exchange = row.exchange
+            environment = row.environment
+            was_default = row.is_default
+            was_scanner_default = row.scanner_default
+            try:
+                await session.delete(row)
+                await session.flush()
+                remaining = list(
+                    await session.scalars(
+                        select(ExchangeCredentialRow)
+                        .where(
+                            ExchangeCredentialRow.exchange == exchange,
+                            ExchangeCredentialRow.environment == environment,
+                        )
+                        .order_by(ExchangeCredentialRow.created_at)
+                    )
+                )
+                if remaining and was_default:
+                    remaining[0].is_default = True
+                if remaining and was_scanner_default:
+                    remaining[0].scanner_default = True
+                if reconciliation_reason is not None:
+                    await self._request_execution_reconciliation_in_session(
+                        session,
+                        reason=reconciliation_reason,
+                    )
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise ValueError(
+                    "account is referenced by a task or strategy"
+                ) from exc
+            return True
 
     async def delete_exchange_credential(
         self,
@@ -5855,19 +6031,44 @@ class Database:
         reconciliation_reason: str | None = None,
     ) -> bool:
         async with self.sessions() as session:
-            result = await session.execute(
-                delete(ExchangeCredentialRow).where(
+            row = await session.scalar(
+                select(ExchangeCredentialRow)
+                .where(
                     ExchangeCredentialRow.exchange == exchange,
                     ExchangeCredentialRow.environment == environment,
                 )
+                .order_by(
+                    ExchangeCredentialRow.is_default.desc(),
+                    ExchangeCredentialRow.created_at,
+                )
+                .limit(1)
             )
-            if result.rowcount and reconciliation_reason is not None:
+            if row is None:
+                return False
+            await session.delete(row)
+            await session.flush()
+            remaining = list(
+                await session.scalars(
+                    select(ExchangeCredentialRow)
+                    .where(
+                        ExchangeCredentialRow.exchange == exchange,
+                        ExchangeCredentialRow.environment == environment,
+                    )
+                    .order_by(ExchangeCredentialRow.created_at)
+                )
+            )
+            if remaining:
+                if row.is_default:
+                    remaining[0].is_default = True
+                if row.scanner_default:
+                    remaining[0].scanner_default = True
+            if reconciliation_reason is not None:
                 await self._request_execution_reconciliation_in_session(
                     session,
                     reason=reconciliation_reason,
                 )
             await session.commit()
-            return bool(result.rowcount)
+            return True
 
     async def replace_instruments(self, exchange: str, pairs: list[InstrumentPair]) -> None:
         async with self.sessions() as session:

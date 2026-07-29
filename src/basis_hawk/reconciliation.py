@@ -147,7 +147,11 @@ class ReconciliationService:
                 state="reconciling",
                 reason="startup account reconciliation is running",
             )
-        summaries = await self.credentials.list()
+        summaries = [
+            summary
+            for summary in await self.credentials.list()
+            if summary.is_default
+        ]
         if not summaries:
             if safety_pause_reason is None:
                 await self.database.set_execution_control(

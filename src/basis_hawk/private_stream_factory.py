@@ -18,6 +18,8 @@ async def create_private_stream_connections(
 ) -> list[PrivateStreamConnection]:
     connections: list[PrivateStreamConnection] = []
     for summary in await credentials.list():
+        if not summary.is_default:
+            continue
         connections.append(
             await create_private_stream_connection(
                 credentials,
@@ -34,7 +36,7 @@ async def create_private_stream_connection(
     *,
     timeout_seconds: float,
 ) -> PrivateStreamConnection:
-    secrets = await credentials.load(summary.exchange, summary.environment)
+    secrets = await credentials.load_by_id(summary.id)
     if secrets is None:
         raise ValueError("private stream credentials were removed")
     connection_types = {

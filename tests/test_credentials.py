@@ -7,6 +7,7 @@ import pytest
 from basis_hawk.accounts import AccountSnapshot, PositionMode
 from basis_hawk.api import create_app
 from basis_hawk.credentials import (
+    AccountFeeSchedule,
     CredentialService,
     ExchangeEnvironment,
     ExchangeSecrets,
@@ -131,6 +132,193 @@ async def test_gate_live_and_sandbox_credentials_are_stored_independently() -> N
         (Exchange.GATE, ExchangeEnvironment.LIVE, "live"),
         (Exchange.GATE, ExchangeEnvironment.SANDBOX, "sandbox"),
     }
+    await database.close()
+
+
+async def test_multiple_named_accounts_keep_independent_secrets_and_defaults() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    service = CredentialService(
+        database,
+        SecretCipher(SecretCipher.generate_key()),
+    )
+    first_secrets = ExchangeSecrets(
+        api_key="binance-first-key",
+        api_secret="binance-first-secret",
+    )
+    second_secrets = ExchangeSecrets(
+        api_key="binance-second-key",
+        api_secret="binance-second-secret",
+    )
+
+    first = await service.create_account(
+        exchange=Exchange.BINANCE,
+        environment=ExchangeEnvironment.LIVE,
+        label="main",
+        secrets=first_secrets,
+        actor="admin",
+    )
+    second = await service.create_account(
+        exchange=Exchange.BINANCE,
+        environment=ExchangeEnvironment.LIVE,
+        label="subaccount-a",
+        secrets=second_secrets,
+        actor="admin",
+        fees=AccountFeeSchedule(
+            spot_maker=Decimal("0.0008"),
+            spot_taker=Decimal("0.001"),
+            perpetual_maker=Decimal("0.0002"),
+            perpetual_taker=Decimal("0.0005"),
+            source="manual",
+        ),
+    )
+
+    assert first.id != second.id
+    assert first.is_default is True
+    assert first.scanner_default is True
+    assert second.is_default is False
+    assert second.scanner_default is False
+    assert await service.load_by_id(first.id) == first_secrets
+    assert await service.load_by_id(second.id) == second_secrets
+    assert (
+        await service.load(Exchange.BINANCE, ExchangeEnvironment.LIVE)
+        == first_secrets
+    )
+
+    updated = await service.set_defaults(
+        second.id,
+        trading_default=True,
+        scanner_default=True,
+        actor="admin",
+    )
+    assert updated.is_default is True
+    assert updated.scanner_default is True
+    assert (
+        await service.load(Exchange.BINANCE, ExchangeEnvironment.LIVE)
+        == second_secrets
+    )
+    refreshed_first = await service.summary(first.id)
+    assert refreshed_first is not None
+    assert refreshed_first.is_default is False
+    assert refreshed_first.scanner_default is False
+
+    assert await service.delete_account(second.id, actor="admin") is True
+    promoted = await service.summary(first.id)
+    assert promoted is not None
+    assert promoted.is_default is True
+    assert promoted.scanner_default is True
+    await database.close()
+
+
+async def test_v2_account_api_uses_account_ids_and_never_returns_secrets() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    scanner = ScannerService(database, {})
+    await scanner.initialize()
+    credentials = CredentialService(
+        database,
+        SecretCipher(SecretCipher.generate_key()),
+    )
+    received_keys: list[str] = []
+
+    class FakeAccountClient:
+        async def snapshot(self) -> AccountSnapshot:
+            return AccountSnapshot(
+                exchange=Exchange.BINANCE,
+                environment=ExchangeEnvironment.LIVE,
+                observed_at=datetime.now(UTC),
+                spot_usdt_available=Decimal("12"),
+                perp_usdt_available=Decimal("11"),
+                perp_usdt_equity=Decimal("11"),
+                shared_balance=False,
+                account_mode="spot+usdt_futures",
+                position_mode=PositionMode.ONE_WAY,
+                trade_permission=True,
+            )
+
+        async def close(self) -> None:
+            return None
+
+    def account_factory(exchange, secrets, environment):
+        assert exchange == Exchange.BINANCE
+        assert environment == ExchangeEnvironment.LIVE
+        received_keys.append(secrets.api_key)
+        return FakeAccountClient()
+
+    app = create_app(
+        scanner,
+        manage_lifecycle=False,
+        auth_required=False,
+        credential_service=credentials,
+        account_client_factory=account_factory,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        first = await client.post(
+            "/api/v2/accounts",
+            json={
+                "exchange": "binance",
+                "environment": "live",
+                "label": "main",
+                "api_key": "first-api-key",
+                "api_secret": "first-api-secret",
+            },
+        )
+        second = await client.post(
+            "/api/v2/accounts",
+            json={
+                "exchange": "binance",
+                "environment": "live",
+                "label": "subaccount",
+                "api_key": "second-api-key",
+                "api_secret": "second-api-secret",
+                "fees": {
+                    "spot_maker": "0.0008",
+                    "spot_taker": "0.001",
+                    "perpetual_maker": "0.0002",
+                    "perpetual_taker": "0.0005",
+                    "source": "manual",
+                },
+            },
+        )
+        assert first.status_code == 201
+        assert second.status_code == 201
+        second_id = second.json()["id"]
+
+        listing = await client.get("/api/v2/accounts")
+        assert listing.status_code == 200
+        assert len(listing.json()["items"]) == 2
+        assert "first-api-key" not in listing.text
+        assert "second-api-secret" not in listing.text
+
+        defaults = await client.post(
+            f"/api/v2/accounts/{second_id}/defaults",
+            json={"trading_default": True, "scanner_default": True},
+        )
+        assert defaults.status_code == 200
+        assert defaults.json()["trading_default"] is True
+        assert defaults.json()["scanner_default"] is True
+
+        fees = await client.put(
+            f"/api/v2/accounts/{second_id}/fees",
+            json={
+                "spot_maker": "0.0007",
+                "spot_taker": "0.0009",
+                "perpetual_maker": "0.0001",
+                "perpetual_taker": "0.0004",
+            },
+        )
+        assert fees.status_code == 200
+        assert fees.json()["fees"]["source"] == "manual"
+        assert fees.json()["fees"]["spot_maker"] == "0.0007"
+
+        snapshot = await client.get(
+            f"/api/v2/accounts/{second_id}/snapshot"
+        )
+        assert snapshot.status_code == 200
+        assert snapshot.json()["snapshot"]["spot_usdt_available"] == "12"
+        assert received_keys == ["second-api-key"]
     await database.close()
 
 

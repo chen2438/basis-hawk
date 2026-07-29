@@ -34,7 +34,9 @@ from basis_hawk.automation import AutoStrategyConfig
 from basis_hawk.backup import BackupError, backup_status, delete_backup, delete_backups
 from basis_hawk.config import get_config
 from basis_hawk.credentials import (
+    AccountFeeSchedule,
     CredentialService,
+    CredentialSummary,
     ExchangeEnvironment,
     ExchangeSecrets,
 )
@@ -85,9 +87,49 @@ class CredentialRequest(BaseModel):
     position_mode: Literal["one_way", "hedge"] | None = None
 
 
+class AccountCreateRequest(CredentialRequest):
+    exchange: Exchange
+    environment: ExchangeEnvironment
+    trading_default: bool = False
+    scanner_default: bool = False
+    fees: AccountFeeSchedule | None = None
+
+
+class AccountReplaceRequest(CredentialRequest):
+    fees: AccountFeeSchedule | None = None
+
+
+class AccountDefaultsRequest(BaseModel):
+    trading_default: bool = False
+    scanner_default: bool = False
+
+
+class AccountFeeRequest(BaseModel):
+    spot_maker: Decimal | None = Field(default=None, ge=0, le=Decimal("0.1"))
+    spot_taker: Decimal | None = Field(default=None, ge=0, le=Decimal("0.1"))
+    perpetual_maker: Decimal | None = Field(default=None, ge=0, le=Decimal("0.1"))
+    perpetual_taker: Decimal | None = Field(default=None, ge=0, le=Decimal("0.1"))
+
+
 class BybitPositionModeRequest(BaseModel):
     position_mode: Literal["one_way", "hedge"]
     confirmed: Literal[True]
+
+
+def _account_summary_payload(summary: CredentialSummary) -> dict[str, object]:
+    return {
+        "id": summary.id,
+        "exchange": summary.exchange,
+        "environment": summary.environment,
+        "label": summary.label,
+        "masked_api_key": summary.masked_api_key,
+        "position_mode": summary.position_mode,
+        "trading_default": summary.is_default,
+        "scanner_default": summary.scanner_default,
+        "capabilities": summary.capabilities.model_dump(mode="json"),
+        "fees": summary.fees.model_dump(mode="json"),
+        "updated_at": summary.updated_at.isoformat(),
+    }
 
 
 class PaperOpenRequest(BaseModel):
@@ -2114,6 +2156,216 @@ def create_app(
             "intent": intent.model_dump(mode="json"),
         }
 
+    @app.get("/api/v2/accounts")
+    async def v2_account_summaries() -> dict[str, object]:
+        if credential_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        return {
+            "items": [
+                _account_summary_payload(item)
+                for item in await credential_service.list()
+            ]
+        }
+
+    @app.post("/api/v2/accounts", status_code=201)
+    async def create_v2_account(
+        value: AccountCreateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        if credential_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        try:
+            summary = await credential_service.create_account(
+                exchange=value.exchange,
+                environment=value.environment,
+                label=value.label,
+                secrets=ExchangeSecrets(
+                    api_key=value.api_key.get_secret_value(),
+                    api_secret=value.api_secret.get_secret_value(),
+                    passphrase=(
+                        value.passphrase.get_secret_value()
+                        if value.passphrase is not None
+                        else None
+                    ),
+                    position_mode=value.position_mode,
+                ),
+                actor=getattr(request.state, "admin", None).username
+                if getattr(request.state, "admin", None)
+                else "local",
+                trading_default=value.trading_default,
+                scanner_default=value.scanner_default,
+                fees=value.fees,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return _account_summary_payload(summary)
+
+    @app.put("/api/v2/accounts/{account_id}")
+    async def replace_v2_account(
+        account_id: str,
+        value: AccountReplaceRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        if credential_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        try:
+            summary = await credential_service.replace_account(
+                account_id,
+                label=value.label,
+                secrets=ExchangeSecrets(
+                    api_key=value.api_key.get_secret_value(),
+                    api_secret=value.api_secret.get_secret_value(),
+                    passphrase=(
+                        value.passphrase.get_secret_value()
+                        if value.passphrase is not None
+                        else None
+                    ),
+                    position_mode=value.position_mode,
+                ),
+                actor=getattr(request.state, "admin", None).username
+                if getattr(request.state, "admin", None)
+                else "local",
+                fees=value.fees,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return _account_summary_payload(summary)
+
+    @app.post("/api/v2/accounts/{account_id}/defaults")
+    async def set_v2_account_defaults(
+        account_id: str,
+        value: AccountDefaultsRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        if credential_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        if not value.trading_default and not value.scanner_default:
+            raise HTTPException(
+                status_code=422,
+                detail="at least one default role must be selected",
+            )
+        current = await credential_service.summary(account_id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="account is not configured")
+        try:
+            summary = await credential_service.set_defaults(
+                account_id,
+                trading_default=value.trading_default or current.is_default,
+                scanner_default=value.scanner_default or current.scanner_default,
+                actor=getattr(request.state, "admin", None).username
+                if getattr(request.state, "admin", None)
+                else "local",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return _account_summary_payload(summary)
+
+    @app.put("/api/v2/accounts/{account_id}/fees")
+    async def set_v2_account_fees(
+        account_id: str,
+        value: AccountFeeRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        if credential_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        if all(item is None for item in value.model_dump().values()):
+            raise HTTPException(
+                status_code=422,
+                detail="at least one fee override is required",
+            )
+        try:
+            summary = await credential_service.update_account_metadata(
+                account_id,
+                fees=AccountFeeSchedule(
+                    **value.model_dump(),
+                    source="manual",
+                    checked_at=datetime.now(UTC),
+                ),
+                actor=getattr(request.state, "admin", None).username
+                if getattr(request.state, "admin", None)
+                else "local",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return _account_summary_payload(summary)
+
+    @app.get("/api/v2/accounts/{account_id}/snapshot")
+    async def v2_account_snapshot(account_id: str) -> dict[str, object]:
+        if credential_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        summary = await credential_service.summary(account_id)
+        secrets = await credential_service.load_by_id(account_id)
+        if summary is None or secrets is None:
+            raise HTTPException(status_code=404, detail="account is not configured")
+        try:
+            client = resolved_account_client_factory(
+                summary.exchange,
+                secrets,
+                summary.environment,
+            )
+        except (UnsupportedEnvironmentError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        try:
+            snapshot = await client.snapshot()
+        except (
+            ArithmeticError,
+            KeyError,
+            PrivateRequestError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{summary.exchange.value} private account probe failed",
+            ) from exc
+        finally:
+            await client.close()
+        return {
+            "account_id": account_id,
+            "snapshot": snapshot.model_dump(mode="json"),
+        }
+
+    @app.delete("/api/v2/accounts/{account_id}", status_code=204)
+    async def delete_v2_account(
+        account_id: str,
+        request: Request,
+    ) -> Response:
+        if credential_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        try:
+            deleted = await credential_service.delete_account(
+                account_id,
+                actor=getattr(request.state, "admin", None).username
+                if getattr(request.state, "admin", None)
+                else "local",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="account is not configured")
+        return Response(status_code=204)
+
     @app.get("/api/accounts/credentials")
     async def credential_summaries() -> dict[str, object]:
         if credential_service is None:
@@ -2129,6 +2381,7 @@ def create_app(
                     "updated_at": item.updated_at.isoformat(),
                 }
                 for item in await credential_service.list()
+                if item.is_default
             ]
         }
 

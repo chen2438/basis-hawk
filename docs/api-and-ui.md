@@ -80,6 +80,22 @@ Demo 模式入口。
 - `PUT /api/accounts/bybit/{sandbox|live}/position-mode`：要求 `confirmed=true`，只更新既有加密
   凭据中的单向/双向模式声明，不需要重新输入 Key，也不会修改交易所设置；用于 Bybit 空子账户不返回
   `positionIdx` 时完成只读能力声明；更新后同样热重载 Bybit 私有流并重新对账。
+
+通用多账户接口位于 `/api/v2/accounts`：
+
+- `GET /api/v2/accounts` 返回稳定账户 ID、交易/扫描默认标记、能力声明和账户级 Maker/Taker 费率；
+- `POST /api/v2/accounts` 新增具名账户，`PUT /api/v2/accounts/{account_id}` 替换凭据；同一交易所
+  与环境内标签唯一，首个账户强制成为交易和扫描默认，避免产生无默认组；
+- `POST /api/v2/accounts/{account_id}/defaults` 分别切换交易默认和扫描默认；服务先清除旧默认并
+  flush，再设置新默认，满足部分唯一索引且不依赖 ORM 更新顺序；
+- `PUT /api/v2/accounts/{account_id}/fees` 写入账户实际费率或人工覆盖值及来源；
+- `GET /api/v2/accounts/{account_id}/snapshot` 按账户 ID 读取余额快照；
+  `DELETE /api/v2/accounts/{account_id}` 拒绝删除已被任务或策略引用的账户，删除默认账户时提升同组
+  最早的剩余账户。
+
+旧 `/api/accounts/...` 接口只操作交易默认账户，现有私有流、对账和双腿执行器也只消费该默认账户，
+直到通用账户级 worker 接管。所有列表、审计和 API 响应都只返回掩码与脱敏元数据，不返回明文密钥。
+
 - `GET /api/system/execution`：读取 worker 的全局执行阻断状态，以及各账户最近一次启动对账状态、
   私有流就绪状态、远端结果完整性、挂单数和仓位数。真实订单预检失败时 `reason` 使用
   `live_order_preflight:{exchange}:{safe_code}`，前端翻译为带交易所和失败阶段的中文说明；该值不含
