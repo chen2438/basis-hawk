@@ -34,6 +34,9 @@ export interface ExchangeStatus {
   error: string | null;
   instruments: number;
   history_ready: number;
+  history_progress_percent: number;
+  history_download_rate_per_minute: number | null;
+  history_syncing: boolean;
 }
 
 export interface FeeRate { spot_taker: string; perp_taker: string }

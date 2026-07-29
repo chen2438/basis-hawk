@@ -18,7 +18,18 @@ describe("Basis Hawk dashboard", () => {
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       const value = url.includes("auth/session") ? { username: "admin" }
         : url.includes("opportunities?") ? { items: [], sequence: 0 }
-        : url.includes("exchanges/status") ? { items: [] }
+        : url.includes("exchanges/status") ? { items: [{
+          exchange: "binance",
+          state: "healthy",
+          last_quote_at: "2026-07-29T10:00:00Z",
+          latency_ms: 785,
+          error: null,
+          instruments: 362,
+          history_ready: 181,
+          history_progress_percent: 50,
+          history_download_rate_per_minute: 12.5,
+          history_syncing: true,
+        }] }
         : url.includes("system/execution") ? { state: "blocked", reason: "worker pending", updated_at: null, accounts: [] }
         : url.includes("operations/audit") ? { items: [] }
         : url.includes("operations/notifications") ? { items: [] }
@@ -188,6 +199,12 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByRole("button", { name: "市场总览" })).toBeTruthy();
     expect(screen.getAllByText("Bitget").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Gate").length).toBeGreaterThan(0);
+    await waitFor(() => {
+      expect(screen.getByText("预热 50.0%（181/362）· 下载 12.5 标的/分")).toBeTruthy();
+      expect(
+        screen.getByRole("progressbar", { name: "Binance 预热进度" }).getAttribute("aria-valuenow"),
+      ).toBe("50");
+    });
   });
 
   it("translates safe live preflight reasons for execution and ledger views", () => {

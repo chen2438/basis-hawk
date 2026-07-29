@@ -182,3 +182,6 @@ class ExchangeStatus(BaseModel):
     error: str | None = None
     instruments: int = 0
     history_ready: int = 0
+    history_progress_percent: float = 0.0
+    history_download_rate_per_minute: float | None = None
+    history_syncing: bool = False

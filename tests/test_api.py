@@ -16,6 +16,7 @@ from basis_hawk.credentials import (
 from basis_hawk.crypto import SecretCipher
 from basis_hawk.models import (
     Exchange,
+    ExchangeStatus,
     InstrumentPair,
     Opportunity,
     Quality,
@@ -120,6 +121,15 @@ async def test_rest_contract_and_settings() -> None:
     service = ScannerService(database, {})
     await service.initialize()
     service.opportunities["binance:BTC"] = opportunity()
+    service.statuses[Exchange.BINANCE] = ExchangeStatus(
+        exchange=Exchange.BINANCE,
+        state="healthy",
+        instruments=20,
+        history_ready=5,
+        history_progress_percent=25.0,
+        history_download_rate_per_minute=12.5,
+        history_syncing=True,
+    )
     app = create_app(service, manage_lifecycle=False, auth_required=False)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -129,6 +139,11 @@ async def test_rest_contract_and_settings() -> None:
         execution = await client.get("/api/system/execution")
         assert execution.json()["state"] == "blocked"
         assert execution.json()["accounts"] == []
+        exchange_status = (await client.get("/api/exchanges/status")).json()["items"][0]
+        assert exchange_status["history_ready"] == 5
+        assert exchange_status["history_progress_percent"] == 25.0
+        assert exchange_status["history_download_rate_per_minute"] == 12.5
+        assert exchange_status["history_syncing"] is True
         response = await client.get("/api/opportunities", params={"exchange": "binance"})
         assert response.status_code == 200
         assert response.json()["items"][0]["spot_ask"] == "100"

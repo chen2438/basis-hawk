@@ -193,7 +193,29 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
       <section className="status-strip">
         {exchanges.map((name) => {
           const status = statuses.find((item) => item.exchange === name);
-          return <div className="exchange-status" key={name}><span className={`status-dot ${status?.state ?? "starting"}`} /><div><strong>{exchangeNames[name]}</strong><small>{status ? `${status.instruments} 标的 · ${status.latency_ms ?? "—"}ms` : "正在连接"}</small></div></div>;
+          const progress = Math.min(100, Math.max(0, status?.history_progress_percent ?? 0));
+          const downloadRate = status?.history_download_rate_per_minute;
+          const downloadLabel = downloadRate == null
+            ? "等待下载"
+            : `${downloadRate.toFixed(1)} 标的/分`;
+          return <div className="exchange-status" key={name}>
+            <span className={`status-dot ${status?.state ?? "starting"}`} />
+            <div>
+              <strong>{exchangeNames[name]}</strong>
+              <small>{status ? `${status.instruments} 标的 · 行情 ${status.latency_ms ?? "—"}ms` : "正在连接"}</small>
+              {status && <>
+                <small>预热 {progress.toFixed(1)}%（{status.history_ready}/{status.instruments}）· 下载 {downloadLabel}</small>
+                <span
+                  className="history-progress"
+                  role="progressbar"
+                  aria-label={`${exchangeNames[name]} 预热进度`}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={progress}
+                ><i style={{ width: `${progress}%` }} /></span>
+              </>}
+            </div>
+          </div>;
         })}
       </section>
 

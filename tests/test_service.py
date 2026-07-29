@@ -184,3 +184,28 @@ async def test_refreshes_and_recalculates() -> None:
         assert instrument.spot_quantity_increment == Decimal("0.00001")
         assert instrument.perp_contract_size == Decimal("1")
     await database.close()
+
+
+async def test_reports_live_history_download_rate_and_warmup_progress() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    service = ScannerService(database, {Exchange.BINANCE: FakeAdapter()})
+    await service.initialize()
+    await service.refresh_catalog(Exchange.BINANCE)
+
+    await service.refresh_history(Exchange.BINANCE)
+
+    status = service.statuses[Exchange.BINANCE]
+    assert status.instruments == 1
+    assert status.history_ready == 1
+    assert status.history_progress_percent == 100.0
+    assert status.history_download_rate_per_minute is not None
+    assert status.history_download_rate_per_minute > 0
+    assert status.history_syncing is False
+
+    previous_rate = status.history_download_rate_per_minute
+    await service.refresh_history(Exchange.BINANCE)
+    assert (
+        service.statuses[Exchange.BINANCE].history_download_rate_per_minute
+        == previous_rate
+    )
+    await database.close()

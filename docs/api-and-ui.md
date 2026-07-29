@@ -69,6 +69,10 @@
   私有流就绪状态、远端结果完整性、挂单数和仓位数。真实订单预检失败时 `reason` 使用
   `live_order_preflight:{exchange}:{safe_code}`，前端翻译为带交易所和失败阶段的中文说明；该值不含
   交易所原始异常、请求 URL、签名或凭据。
+- `GET /api/exchanges/status`：除目录数和行情刷新延迟外，按交易所返回
+  `history_ready`、`history_progress_percent`、`history_download_rate_per_minute` 和
+  `history_syncing`。预热比例按已覆盖至少 6 天历史的候选数计算；下载速度是当前/最近一轮成功下载
+  的历史标的数每分钟，不是网络字节吞吐。市场总览每 5 秒刷新并用百分比、完成数量和进度条展示。
 - `POST /api/trades/paper/open`：使用当前健康机会持久化纸面开仓意图和现货买入/永续卖出双腿；
   必须提供 UUID `Idempotency-Key`，随后由唯一 worker 原子模拟双腿 taker 成交。
 - `GET /api/trades/intents/{uuid}`：读取交易意图、版本、双腿状态及可空的脱敏 `failure_code`。

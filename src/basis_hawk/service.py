@@ -153,47 +153,97 @@ class ScannerService:
             if not self.pairs[exchange]:
                 await self._wait(1)
                 continue
-            adapter = self.adapters[exchange]
-            end = datetime.now(UTC)
-            start = end - timedelta(days=7, hours=12)
-            ready = 0
-            for pair in self._prioritized_history_pairs(exchange):
-                if self._stopping.is_set():
-                    return
-                try:
+            await self.refresh_history(exchange)
+            await self._wait(900)
+
+    async def refresh_history(self, exchange: Exchange) -> None:
+        adapter = self.adapters[exchange]
+        end = datetime.now(UTC)
+        start = end - timedelta(days=7, hours=12)
+        started = monotonic()
+        downloaded = 0
+        self._update_history_status(
+            exchange,
+            downloaded=downloaded,
+            started=started,
+            syncing=True,
+        )
+        for pair in self._prioritized_history_pairs(exchange):
+            if self._stopping.is_set():
+                return
+            try:
+                persisted = await self.database.funding_history(
+                    exchange.value, pair.base_asset, since=start
+                )
+                needs_remote = not persisted or end - persisted[0].funding_at < timedelta(
+                    days=6
+                )
+                if needs_remote:
+                    fetched = await adapter.funding_history(pair, start=start, end=end)
+                    await self.database.save_funding(fetched)
                     persisted = await self.database.funding_history(
                         exchange.value, pair.base_asset, since=start
                     )
-                    needs_remote = not persisted or end - persisted[0].funding_at < timedelta(
-                        days=6
-                    )
-                    if needs_remote:
-                        fetched = await adapter.funding_history(pair, start=start, end=end)
-                        await self.database.save_funding(fetched)
-                        persisted = await self.database.funding_history(
-                            exchange.value, pair.base_asset, since=start
-                        )
-                    self.history[pair.key] = persisted
-                    if persisted and persisted[-1].funding_at - persisted[
-                        0
-                    ].funding_at >= timedelta(days=6):
-                        ready += 1
-                    self._rebuild(pair.key)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.info(
-                        "funding history unavailable",
-                        extra={
-                            "exchange": exchange.value,
-                            "symbol": pair.base_asset,
-                            "error": str(exc),
-                        },
-                    )
-            self.statuses[exchange] = self.statuses[exchange].model_copy(
-                update={"history_ready": ready}
+                    downloaded += 1
+                self.history[pair.key] = persisted
+                self._rebuild(pair.key)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.info(
+                    "funding history unavailable",
+                    extra={
+                        "exchange": exchange.value,
+                        "symbol": pair.base_asset,
+                        "error": str(exc),
+                    },
+                )
+            self._update_history_status(
+                exchange,
+                downloaded=downloaded,
+                started=started,
+                syncing=True,
             )
-            await self._wait(900)
+        self._update_history_status(
+            exchange,
+            downloaded=downloaded,
+            started=started,
+            syncing=False,
+        )
+
+    def _history_ready_count(self, exchange: Exchange) -> int:
+        return sum(
+            1
+            for pair in self.pairs[exchange]
+            if (history := self.history.get(pair.key))
+            and history[-1].funding_at - history[0].funding_at >= timedelta(days=6)
+        )
+
+    def _update_history_status(
+        self,
+        exchange: Exchange,
+        *,
+        downloaded: int,
+        started: float,
+        syncing: bool,
+    ) -> None:
+        total = len(self.pairs[exchange])
+        ready = self._history_ready_count(exchange)
+        elapsed = max(monotonic() - started, 0.001)
+        rate = (
+            round(downloaded * 60 / elapsed, 1)
+            if downloaded
+            else self.statuses[exchange].history_download_rate_per_minute
+        )
+        progress = round(ready * 100 / total, 1) if total else 0.0
+        self.statuses[exchange] = self.statuses[exchange].model_copy(
+            update={
+                "history_ready": ready,
+                "history_progress_percent": progress,
+                "history_download_rate_per_minute": rate,
+                "history_syncing": syncing,
+            }
+        )
 
     def _prioritized_history_pairs(self, exchange: Exchange) -> list[InstrumentPair]:
         fee = self.settings.fees[exchange]
@@ -259,6 +309,12 @@ class ScannerService:
             update={
                 "last_catalog_at": datetime.now(UTC),
                 "instruments": len(selected),
+                "history_ready": self._history_ready_count(exchange),
+                "history_progress_percent": (
+                    round(self._history_ready_count(exchange) * 100 / len(selected), 1)
+                    if selected
+                    else 0.0
+                ),
             }
         )
 
