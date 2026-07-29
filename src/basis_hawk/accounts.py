@@ -10,7 +10,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from enum import StrEnum
 from typing import Any, Literal
 from urllib.parse import urlencode
@@ -39,6 +39,17 @@ class PositionMode(StrEnum):
 class PerpMarginMode(StrEnum):
     ISOLATED = "isolated"
     CROSS = "cross"
+
+
+class OrderMode(StrEnum):
+    MAKER = "maker"
+    PROTECTED_IOC = "protected_ioc"
+    MARKET = "market"
+
+
+class PerpPositionSide(StrEnum):
+    LONG = "long"
+    SHORT = "short"
 
 
 class PrivateRequestError(RuntimeError):
@@ -93,6 +104,56 @@ class LimitIocOrder(BaseModel):
             raise ValueError("opening short orders cannot be reduce-only")
         if self.side == "buy" and not self.reduce_only:
             raise ValueError("short-closing buy orders must be reduce-only")
+        return self
+
+
+class PrivateOrderRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    market: Literal["spot", "perp"]
+    symbol: str = Field(min_length=1, max_length=100)
+    side: Literal["buy", "sell"]
+    quantity: Decimal = Field(gt=0)
+    mode: OrderMode
+    limit_price: Decimal | None = Field(default=None, gt=0)
+    client_order_id: str = Field(min_length=1, max_length=64)
+    reduce_only: bool = False
+    position_mode: PositionMode = PositionMode.UNKNOWN
+    position_side: PerpPositionSide | None = None
+    margin_mode: PerpMarginMode = PerpMarginMode.ISOLATED
+
+    @field_validator("symbol", "client_order_id")
+    @classmethod
+    def reject_surrounding_whitespace(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError("order identifiers cannot contain surrounding whitespace")
+        return value
+
+    @model_validator(mode="after")
+    def validate_order_semantics(self) -> PrivateOrderRequest:
+        if self.mode == OrderMode.MARKET:
+            if self.limit_price is not None:
+                raise ValueError("market orders cannot include a limit price")
+        elif self.limit_price is None:
+            raise ValueError("maker and protected IOC orders require a limit price")
+        if self.market == "spot":
+            if self.reduce_only:
+                raise ValueError("spot orders cannot be reduce-only")
+            if self.position_side is not None:
+                raise ValueError("spot orders cannot include a position side")
+            return self
+        if self.position_mode == PositionMode.UNKNOWN:
+            raise ValueError("perpetual position mode must be known")
+        if self.position_mode == PositionMode.HEDGE and self.position_side is None:
+            raise ValueError("hedge-mode perpetual orders require a position side")
+        if self.position_side == PerpPositionSide.LONG:
+            expected = "sell" if self.reduce_only else "buy"
+            if self.side != expected:
+                raise ValueError("order side does not match the long position action")
+        if self.position_side == PerpPositionSide.SHORT:
+            expected = "buy" if self.reduce_only else "sell"
+            if self.side != expected:
+                raise ValueError("order side does not match the short position action")
         return self
 
 
@@ -279,6 +340,25 @@ class RemoteFundingIncomeBatch(BaseModel):
     incomplete_reason: str | None = None
 
 
+class RemoteAdlPosition(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    position_side: Literal["long", "short", "net"]
+    native_value: str
+    risk_level: int = Field(ge=1, le=5)
+    observed_at: datetime
+
+
+class RemoteAdlBatch(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    positions: list[RemoteAdlPosition]
+    complete: bool
+    incomplete_reason: str | None = None
+    event_only: bool = False
+
+
 class RemoteOrderLookup(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -353,6 +433,27 @@ def _hmac_base64(secret: str, value: str) -> str:
 
 def _plain_decimal(value: Decimal) -> str:
     return format(value.normalize(), "f")
+
+
+def _adl_risk_level(value: object, *, zero_based: bool = False) -> int:
+    try:
+        rank = int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ADL rank is not an integer") from exc
+    if zero_based:
+        rank += 1
+    return min(5, max(1, rank))
+
+
+def _adl_fraction_risk_level(value: object) -> int:
+    try:
+        rank = Decimal(str(value))
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise ValueError("ADL rank is not a decimal") from exc
+    if not rank.is_finite():
+        raise ValueError("ADL rank must be finite")
+    scaled = int((rank * 5).to_integral_value(rounding=ROUND_CEILING))
+    return min(5, max(1, scaled))
 
 
 def _safe_remote_error_code(response: httpx.Response) -> str | None:
@@ -453,9 +554,34 @@ class PrivateAccountClient(ABC):
             ),
         )
 
-    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
+    async def adl_ranks(self) -> RemoteAdlBatch:
+        return RemoteAdlBatch(
+            positions=[],
+            complete=False,
+            incomplete_reason=f"{self.exchange.value} live ADL rank is unavailable",
+        )
+
+    async def place_order(self, order: PrivateOrderRequest) -> OrderSubmission:
         raise UnsupportedTradingError(
             f"{self.exchange.value} order placement is not implemented"
+        )
+
+    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
+        return await self.place_order(
+            PrivateOrderRequest(
+                market=order.market,
+                symbol=order.symbol,
+                side=order.side,
+                quantity=order.quantity,
+                mode=OrderMode.PROTECTED_IOC,
+                limit_price=order.limit_price,
+                client_order_id=order.client_order_id,
+                reduce_only=order.reduce_only,
+                position_mode=order.position_mode,
+                position_side=(
+                    PerpPositionSide.SHORT if order.market == "perp" else None
+                ),
+            )
         )
 
     async def cancel_order(
@@ -861,7 +987,41 @@ class BinanceAccountClient(PrivateAccountClient):
             exchange="Binance",
         )
 
-    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
+    async def adl_ranks(self) -> RemoteAdlBatch:
+        payload = await self._signed_request(
+            self.perp,
+            "GET",
+            "/fapi/v1/adlQuantile",
+        )
+        if not isinstance(payload, list):
+            raise PrivateRequestError("Binance ADL response is not a list")
+        observed_at = datetime.now(UTC)
+        positions: list[RemoteAdlPosition] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            ranks = item.get("adlQuantile")
+            if not isinstance(ranks, dict):
+                continue
+            for native_side, value in ranks.items():
+                if str(native_side).upper() not in {"LONG", "SHORT", "BOTH"}:
+                    continue
+                positions.append(
+                    RemoteAdlPosition(
+                        symbol=str(item.get("symbol") or ""),
+                        position_side={
+                            "LONG": "long",
+                            "SHORT": "short",
+                            "BOTH": "net",
+                        }[str(native_side).upper()],
+                        native_value=str(value),
+                        risk_level=_adl_risk_level(value, zero_based=True),
+                        observed_at=observed_at,
+                    )
+                )
+        return RemoteAdlBatch(positions=positions, complete=True)
+
+    async def place_order(self, order: PrivateOrderRequest) -> OrderSubmission:
         if len(order.client_order_id) > 36:
             raise ValueError("Binance client order IDs cannot exceed 36 characters")
         client = self.spot if order.market == "spot" else self.perp
@@ -869,16 +1029,28 @@ class BinanceAccountClient(PrivateAccountClient):
         params: dict[str, object] = {
             "symbol": order.symbol,
             "side": order.side.upper(),
-            "type": "LIMIT",
-            "timeInForce": "IOC",
             "quantity": format(order.quantity, "f"),
-            "price": format(order.limit_price, "f"),
             "newClientOrderId": order.client_order_id,
             "newOrderRespType": "RESULT",
         }
+        if order.mode == OrderMode.MARKET:
+            params["type"] = "MARKET"
+        else:
+            params["type"] = (
+                "LIMIT_MAKER"
+                if order.market == "spot" and order.mode == OrderMode.MAKER
+                else "LIMIT"
+            )
+            params["price"] = format(order.limit_price, "f")
+            if order.market == "perp" and order.mode == OrderMode.MAKER:
+                params["timeInForce"] = "GTX"
+            elif order.mode == OrderMode.PROTECTED_IOC:
+                params["timeInForce"] = "IOC"
         if order.market == "perp":
             if order.position_mode == PositionMode.HEDGE:
-                params["positionSide"] = "SHORT"
+                params["positionSide"] = (
+                    order.position_side or PerpPositionSide.SHORT
+                ).value.upper()
             else:
                 params["positionSide"] = "BOTH"
                 params["reduceOnly"] = str(order.reduce_only).lower()
@@ -1273,23 +1445,54 @@ class OkxAccountClient(PrivateAccountClient):
             exchange="OKX",
         )
 
-    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
+    async def adl_ranks(self) -> RemoteAdlBatch:
+        payload = await self._get("/api/v5/account/positions", instType="SWAP")
+        _okx_success(payload)
+        observed_at = datetime.now(UTC)
+        positions = [
+            RemoteAdlPosition(
+                symbol=str(item.get("instId") or ""),
+                position_side=(
+                    str(item.get("posSide") or "net").lower()
+                    if str(item.get("posSide") or "net").lower()
+                    in {"long", "short", "net"}
+                    else "net"
+                ),
+                native_value=str(item.get("adl")),
+                risk_level=_adl_risk_level(item.get("adl")),
+                observed_at=observed_at,
+            )
+            for item in payload.get("data") or []
+            if item.get("adl") not in (None, "")
+        ]
+        return RemoteAdlBatch(positions=positions, complete=True)
+
+    async def place_order(self, order: PrivateOrderRequest) -> OrderSubmission:
         if not re.fullmatch(r"[A-Za-z0-9]{1,32}", order.client_order_id):
             raise ValueError(
                 "OKX client order IDs must be at most 32 alphanumeric characters"
             )
         values: dict[str, object] = {
             "instId": order.symbol,
-            "tdMode": "cash" if order.market == "spot" else "isolated",
+            "tdMode": (
+                "cash" if order.market == "spot" else order.margin_mode.value
+            ),
             "clOrdId": order.client_order_id,
             "side": order.side,
-            "ordType": "ioc",
-            "px": format(order.limit_price, "f"),
+            "ordType": {
+                OrderMode.MAKER: "post_only",
+                OrderMode.PROTECTED_IOC: "ioc",
+                OrderMode.MARKET: "market",
+            }[order.mode],
             "sz": format(order.quantity, "f"),
         }
+        if order.limit_price is not None:
+            values["px"] = format(order.limit_price, "f")
         if order.market == "perp":
             if order.position_mode == PositionMode.HEDGE:
-                values["posSide"] = "short"
+                values["posSide"] = (
+                    order.position_side or PerpPositionSide.SHORT
+                ).value
             else:
                 values["reduceOnly"] = order.reduce_only
         payload = await self._post("/api/v5/trade/order", **values)
@@ -1745,7 +1948,34 @@ class BybitAccountClient(PrivateAccountClient):
             exchange="Bybit",
         )
 
-    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
+    async def adl_ranks(self) -> RemoteAdlBatch:
+        payload = await self._get(
+            "/v5/position/list",
+            category="linear",
+            settleCoin="USDT",
+        )
+        result = _bybit_result(payload, "ADL rank")
+        observed_at = datetime.now(UTC)
+        positions = [
+            RemoteAdlPosition(
+                symbol=str(item.get("symbol") or ""),
+                position_side=(
+                    "long"
+                    if str(item.get("side") or "").lower() == "buy"
+                    else "short"
+                    if str(item.get("side") or "").lower() == "sell"
+                    else "net"
+                ),
+                native_value=str(item.get("adlRankIndicator")),
+                risk_level=_adl_risk_level(item.get("adlRankIndicator")),
+                observed_at=observed_at,
+            )
+            for item in result.get("list") or []
+            if item.get("adlRankIndicator") not in (None, "", 0, "0")
+        ]
+        return RemoteAdlBatch(positions=positions, complete=True)
+
+    async def place_order(self, order: PrivateOrderRequest) -> OrderSubmission:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,36}", order.client_order_id):
             raise ValueError(
                 "Bybit client order IDs must be at most 36 ASCII letters, numbers, "
@@ -1755,17 +1985,29 @@ class BybitAccountClient(PrivateAccountClient):
             "category": "spot" if order.market == "spot" else "linear",
             "symbol": order.symbol,
             "side": order.side.title(),
-            "orderType": "Limit",
+            "orderType": (
+                "Market" if order.mode == OrderMode.MARKET else "Limit"
+            ),
             "qty": format(order.quantity, "f"),
-            "price": format(order.limit_price, "f"),
-            "timeInForce": "IOC",
             "orderLinkId": order.client_order_id,
         }
+        if order.limit_price is not None:
+            values["price"] = format(order.limit_price, "f")
+        if order.mode == OrderMode.MAKER:
+            values["timeInForce"] = "PostOnly"
+        elif order.mode == OrderMode.PROTECTED_IOC:
+            values["timeInForce"] = "IOC"
         if order.market == "spot":
             values["isLeverage"] = 0
         else:
             values["positionIdx"] = (
-                2 if order.position_mode == PositionMode.HEDGE else 0
+                (
+                    1
+                    if order.position_side == PerpPositionSide.LONG
+                    else 2
+                )
+                if order.position_mode == PositionMode.HEDGE
+                else 0
             )
             values["reduceOnly"] = order.reduce_only
         payload = await self._post("/v5/order/create", **values)
@@ -2506,7 +2748,39 @@ class BitgetAccountClient(PrivateAccountClient):
             exchange="Bitget",
         )
 
-    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
+    async def adl_ranks(self) -> RemoteAdlBatch:
+        payload = await self._get(
+            "/api/v2/mix/position/adlRank",
+            productType="USDT-FUTURES",
+        )
+        _bitget_success(payload)
+        items = payload.get("data")
+        if not isinstance(items, list):
+            raise PrivateRequestError("Bitget ADL rank returned no result")
+        observed_at = datetime.now(UTC)
+        positions = [
+            RemoteAdlPosition(
+                symbol=str(item.get("symbol") or ""),
+                position_side=(
+                    str(item.get("holdSide") or item.get("posSide") or "net").lower()
+                    if str(
+                        item.get("holdSide") or item.get("posSide") or "net"
+                    ).lower()
+                    in {"long", "short", "net"}
+                    else "net"
+                ),
+                native_value=str(item.get("rank") or item.get("adlRank")),
+                risk_level=_adl_fraction_risk_level(
+                    item.get("rank") or item.get("adlRank")
+                ),
+                observed_at=observed_at,
+            )
+            for item in items
+            if (item.get("rank") or item.get("adlRank")) not in (None, "")
+        ]
+        return RemoteAdlBatch(positions=positions, complete=True)
+
+    async def place_order(self, order: PrivateOrderRequest) -> OrderSubmission:
         generation = await self._detect_account_generation()
         if generation == "uta":
             if not re.fullmatch(r"[.A-Za-z0-9_:/\-]{1,32}", order.client_order_id):
@@ -2518,16 +2792,24 @@ class BitgetAccountClient(PrivateAccountClient):
                 "category": _bitget_uta_category(order.market),
                 "symbol": order.symbol,
                 "qty": format(order.quantity, "f"),
-                "price": format(order.limit_price, "f"),
                 "side": order.side,
-                "orderType": "limit",
-                "timeInForce": "ioc",
+                "orderType": (
+                    "market" if order.mode == OrderMode.MARKET else "limit"
+                ),
                 "clientOid": order.client_order_id,
             }
+            if order.limit_price is not None:
+                values["price"] = format(order.limit_price, "f")
+            if order.mode == OrderMode.MAKER:
+                values["timeInForce"] = "post_only"
+            elif order.mode == OrderMode.PROTECTED_IOC:
+                values["timeInForce"] = "ioc"
             if order.market == "perp":
-                values["marginMode"] = "isolated"
+                values["marginMode"] = order.margin_mode.value
                 if order.position_mode == PositionMode.HEDGE:
-                    values["posSide"] = "short"
+                    values["posSide"] = (
+                        order.position_side or PerpPositionSide.SHORT
+                    ).value
                 elif order.reduce_only:
                     values["reduceOnly"] = "yes"
             payload = await self._post("/api/v3/trade/place-order", **values)
@@ -2554,24 +2836,34 @@ class BitgetAccountClient(PrivateAccountClient):
         values: dict[str, object] = {
             "symbol": order.symbol,
             "side": order.side,
-            "orderType": "limit",
-            "force": "ioc",
-            "price": format(order.limit_price, "f"),
+            "orderType": (
+                "market" if order.mode == OrderMode.MARKET else "limit"
+            ),
             "size": format(order.quantity, "f"),
             "clientOid": order.client_order_id,
         }
+        if order.limit_price is not None:
+            values["price"] = format(order.limit_price, "f")
+        if order.mode == OrderMode.MAKER:
+            values["force"] = "post_only"
+        elif order.mode == OrderMode.PROTECTED_IOC:
+            values["force"] = "ioc"
         path = "/api/v2/spot/trade/place-order"
         if order.market == "perp":
             path = "/api/v2/mix/order/place-order"
             values.update(
                 {
                     "productType": "USDT-FUTURES",
-                    "marginMode": "isolated",
+                    "marginMode": order.margin_mode.value,
                     "marginCoin": "USDT",
                 }
             )
             if order.position_mode == PositionMode.HEDGE:
-                values["side"] = "sell"
+                values["side"] = (
+                    "buy"
+                    if order.position_side == PerpPositionSide.LONG
+                    else "sell"
+                )
                 values["tradeSide"] = "close" if order.reduce_only else "open"
             else:
                 values["reduceOnly"] = "YES" if order.reduce_only else "NO"
@@ -3455,7 +3747,36 @@ class GateAccountClient(PrivateAccountClient):
             exchange="Gate",
         )
 
-    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
+    async def adl_ranks(self) -> RemoteAdlBatch:
+        payload = await self._get("/api/v4/futures/usdt/positions")
+        if not isinstance(payload, list):
+            raise PrivateRequestError("Gate ADL response is not a list")
+        observed_at = datetime.now(UTC)
+        positions = [
+            RemoteAdlPosition(
+                symbol=str(item.get("contract") or ""),
+                position_side=(
+                    "long"
+                    if str(item.get("mode") or "") == "dual_long"
+                    else "short"
+                    if str(item.get("mode") or "") == "dual_short"
+                    else "long"
+                    if Decimal(str(item.get("size") or "0")) > 0
+                    else "short"
+                    if Decimal(str(item.get("size") or "0")) < 0
+                    else "net"
+                ),
+                native_value=str(item.get("adl_ranking")),
+                risk_level=6 - int(str(item.get("adl_ranking"))),
+                observed_at=observed_at,
+            )
+            for item in payload
+            if isinstance(item, dict)
+            and str(item.get("adl_ranking") or "") in {"1", "2", "3", "4", "5"}
+        ]
+        return RemoteAdlBatch(positions=positions, complete=True)
+
+    async def place_order(self, order: PrivateOrderRequest) -> OrderSubmission:
         if (
             not re.fullmatch(r"t-[A-Za-z0-9_.-]+", order.client_order_id)
             or len(order.client_order_id.encode()) > 30
@@ -3465,17 +3786,27 @@ class GateAccountClient(PrivateAccountClient):
                 "characters, and contain at most 28 bytes after the prefix"
             )
         if order.market == "spot":
+            if order.mode == OrderMode.MARKET and order.side == "buy":
+                raise UnsupportedTradingError(
+                    "Gate spot market buys use quote quantity; use protected IOC "
+                    "when the task quantity is denominated in base asset"
+                )
             path = "/api/v4/spot/orders"
             body: dict[str, object] = {
                 "text": order.client_order_id,
                 "currency_pair": order.symbol,
-                "type": "limit",
+                "type": (
+                    "market" if order.mode == OrderMode.MARKET else "limit"
+                ),
                 "account": self._spot_account(),
                 "side": order.side,
                 "amount": _plain_decimal(order.quantity),
-                "price": _plain_decimal(order.limit_price),
-                "time_in_force": "ioc",
+                "time_in_force": (
+                    "poc" if order.mode == OrderMode.MAKER else "ioc"
+                ),
             }
+            if order.limit_price is not None:
+                body["price"] = _plain_decimal(order.limit_price)
         else:
             path = "/api/v4/futures/usdt/orders"
             signed_quantity = (
@@ -3489,8 +3820,14 @@ class GateAccountClient(PrivateAccountClient):
             body = {
                 "contract": order.symbol,
                 "size": wire_quantity,
-                "price": _plain_decimal(order.limit_price),
-                "tif": "ioc",
+                "price": (
+                    "0"
+                    if order.mode == OrderMode.MARKET
+                    else _plain_decimal(order.limit_price)
+                ),
+                "tif": (
+                    "poc" if order.mode == OrderMode.MAKER else "ioc"
+                ),
                 "text": order.client_order_id,
                 "reduce_only": order.reduce_only,
             }
@@ -4104,21 +4441,40 @@ class MexcAccountClient(PrivateAccountClient):
             exchange="MEXC",
         )
 
-    async def place_limit_ioc(self, order: LimitIocOrder) -> OrderSubmission:
+    async def adl_ranks(self) -> RemoteAdlBatch:
+        return RemoteAdlBatch(
+            positions=[],
+            complete=False,
+            incomplete_reason=(
+                "MEXC exposes ADL notifications as private events but does not "
+                "provide a live five-level position rank"
+            ),
+            event_only=True,
+        )
+
+    async def place_order(self, order: PrivateOrderRequest) -> OrderSubmission:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", order.client_order_id):
             raise ValueError(
                 "MEXC client order IDs must be at most 32 supported ASCII characters"
             )
         if order.market == "spot":
+            params: dict[str, object] = {
+                "symbol": order.symbol,
+                "side": order.side.upper(),
+                "type": {
+                    OrderMode.MAKER: "LIMIT_MAKER",
+                    OrderMode.PROTECTED_IOC: "IMMEDIATE_OR_CANCEL",
+                    OrderMode.MARKET: "MARKET",
+                }[order.mode],
+                "quantity": format(order.quantity, "f"),
+                "newClientOrderId": order.client_order_id,
+            }
+            if order.limit_price is not None:
+                params["price"] = format(order.limit_price, "f")
             item = await self._spot_signed(
                 "POST",
                 "/api/v3/order",
-                symbol=order.symbol,
-                side=order.side.upper(),
-                type="IMMEDIATE_OR_CANCEL",
-                quantity=format(order.quantity, "f"),
-                price=format(order.limit_price, "f"),
-                newClientOrderId=order.client_order_id,
+                **params,
             )
             if not isinstance(item, dict):
                 raise PrivateRequestError("MEXC spot order returned no result")
@@ -4143,12 +4499,37 @@ class MexcAccountClient(PrivateAccountClient):
             "/api/v1/private/order/submit",
             {
                 "symbol": order.symbol,
-                "price": format(order.limit_price, "f"),
+                "price": (
+                    format(order.limit_price, "f")
+                    if order.limit_price is not None
+                    else "0"
+                ),
                 "vol": format(order.quantity, "f"),
                 "leverage": leverage,
-                "side": 2 if order.reduce_only else 3,
-                "type": 3,
-                "openType": 1,
+                "side": {
+                    (PerpPositionSide.LONG, False): 1,
+                    (PerpPositionSide.SHORT, True): 2,
+                    (PerpPositionSide.SHORT, False): 3,
+                    (PerpPositionSide.LONG, True): 4,
+                }[
+                    (
+                        order.position_side
+                        or (
+                            PerpPositionSide.LONG
+                            if (order.side == "buy") != order.reduce_only
+                            else PerpPositionSide.SHORT
+                        ),
+                        order.reduce_only,
+                    )
+                ],
+                "type": {
+                    OrderMode.MAKER: 2,
+                    OrderMode.PROTECTED_IOC: 3,
+                    OrderMode.MARKET: 5,
+                }[order.mode],
+                "openType": (
+                    1 if order.margin_mode == PerpMarginMode.ISOLATED else 2
+                ),
                 "externalOid": order.client_order_id,
                 "positionMode": (
                     1 if order.position_mode == PositionMode.HEDGE else 2

@@ -96,10 +96,16 @@ OKX、Gate、MEXC 等交易所返回的合约张数。
 当前最优档容量以内的名义金额和 1–10 倍杠杆；Gate 支持使用独立 TestNet 凭据生成沙盒计划，
 MEXC 因无受支持合约沙盒仍拒绝沙盒计划。
 
-私有交易统一限定为限价 IOC。当前 Binance、OKX、Bybit、Bitget Classic V2/UTA V3、Gate
-LIVE/SANDBOX 及有特批
-Standard V1 权限的 MEXC 适配器已实现现货及 USDT 永续下单和按交易所/客户端订单 ID 撤单；永续仅
-允许“卖出开空”或“reduce-only 买回空仓”。
+v2 私有交易原语不再绑定固定双腿方向。统一订单输入支持现货和永续任意买卖方向、单向或双向
+`long|short` 持仓侧、reduce-only、逐仓或跨仓，以及 Maker、保护性 IOC、原生 Market 三种模式。
+Maker 分别映射为 Binance `LIMIT_MAKER/GTX`、OKX `post_only`、Bybit `PostOnly`、Bitget
+`post_only`、Gate `poc` 和 MEXC `type=2/LIMIT_MAKER`；Market 不携带虚构限价。Gate 现货 Market
+买单原生 `amount` 是计价币数量，与任务基础币数量语义不一致，因此该组合明确拒绝并要求使用保护性
+IOC，不能静默换算。当前旧双腿 worker 经兼容层仍只提交保护性 IOC。
+
+旧双腿执行路径中的 Binance、OKX、Bybit、Bitget Classic V2/UTA V3、Gate LIVE/SANDBOX 及有特批
+Standard V1 权限的 MEXC 适配器已实现现货及 USDT 永续下单和按交易所/客户端订单 ID 撤单；该路径
+仍只允许“卖出开空”或“reduce-only 买回空仓”。
 单向模式显式发送
 `reduceOnly`；Binance 双向模式发送 `positionSide=SHORT`，OKX 双向模式发送 `posSide=short`，
 两所都不发送其双向模式禁止或无效的 `reduceOnly` 参数，但本地仍保留 reduce-only 语义；Bybit 双向
@@ -145,6 +151,12 @@ Gate 成交时间同时接受整数或带小数的秒/毫秒字符串，以兼�
 成交量已经相等时不会仅因手续费另开一笔微小保护单，手续费仍计入收益。
 返回统一的接受回执，只证明交易所接受请求；最终订单状态与成交仍以私有成交流或 REST 查单/成交明细
 为准。该能力由已确认的实盘开平仓意图经唯一 worker 调用，HTTP 进程不直接发单。
+
+ADL 统一输出 1–5 级风险，5 表示最靠近自动减仓队首。Binance 原生 0–4 档加一；OKX 和 Bybit
+使用其 1–5 指示（空仓 0 不入列）；Bitget 使用 2025-07 后的连续 `rank`，按五等分向上归档，
+不再依赖已废弃的 `adlRank`；Gate 原生 1 为最高、5 为最低，因此反向映射并过滤无持仓/清算态的 6。
+MEXC 没有可轮询的实时五档值，只声明 `event_only=true` 并由后续私有事件消费者写入 ADL 事件，不能
+用 0 或默认值伪装低风险。
 
 API 行情进程在每次约 5 秒的价格刷新完成后，把该所当前完整 `Opportunity` 聚合成一份按交易所覆盖的
 JSON 数组写入 `latest_opportunities`；六所因此稳定为六行，而不是逐标的更新约 3,000 行。记录保留
