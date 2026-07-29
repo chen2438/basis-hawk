@@ -196,7 +196,9 @@ AES-GCM 关联数据加密；响应、审计事件和日志均不得包含 API S
 `paper` 环境不接受交易所凭据。
 
 账户快照使用各所官方只读接口和签名规则。签名错误、超时及 HTTP 错误统一映射为不带请求 URL、
-签名参数或响应原文的脱敏错误。Gate `sandbox` 使用独立 TestNet API Key 和
+签名参数或响应原文的脱敏错误。Binance `sandbox` 使用一组 Demo Trading Key，同时访问
+`https://demo-api.binance.com` 的现货账户和 `https://demo-fapi.binance.com` 的 USDⓈ-M 永续账户；
+不会把该 Key 发往独立且凭据不互通的 Spot Testnet。Gate `sandbox` 使用独立 TestNet API Key 和
 `https://api-testnet.gateapi.io`，可与 Gate `live` 凭据同时保存及对账，任一环境都不会回退到另一
 环境；MEXC 没有满足同所现货+USDT 永续完整验收要求的沙盒，其 `sandbox` 快照仍明确返回不支持。
 Bybit V5 使用 `settleCoin=USDT` 时不会返回

@@ -153,7 +153,9 @@
 - 已完成：私有流通用监督器，连接成功后登记订阅、仅以真实事件或已验证 ping/pong 更新心跳，并在异常
   断线后按上限 30 秒指数退避重连。
 - 已完成：Binance 现货签名 WebSocket API 与 USDT 永续 listenKey 私有流连接、双连接 ping/pong、
-  永续 listenKey 续期和安全关闭适配，并已装配到常驻 worker。
+  永续 listenKey 续期和安全关闭适配，并已装配到常驻 worker。Sandbox 统一使用同一组 Binance
+  Demo Trading Key 对应的 `demo-api`、`demo-ws-api`、`demo-fapi` 和 `demo-fstream` 官方地址，
+  不再把 Demo Key 错发到凭据隔离的 Spot Testnet。
 - 已完成：OKX 生产/模拟盘私有 WebSocket 登录、通用订单（含成交更新）、仓位和账户频道订阅、文本
   ping/pong 保活及 worker 装配；专用 fills 频道因 VIP 限制不作为就绪条件。
 - 已完成：Bybit 生产/测试网私有 WebSocket 认证、全品类订单、独立成交、仓位和钱包频道订阅、应用层

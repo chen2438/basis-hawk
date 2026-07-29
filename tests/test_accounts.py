@@ -180,6 +180,17 @@ async def test_binance_account_snapshot_and_signature() -> None:
     await perp.aclose()
 
 
+async def test_binance_sandbox_uses_current_demo_rest_endpoints() -> None:
+    client = BinanceAccountClient(
+        SECRETS,
+        ExchangeEnvironment.SANDBOX,
+    )
+
+    assert str(client.spot.base_url) == "https://demo-api.binance.com"
+    assert str(client.perp.base_url) == "https://demo-fapi.binance.com"
+    await client.close()
+
+
 async def test_binance_requires_futures_account_configuration_trade_permission() -> None:
     def spot_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

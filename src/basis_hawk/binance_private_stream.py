@@ -49,7 +49,7 @@ class BinancePrivateStreamConnection:
     @property
     def _spot_url(self) -> str:
         if self.environment == ExchangeEnvironment.SANDBOX:
-            return "wss://ws-api.testnet.binance.vision/ws-api/v3"
+            return "wss://demo-ws-api.binance.com/ws-api/v3"
         return "wss://ws-api.binance.com:443/ws-api/v3"
 
     @property

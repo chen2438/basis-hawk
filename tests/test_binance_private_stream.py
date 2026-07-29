@@ -104,14 +104,14 @@ async def test_binance_connects_signed_spot_and_listen_key_futures_streams() -> 
     await http.aclose()
 
 
-async def test_binance_sandbox_uses_current_demo_futures_endpoints() -> None:
+async def test_binance_sandbox_uses_current_demo_endpoints() -> None:
     connection = BinancePrivateStreamConnection(
         ExchangeSecrets(api_key="test-api-key", api_secret="test-api-secret"),
         ExchangeEnvironment.SANDBOX,
     )
 
     assert connection._spot_url == (  # noqa: SLF001
-        "wss://ws-api.testnet.binance.vision/ws-api/v3"
+        "wss://demo-ws-api.binance.com/ws-api/v3"
     )
     assert connection._futures_rest_url == "https://demo-fapi.binance.com"  # noqa: SLF001
     assert connection._futures_stream_url == (  # noqa: SLF001

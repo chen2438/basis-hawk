@@ -218,7 +218,10 @@ Binance 私有连接由两条通道组成：现货使用
 `userDataStream.subscribe.signature`，USDT 永续使用 `/fapi/v1/listenKey` 后连接私有
 WebSocket，并每 30 分钟续期。只有现货签名订阅返回成功且永续 listenKey 与连接都建立后，通用监督器
 才可登记三类订阅就绪；任一通道关闭、ping/pong 失败或续期返回不同 listenKey 都使整个 Binance 账户
-断开并进入 REST 对账。沙盒使用当前官方 Spot Testnet 与 USDⓈ-M Demo 地址。
+断开并进入 REST 对账。沙盒统一使用 Binance Demo Trading 环境：现货 REST/WebSocket 分别连接
+`demo-api.binance.com` 与 `demo-ws-api.binance.com`，USDⓈ-M REST/WebSocket 分别连接
+`demo-fapi.binance.com` 与 `demo-fstream.binance.com`；四条通道共享同一组 Demo Key，不连接独立的
+Spot Testnet。
 常驻 worker 会为每个已配置的 Binance 沙盒或实盘账户创建该连接，并与 60 秒 REST 对账循环并行运行；
 `worker --once` 不创建无法持续保活的 WebSocket。
 OKX 使用单条生产或模拟盘私有 WebSocket，按官方

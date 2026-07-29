@@ -525,12 +525,12 @@ class BinanceAccountClient(PrivateAccountClient):
         self.environment = environment
         self.clock_ms = clock_ms or (lambda: int(time.time() * 1000))
         spot_url = (
-            "https://testnet.binance.vision"
+            "https://demo-api.binance.com"
             if environment == ExchangeEnvironment.SANDBOX
             else "https://api.binance.com"
         )
         perp_url = (
-            "https://testnet.binancefuture.com"
+            "https://demo-fapi.binance.com"
             if environment == ExchangeEnvironment.SANDBOX
             else "https://fapi.binance.com"
         )
