@@ -323,6 +323,12 @@ MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
 完成后的组合、逐腿剩余数量与不可变已实现 PnL。`funding_income` 增加可空的账户和策略腿关联，
 `adl_snapshots` 保存各所原生值及归一化 1–5 级风险。
 
+任务创建先显式 flush `execution_tasks` 父行再写 `execution_task_legs`，不依赖 SQLAlchemy 对无
+relationship 模型的排序。UUID 幂等键和规范化请求指纹共同防止重放歧义，并发唯一键冲突回滚后只在
+指纹一致时返回原任务。预检只允许 draft/preflight_ready，按乐观锁版本写入脱敏 JSON 和 60 秒到期
+时间；启动事务锁定任务并同时检查到期时间、版本、状态及非纸面任务的全局执行控制，然后才切换 queued。
+取消只接受尚未开始的三种状态，运行后必须由 worker 的停止/补偿状态机处理。
+
 `exchange_credentials` 取消“交易所+环境唯一”，改为“交易所+环境+标签唯一”，并用部分唯一索引分别
 保证每组最多一个默认交易账户和默认扫描账户；既有凭据迁移为两种默认账户。能力矩阵和账户费率以
 脱敏 JSON 持久化，密文、nonce 和关联数据规则不变。`/api/v2/accounts` 可通过稳定账户 ID 管理多行；

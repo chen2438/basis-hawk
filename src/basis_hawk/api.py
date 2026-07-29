@@ -42,7 +42,13 @@ from basis_hawk.credentials import (
 )
 from basis_hawk.crypto import SecretCipher
 from basis_hawk.exchanges import GateAdapter
+from basis_hawk.execution_tasks import (
+    ExecutionTaskConflict,
+    ExecutionTaskService,
+    ExecutionTaskValidationError,
+)
 from basis_hawk.models import Exchange, Quality, ScannerSettings
+from basis_hawk.multi_leg import ExecutionTaskSpec
 from basis_hawk.notifications import TelegramCommandService
 from basis_hawk.service import (
     SandboxMarketService,
@@ -109,6 +115,15 @@ class AccountFeeRequest(BaseModel):
     spot_taker: Decimal | None = Field(default=None, ge=0, le=Decimal("0.1"))
     perpetual_maker: Decimal | None = Field(default=None, ge=0, le=Decimal("0.1"))
     perpetual_taker: Decimal | None = Field(default=None, ge=0, le=Decimal("0.1"))
+
+
+class ExecutionTaskStartRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    confirmed: Literal[True]
+
+
+class ExecutionTaskCancelRequest(BaseModel):
+    expected_version: int = Field(ge=1)
 
 
 class BybitPositionModeRequest(BaseModel):
@@ -314,6 +329,15 @@ def create_app(
             )
         if credential_service is None:
             credential_service = CredentialService(scanner.database, cipher)
+    execution_task_service = (
+        ExecutionTaskService(
+            scanner.database,
+            credential_service,
+            resolved_account_client_factory,
+        )
+        if credential_service is not None
+        else None
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -2155,6 +2179,161 @@ def create_app(
             "created": created,
             "intent": intent.model_dump(mode="json"),
         }
+
+    @app.post("/api/v2/execution-tasks")
+    async def create_v2_execution_task(
+        value: ExecutionTaskSpec,
+        request: Request,
+        idempotency_key: Annotated[UUID, Header(alias="Idempotency-Key")],
+    ) -> JSONResponse:
+        if execution_task_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="execution task encryption context is unavailable",
+            )
+        actor = (
+            request.state.admin.username
+            if getattr(request.state, "admin", None)
+            else "local"
+        )
+        try:
+            task, created = await execution_task_service.create(
+                spec=value,
+                idempotency_key=idempotency_key,
+                actor=actor,
+            )
+        except ExecutionTaskValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ExecutionTaskConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return JSONResponse(
+            status_code=201 if created else 200,
+            content={
+                "created": created,
+                "task": task.model_dump(mode="json"),
+            },
+        )
+
+    @app.get("/api/v2/execution-tasks")
+    async def v2_execution_tasks(
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    ) -> dict[str, object]:
+        if execution_task_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="execution task encryption context is unavailable",
+            )
+        return {
+            "items": [
+                item.model_dump(mode="json")
+                for item in await execution_task_service.list(limit=limit)
+            ]
+        }
+
+    @app.get("/api/v2/execution-tasks/{task_id}")
+    async def v2_execution_task(task_id: UUID) -> dict[str, object]:
+        if execution_task_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="execution task encryption context is unavailable",
+            )
+        task = await execution_task_service.get(str(task_id))
+        if task is None:
+            raise HTTPException(status_code=404, detail="execution task was not found")
+        return {"task": task.model_dump(mode="json")}
+
+    @app.post("/api/v2/execution-tasks/{task_id}/preflight")
+    async def preflight_v2_execution_task(
+        task_id: UUID,
+        request: Request,
+    ) -> dict[str, object]:
+        if execution_task_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="execution task encryption context is unavailable",
+            )
+        actor = (
+            request.state.admin.username
+            if getattr(request.state, "admin", None)
+            else "local"
+        )
+        try:
+            task = await execution_task_service.preflight(
+                task_id=str(task_id),
+                actor=actor,
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="execution task was not found",
+            ) from exc
+        except ExecutionTaskValidationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"task": task.model_dump(mode="json")}
+
+    @app.post("/api/v2/execution-tasks/{task_id}/start")
+    async def start_v2_execution_task(
+        task_id: UUID,
+        value: ExecutionTaskStartRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        if execution_task_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="execution task encryption context is unavailable",
+            )
+        actor = (
+            request.state.admin.username
+            if getattr(request.state, "admin", None)
+            else "local"
+        )
+        try:
+            task = await execution_task_service.start(
+                task_id=str(task_id),
+                expected_version=value.expected_version,
+                actor=actor,
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="execution task was not found",
+            ) from exc
+        except ExecutionTaskConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"task": task.model_dump(mode="json")}
+
+    @app.post("/api/v2/execution-tasks/{task_id}/cancel")
+    async def cancel_v2_execution_task(
+        task_id: UUID,
+        value: ExecutionTaskCancelRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        if execution_task_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="execution task encryption context is unavailable",
+            )
+        actor = (
+            request.state.admin.username
+            if getattr(request.state, "admin", None)
+            else "local"
+        )
+        try:
+            task = await execution_task_service.cancel(
+                task_id=str(task_id),
+                expected_version=value.expected_version,
+                actor=actor,
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="execution task was not found",
+            ) from exc
+        except ExecutionTaskConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"task": task.model_dump(mode="json")}
 
     @app.get("/api/v2/accounts")
     async def v2_account_summaries() -> dict[str, object]:

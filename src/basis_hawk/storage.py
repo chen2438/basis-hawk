@@ -1889,6 +1889,303 @@ class Database:
         async with self.sessions() as session:
             return await session.get(ExecutionControlRow, 1)
 
+    async def execution_task_by_idempotency_key(
+        self,
+        idempotency_key: str,
+    ) -> tuple[ExecutionTaskRow, list[ExecutionTaskLegRow]] | None:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ExecutionTaskRow).where(
+                    ExecutionTaskRow.idempotency_key == idempotency_key
+                )
+            )
+            if row is None:
+                return None
+            legs = list(
+                await session.scalars(
+                    select(ExecutionTaskLegRow)
+                    .where(ExecutionTaskLegRow.task_id == row.id)
+                    .order_by(ExecutionTaskLegRow.ordinal)
+                )
+            )
+            return row, legs
+
+    async def execution_task(
+        self,
+        task_id: str,
+    ) -> tuple[ExecutionTaskRow, list[ExecutionTaskLegRow]] | None:
+        async with self.sessions() as session:
+            row = await session.get(ExecutionTaskRow, task_id)
+            if row is None:
+                return None
+            legs = list(
+                await session.scalars(
+                    select(ExecutionTaskLegRow)
+                    .where(ExecutionTaskLegRow.task_id == task_id)
+                    .order_by(ExecutionTaskLegRow.ordinal)
+                )
+            )
+            return row, legs
+
+    async def execution_tasks(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[tuple[ExecutionTaskRow, list[ExecutionTaskLegRow]]]:
+        async with self.sessions() as session:
+            rows = list(
+                await session.scalars(
+                    select(ExecutionTaskRow)
+                    .order_by(ExecutionTaskRow.created_at.desc())
+                    .limit(limit)
+                )
+            )
+            if not rows:
+                return []
+            leg_rows = list(
+                await session.scalars(
+                    select(ExecutionTaskLegRow)
+                    .where(
+                        ExecutionTaskLegRow.task_id.in_(
+                            [item.id for item in rows]
+                        )
+                    )
+                    .order_by(
+                        ExecutionTaskLegRow.task_id,
+                        ExecutionTaskLegRow.ordinal,
+                    )
+                )
+            )
+            grouped: dict[str, list[ExecutionTaskLegRow]] = {
+                item.id: [] for item in rows
+            }
+            for leg in leg_rows:
+                grouped[leg.task_id].append(leg)
+            return [(item, grouped[item.id]) for item in rows]
+
+    async def create_execution_task(
+        self,
+        *,
+        task: dict[str, Any],
+        legs: list[dict[str, Any]],
+    ) -> tuple[ExecutionTaskRow, list[ExecutionTaskLegRow], bool]:
+        async with self.sessions() as session:
+            existing = await session.scalar(
+                select(ExecutionTaskRow).where(
+                    ExecutionTaskRow.idempotency_key
+                    == task["idempotency_key"]
+                )
+            )
+            if existing is not None:
+                if existing.request_fingerprint != task["request_fingerprint"]:
+                    raise ValueError(
+                        "execution task idempotency key conflicts with another request"
+                    )
+                existing_legs = list(
+                    await session.scalars(
+                        select(ExecutionTaskLegRow)
+                        .where(ExecutionTaskLegRow.task_id == existing.id)
+                        .order_by(ExecutionTaskLegRow.ordinal)
+                    )
+                )
+                return existing, existing_legs, False
+            row = ExecutionTaskRow(**task)
+            leg_rows = [ExecutionTaskLegRow(**value) for value in legs]
+            session.add(row)
+            await session.flush()
+            session.add_all(leg_rows)
+            session.add(
+                AuditEventRow(
+                    id=str(uuid.uuid4()),
+                    occurred_at=task["created_at"],
+                    event_type="execution_task.created",
+                    actor=task["created_by"],
+                    details=json.dumps(
+                        {
+                            "task_id": task["id"],
+                            "environment": task["environment"],
+                            "base_asset": task["base_asset"],
+                            "leg_count": len(legs),
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                existing = await session.scalar(
+                    select(ExecutionTaskRow).where(
+                        ExecutionTaskRow.idempotency_key
+                        == task["idempotency_key"]
+                    )
+                )
+                if existing is None:
+                    raise
+                if existing.request_fingerprint != task["request_fingerprint"]:
+                    raise ValueError(
+                        "execution task idempotency key conflicts with another request"
+                    ) from exc
+                existing_legs = list(
+                    await session.scalars(
+                        select(ExecutionTaskLegRow)
+                        .where(ExecutionTaskLegRow.task_id == existing.id)
+                        .order_by(ExecutionTaskLegRow.ordinal)
+                    )
+                )
+                return existing, existing_legs, False
+            await session.refresh(row)
+            for leg in leg_rows:
+                await session.refresh(leg)
+            return row, leg_rows, True
+
+    async def mark_execution_task_preflight_ready(
+        self,
+        *,
+        task_id: str,
+        expected_version: int,
+        payload: str,
+        expires_at: datetime,
+        actor: str,
+    ) -> ExecutionTaskRow:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ExecutionTaskRow)
+                .where(ExecutionTaskRow.id == task_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise KeyError(task_id)
+            if row.version != expected_version:
+                raise ValueError("execution task version changed during preflight")
+            if row.status not in {"draft", "preflight_ready"}:
+                raise ValueError(
+                    f"execution task cannot be preflighted from {row.status}"
+                )
+            now = datetime.now(UTC)
+            row.status = "preflight_ready"
+            row.preflight_payload = payload
+            row.preflight_expires_at = expires_at
+            row.failure_code = None
+            row.version += 1
+            row.updated_at = now
+            session.add(
+                AuditEventRow(
+                    id=str(uuid.uuid4()),
+                    occurred_at=now,
+                    event_type="execution_task.preflight_ready",
+                    actor=actor,
+                    details=json.dumps(
+                        {"task_id": task_id, "expires_at": expires_at.isoformat()},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            )
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def queue_execution_task(
+        self,
+        *,
+        task_id: str,
+        expected_version: int,
+        actor: str,
+        now: datetime | None = None,
+    ) -> ExecutionTaskRow:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ExecutionTaskRow)
+                .where(ExecutionTaskRow.id == task_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise KeyError(task_id)
+            observed_at = now or datetime.now(UTC)
+            if row.version != expected_version:
+                raise ValueError("execution task version changed")
+            if row.status != "preflight_ready":
+                raise ValueError("execution task is not ready to start")
+            if (
+                row.preflight_expires_at is None
+                or _utc(row.preflight_expires_at) <= observed_at
+            ):
+                raise ValueError("execution task preflight has expired")
+            if row.environment != "paper":
+                control = await session.scalar(
+                    select(ExecutionControlRow)
+                    .where(ExecutionControlRow.id == 1)
+                    .with_for_update()
+                )
+                if control is None or control.state != "ready":
+                    raise ValueError("global execution control is not ready")
+            row.status = "queued"
+            row.version += 1
+            row.updated_at = observed_at
+            session.add(
+                AuditEventRow(
+                    id=str(uuid.uuid4()),
+                    occurred_at=observed_at,
+                    event_type="execution_task.queued",
+                    actor=actor,
+                    details=json.dumps(
+                        {"task_id": task_id},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            )
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def cancel_execution_task(
+        self,
+        *,
+        task_id: str,
+        expected_version: int,
+        actor: str,
+    ) -> ExecutionTaskRow:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ExecutionTaskRow)
+                .where(ExecutionTaskRow.id == task_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise KeyError(task_id)
+            if row.version != expected_version:
+                raise ValueError("execution task version changed")
+            if row.status not in {"draft", "preflight_ready", "queued"}:
+                raise ValueError(
+                    "only a task that has not started can be canceled"
+                )
+            now = datetime.now(UTC)
+            row.status = "emergency_stopped"
+            row.preflight_payload = None
+            row.preflight_expires_at = None
+            row.version += 1
+            row.updated_at = now
+            session.add(
+                AuditEventRow(
+                    id=str(uuid.uuid4()),
+                    occurred_at=now,
+                    event_type="execution_task.canceled",
+                    actor=actor,
+                    details=json.dumps(
+                        {"task_id": task_id},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            )
+            await session.commit()
+            await session.refresh(row)
+            return row
+
     async def current_account_snapshot(
         self,
         *,

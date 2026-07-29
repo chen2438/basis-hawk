@@ -96,6 +96,19 @@ Demo 模式入口。
 旧 `/api/accounts/...` 接口只操作交易默认账户，现有私有流、对账和双腿执行器也只消费该默认账户，
 直到通用账户级 worker 接管。所有列表、审计和 API 响应都只返回掩码与脱敏元数据，不返回明文密钥。
 
+多腿任务控制面位于 `/api/v2/execution-tasks`：
+
+- `POST /api/v2/execution-tasks` 要求 UUID `Idempotency-Key`，原子创建任务及 2–16 条有序腿；同一键
+  同一请求返回原任务，不同请求返回 409。非纸面腿的账户必须存在并与任务环境匹配；
+- `GET /api/v2/execution-tasks` 和 `GET /api/v2/execution-tasks/{task_id}` 返回任务、乐观锁版本、
+  有序腿和脱敏预检摘要；
+- `POST /api/v2/execution-tasks/{task_id}/preflight` 逐个账户读取余额快照与完整订单/仓位状态，永续
+  账户还必须能确定持仓模式。结果有效 60 秒，响应和审计均不包含 Key、Secret 或交易所原始错误；
+- `POST /api/v2/execution-tasks/{task_id}/start` 要求 `confirmed=true` 和最新 `expected_version`。
+  真实/沙盒任务还要求全局执行状态为 ready；校验和 `preflight_ready → queued` 在同一锁定事务完成；
+- `POST /api/v2/execution-tasks/{task_id}/cancel` 只允许取消 draft、preflight_ready 或 queued，
+  不允许把已运行任务直接标记结束，以免跳过敞口补偿。
+
 - `GET /api/system/execution`：读取 worker 的全局执行阻断状态，以及各账户最近一次启动对账状态、
   私有流就绪状态、远端结果完整性、挂单数和仓位数。真实订单预检失败时 `reason` 使用
   `live_order_preflight:{exchange}:{safe_code}`，前端翻译为带交易所和失败阶段的中文说明；该值不含
