@@ -110,6 +110,11 @@ function mockApi() {
       });
     }
     if (path === "/api/auth/logout") return response(null, 204);
+    if (path === "/api/auth/totp/rotate") {
+      return response({
+        provisioning_uri: "otpauth://totp/Basis%20Hawk:admin?secret=NEWSECRET",
+      });
+    }
     return response({ items: [] });
   });
 }
@@ -202,6 +207,22 @@ describe("Basis Hawk v2 console", () => {
       "/api/operations/notifications/test",
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("rotates TOTP from the account security page", async () => {
+    render(<App />);
+    const user = userEvent.setup();
+    await screen.findByRole("heading", { name: "套利机会" });
+    await user.click(screen.getByRole("button", { name: "账户设置" }));
+    expect(await screen.findByRole("heading", { name: "账户设置" })).toBeTruthy();
+    const passwords = screen.getAllByLabelText("当前密码");
+    const totpCodes = screen.getAllByLabelText("当前 TOTP");
+    await user.type(passwords[1], "correct horse battery staple");
+    await user.type(totpCodes[1], "123456");
+    await user.click(screen.getByLabelText("我已准备好立即绑定新的 TOTP"));
+    await user.click(screen.getByRole("button", { name: "确认轮换 TOTP" }));
+    expect(await screen.findByText("新的 TOTP 已生效")).toBeTruthy();
+    expect(screen.getByText(/otpauth:\/\/totp/)).toBeTruthy();
   });
 
   it("filters opportunity symbols", async () => {

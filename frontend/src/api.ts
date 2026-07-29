@@ -62,6 +62,10 @@ export function apiErrorMessage(detail: unknown, fallback: string): string {
     "internal transfer exceeds the UTC daily limit": "划转金额会超过当前 UTC 自然日累计限额",
     "internal transfer limits must both be zero or both be positive": "单次和每日限额必须同时为 0（禁用）或同时大于 0",
     "per-request transfer limit cannot exceed daily limit": "单次限额不能超过每日累计限额",
+    "invalid administrator password or TOTP code": "当前密码或 TOTP 验证码错误",
+    "new password must differ from the current password": "新密码不能与当前密码相同",
+    "password must contain at least 12 characters": "新密码至少需要 12 个字符",
+    "TOTP rotation requires explicit confirmation": "轮换 TOTP 前必须明确确认",
   };
   if (typeof detail === "string") return translations[detail] || detail;
   if (!detail || typeof detail !== "object") return fallback;
@@ -116,6 +120,29 @@ export const api = {
       body: JSON.stringify({ username, password, totp_code: totpCode }),
     }),
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
+  changePassword: (
+    currentPassword: string,
+    currentTotpCode: string,
+    newPassword: string,
+  ) => request<void>("/api/auth/password", {
+    method: "POST",
+    body: JSON.stringify({
+      current_password: currentPassword,
+      current_totp_code: currentTotpCode,
+      new_password: newPassword,
+    }),
+  }),
+  rotateTotp: (
+    currentPassword: string,
+    currentTotpCode: string,
+  ) => request<{ provisioning_uri: string }>("/api/auth/totp/rotate", {
+    method: "POST",
+    body: JSON.stringify({
+      current_password: currentPassword,
+      current_totp_code: currentTotpCode,
+      confirmed: true,
+    }),
+  }),
   v2Opportunities: (
     type: V2OpportunityType,
     holdingDays = 7,

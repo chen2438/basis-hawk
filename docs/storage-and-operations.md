@@ -181,6 +181,10 @@ docker compose run --rm api basis-hawk admin-create --username admin
 `BASIS_HAWK_SESSION_HOURS` 默认及生产示例均为 `168`，即 7 天；登录时同一值同时写入数据库
 `admin_sessions.expires_at` 和两个 Cookie 的 `Max-Age`。修改该配置只影响此后创建的新会话，
 不会延长或缩短数据库中已经存在的会话。
+已登录管理员也可在账户设置页修改密码或轮换 TOTP。两种操作都再次验证当前密码和当前 TOTP，
+并在锁定管理员记录的同一事务中替换认证材料、删除该管理员全部会话、写入不含密码、TOTP 密钥或
+provisioning URI 的审计事件。密码更新使用旧 Argon2id 哈希做并发比较；认证材料已被其他请求抢先
+修改时安全失败，不能覆盖更新。TOTP 轮换产生的 provisioning URI 只经成功响应显示一次。
 TOTP 泄露或身份验证器丢失时，在 VPS 上运行：
 
 ```bash

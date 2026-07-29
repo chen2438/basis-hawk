@@ -23,6 +23,15 @@ Bybit Testnet、Bitget Demo 与 Gate TestNet；机会与状态使用同一份最
 所有修改请求还必须提供与 Cookie 会话绑定的 `X-CSRF-Token`。连续失败登录受限流保护。
 默认登录有效期为 7 天，服务端数据库会话和会话/CSRF Cookie 同时到期；已有会话保留其创建时写入的
 到期时间，重新登录后才获得新的 7 天有效期。前端不会把会话令牌写入 localStorage。
+账户设置页提供密码修改和 TOTP 轮换；两者都要求再次验证当前密码与当前 TOTP，成功后立即撤销全部
+浏览器会话。密码至少 12 个字符且不能与原密码相同。TOTP 轮换还要求显式勾选确认，新 provisioning
+URI 只在成功响应中返回一次，页面不会把它写入浏览器持久存储。
+
+认证接口为：
+
+- `POST /api/auth/password`：提交当前密码、当前 TOTP 与新密码，成功返回 204 并清除当前 Cookie；
+- `POST /api/auth/totp/rotate`：提交当前密码、当前 TOTP 和 `confirmed=true`，成功返回一次性
+  `provisioning_uri` 并清除当前 Cookie。
 
 登录后的应用使用固定深色左侧菜单和窄状态栏组织工作区；市场总览与执行状态、交易所账户、手动交易、
 配对持仓、交易账本、内部划转、自动策略、审计与通知均为一级页面，窄屏时菜单收拢为图标栏。页面

@@ -6313,6 +6313,41 @@ class Database:
             await session.commit()
             return True
 
+    async def change_admin_password(
+        self,
+        *,
+        username: str,
+        expected_password_hash: str,
+        password_hash: str,
+    ) -> bool:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(AdminUserRow)
+                .where(AdminUserRow.username == username)
+                .with_for_update()
+            )
+            if row is None or row.password_hash != expected_password_hash:
+                return False
+            row.password_hash = password_hash
+            await session.execute(
+                delete(AdminSessionRow).where(AdminSessionRow.admin_id == row.id)
+            )
+            session.add(
+                AuditEventRow(
+                    id=str(uuid.uuid4()),
+                    occurred_at=datetime.now(UTC),
+                    event_type="auth.password_changed",
+                    actor=row.username,
+                    details=json.dumps(
+                        {"all_sessions_revoked": True},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            )
+            await session.commit()
+            return True
+
     async def create_session(
         self,
         *,

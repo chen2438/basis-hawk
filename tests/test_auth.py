@@ -153,6 +153,158 @@ async def test_totp_rotation_requires_password_and_revokes_sessions() -> None:
     await database.close()
 
 
+async def test_password_change_requires_totp_and_revokes_sessions() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    auth = AuthService(database, SecretCipher(SecretCipher.generate_key()))
+    uri = await auth.bootstrap_admin("admin", "correct horse battery staple")
+    secret = parse_qs(urlparse(uri).query)["secret"][0]
+    current_code = pyotp.TOTP(secret).now()
+    session = await auth.login(
+        "admin",
+        "correct horse battery staple",
+        current_code,
+    )
+    with pytest.raises(AuthenticationError):
+        await auth.change_admin_password(
+            "admin",
+            "correct horse battery staple",
+            "000000",
+            "a different secure password",
+        )
+    await auth.change_admin_password(
+        "admin",
+        "correct horse battery staple",
+        current_code,
+        "a different secure password",
+    )
+    assert (
+        await database.admin_for_session(
+            token_hash=hashlib.sha256(session.session_token.encode()).hexdigest(),
+            now=session.expires_at - timedelta(seconds=1),
+        )
+        is None
+    )
+    with pytest.raises(AuthenticationError):
+        await auth.login(
+            "admin",
+            "correct horse battery staple",
+            pyotp.TOTP(secret).now(),
+        )
+    await auth.login(
+        "admin",
+        "a different secure password",
+        pyotp.TOTP(secret).now(),
+    )
+    events = await database.audit_events(event_type="auth.password_changed")
+    assert len(events) == 1
+    assert events[0].details == {"all_sessions_revoked": True}
+    await database.close()
+
+
+async def test_authenticated_totp_rotation_api_requires_current_code() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    auth = AuthService(database, SecretCipher(SecretCipher.generate_key()))
+    uri = await auth.bootstrap_admin("admin", "correct horse battery staple")
+    secret = parse_qs(urlparse(uri).query)["secret"][0]
+    service = ScannerService(database, {})
+    await service.initialize()
+    app = create_app(
+        service,
+        manage_lifecycle=False,
+        auth_required=True,
+        auth_service=auth,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="https://test",
+    ) as client:
+        login = await client.post(
+            "/api/auth/login",
+            json={
+                "username": "admin",
+                "password": "correct horse battery staple",
+                "totp_code": pyotp.TOTP(secret).now(),
+            },
+        )
+        assert login.status_code == 200
+        csrf = client.cookies.get(CSRF_COOKIE)
+        rejected = await client.post(
+            "/api/auth/totp/rotate",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "current_password": "correct horse battery staple",
+                "current_totp_code": "000000",
+                "confirmed": True,
+            },
+        )
+        assert rejected.status_code == 401
+        rotated = await client.post(
+            "/api/auth/totp/rotate",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "current_password": "correct horse battery staple",
+                "current_totp_code": pyotp.TOTP(secret).now(),
+                "confirmed": True,
+            },
+        )
+        assert rotated.status_code == 200
+        assert rotated.json()["provisioning_uri"].startswith("otpauth://totp/")
+        assert (await client.get("/api/auth/session")).status_code == 401
+    await database.close()
+
+
+async def test_authenticated_password_change_api_revokes_browser_session() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    auth = AuthService(database, SecretCipher(SecretCipher.generate_key()))
+    uri = await auth.bootstrap_admin("admin", "correct horse battery staple")
+    secret = parse_qs(urlparse(uri).query)["secret"][0]
+    service = ScannerService(database, {})
+    await service.initialize()
+    app = create_app(
+        service,
+        manage_lifecycle=False,
+        auth_required=True,
+        auth_service=auth,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="https://test",
+    ) as client:
+        login = await client.post(
+            "/api/auth/login",
+            json={
+                "username": "admin",
+                "password": "correct horse battery staple",
+                "totp_code": pyotp.TOTP(secret).now(),
+            },
+        )
+        assert login.status_code == 200
+        changed = await client.post(
+            "/api/auth/password",
+            headers={"X-CSRF-Token": client.cookies.get(CSRF_COOKIE)},
+            json={
+                "current_password": "correct horse battery staple",
+                "current_totp_code": pyotp.TOTP(secret).now(),
+                "new_password": "a different secure password",
+            },
+        )
+        assert changed.status_code == 204
+        assert (await client.get("/api/auth/session")).status_code == 401
+        relogin = await client.post(
+            "/api/auth/login",
+            json={
+                "username": "admin",
+                "password": "a different secure password",
+                "totp_code": pyotp.TOTP(secret).now(),
+            },
+        )
+        assert relogin.status_code == 200
+    await database.close()
+
+
 async def test_encrypted_exchange_credential_storage() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()

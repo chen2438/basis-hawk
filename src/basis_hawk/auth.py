@@ -86,16 +86,30 @@ class AuthService:
         )
         return pyotp.TOTP(secret).provisioning_uri(name=username, issuer_name="Basis Hawk")
 
-    async def rotate_admin_totp(self, username: str, password: str) -> str:
+    async def rotate_admin_totp(
+        self,
+        username: str,
+        password: str,
+        totp_code: str | None = None,
+    ) -> str:
         username = username.strip()
         user = await self.database.get_admin_by_username(username)
-        if not user or not self._password_matches(user, password):
+        if (
+            not user
+            or not self._password_matches(user, password)
+            or (totp_code is not None and not self._totp_matches(user, totp_code))
+        ):
             await self.database.append_audit(
                 "auth.totp_rotation_failed",
                 actor=username or "unknown",
                 details={},
             )
-            raise AuthenticationError("invalid administrator username or password")
+            message = (
+                "invalid administrator password or TOTP code"
+                if totp_code is not None
+                else "invalid administrator username or password"
+            )
+            raise AuthenticationError(message)
         secret = pyotp.random_base32()
         encrypted = self.cipher.encrypt(
             secret,
@@ -114,6 +128,40 @@ class AuthService:
             name=user.username,
             issuer_name="Basis Hawk",
         )
+
+    async def change_admin_password(
+        self,
+        username: str,
+        current_password: str,
+        totp_code: str,
+        new_password: str,
+    ) -> None:
+        username = username.strip()
+        if len(new_password) < 12:
+            raise ValueError("password must contain at least 12 characters")
+        if hmac.compare_digest(current_password, new_password):
+            raise ValueError("new password must differ from the current password")
+        user = await self.database.get_admin_by_username(username)
+        if (
+            not user
+            or not self._password_matches(user, current_password)
+            or not self._totp_matches(user, totp_code)
+        ):
+            await self.database.append_audit(
+                "auth.password_change_failed",
+                actor=username or "unknown",
+                details={},
+            )
+            raise AuthenticationError(
+                "invalid administrator password or TOTP code"
+            )
+        changed = await self.database.change_admin_password(
+            username=user.username,
+            expected_password_hash=user.password_hash,
+            password_hash=_password_hasher.hash(new_password),
+        )
+        if not changed:
+            raise RuntimeError("administrator password changed concurrently; retry")
 
     async def login(
         self,

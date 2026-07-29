@@ -140,7 +140,7 @@ function Console({ username, onLogout }: { username: string; onLogout: () => voi
       {page === "alerts" && <AlertsPage />}
       {page === "adl" && <AdlPage />}
       {page === "email" && <EmailPage />}
-      {page === "profile" && <EmptyMonitor title="账户设置" copy="管理员密码、TOTP 与会话安全设置。" />}
+      {page === "profile" && <ProfilePage username={username} onSignedOut={onLogout} />}
       {page === "system" && <SystemPage />}
     </div>
   </div>;
@@ -628,6 +628,94 @@ function EmailPage() {
       </tr>)}
       {items.length === 0 && <tr><td className="bh-empty" colSpan={6}>暂无邮件投递记录</td></tr>}
     </tbody></table></div>
+  </main>;
+}
+
+function ProfilePage({
+  username,
+  onSignedOut,
+}: {
+  username: string;
+  onSignedOut: () => void;
+}) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [currentTotp, setCurrentTotp] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [rotatePassword, setRotatePassword] = useState("");
+  const [rotateTotpCode, setRotateTotpCode] = useState("");
+  const [rotateConfirmed, setRotateConfirmed] = useState(false);
+  const [provisioningUri, setProvisioningUri] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"password" | "totp" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const changePassword = async (event: FormEvent) => {
+    event.preventDefault();
+    setError(null);
+    if (newPassword !== confirmation) {
+      setError("两次输入的新密码不一致");
+      return;
+    }
+    setBusy("password");
+    try {
+      await api.changePassword(currentPassword, currentTotp, newPassword);
+      onSignedOut();
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const rotateTotp = async (event: FormEvent) => {
+    event.preventDefault();
+    setError(null);
+    if (!rotateConfirmed) {
+      setError("请先确认已准备好重新绑定验证器");
+      return;
+    }
+    setBusy("totp");
+    try {
+      const result = await api.rotateTotp(rotatePassword, rotateTotpCode);
+      setProvisioningUri(result.provisioning_uri);
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+  return <main className="bh-page">
+    <PageIntro eyebrow="SECURITY" title="账户设置" copy="管理唯一管理员的密码、TOTP 和会话安全。" />
+    {error && <div className="bh-error">{error}</div>}
+    <section className="bh-profile-summary">
+      <article className="bh-card"><header><h2>当前管理员</h2><span className="bh-channel-state ready">已登录</span></header><div><span className="bh-profile-avatar">{username.slice(0, 1).toUpperCase()}</span><strong>{username}</strong><small>单管理员 · PASSWORD + TOTP</small></div></article>
+      <article className="bh-card"><header><h2>会话保护</h2></header><ul><li>Secure / SameSite Cookie</li><li>所有写请求校验 CSRF</li><li>修改密码或 TOTP 后撤销全部会话</li></ul></article>
+    </section>
+    <section className="bh-security-grid">
+      <form className="bh-card bh-security-form" onSubmit={(event) => void changePassword(event)}>
+        <header><h2>修改密码</h2></header>
+        <div>
+          <label>当前密码<input type="password" autoComplete="current-password" required value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></label>
+          <label>当前 TOTP<input inputMode="numeric" autoComplete="one-time-code" required minLength={6} maxLength={10} value={currentTotp} onChange={(event) => setCurrentTotp(event.target.value)} /></label>
+          <label>新密码<input type="password" autoComplete="new-password" required minLength={12} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /><small>至少 12 个字符，且不能与当前密码相同。</small></label>
+          <label>确认新密码<input type="password" autoComplete="new-password" required minLength={12} value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
+          <button className="bh-button primary" disabled={busy !== null}>{busy === "password" ? "修改中…" : "修改并退出全部会话"}</button>
+        </div>
+      </form>
+      <form className="bh-card bh-security-form" onSubmit={(event) => void rotateTotp(event)}>
+        <header><h2>轮换 TOTP</h2></header>
+        {!provisioningUri ? <div>
+          <p className="bh-security-warning">轮换会立即使旧验证码和全部现有会话失效。提交前请准备好验证器。</p>
+          <label>当前密码<input type="password" autoComplete="current-password" required value={rotatePassword} onChange={(event) => setRotatePassword(event.target.value)} /></label>
+          <label>当前 TOTP<input inputMode="numeric" autoComplete="one-time-code" required minLength={6} maxLength={10} value={rotateTotpCode} onChange={(event) => setRotateTotpCode(event.target.value)} /></label>
+          <label className="bh-check"><input type="checkbox" checked={rotateConfirmed} onChange={(event) => setRotateConfirmed(event.target.checked)} />我已准备好立即绑定新的 TOTP</label>
+          <button className="bh-button danger" disabled={busy !== null || !rotateConfirmed}>{busy === "totp" ? "轮换中…" : "确认轮换 TOTP"}</button>
+        </div> : <div className="bh-provisioning">
+          <strong>新的 TOTP 已生效</strong>
+          <p>请立即把下列 URI 导入验证器。离开此页后系统不会再次显示。</p>
+          <code>{provisioningUri}</code>
+          <button type="button" className="bh-button primary" onClick={onSignedOut}>已保存，前往重新登录</button>
+        </div>}
+      </form>
+    </section>
   </main>;
 }
 

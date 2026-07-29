@@ -88,6 +88,18 @@ class LoginRequest(BaseModel):
     totp_code: str
 
 
+class PasswordChangeRequest(BaseModel):
+    current_password: SecretStr
+    current_totp_code: str = Field(min_length=6, max_length=10)
+    new_password: SecretStr = Field(min_length=12, max_length=1024)
+
+
+class TotpRotationRequest(BaseModel):
+    current_password: SecretStr
+    current_totp_code: str = Field(min_length=6, max_length=10)
+    confirmed: bool
+
+
 class CredentialRequest(BaseModel):
     label: str = Field(min_length=1, max_length=100)
     api_key: SecretStr
@@ -551,6 +563,72 @@ def create_app(
             actor=request.state.admin.username,
         )
         response = Response(status_code=204)
+        response.delete_cookie(SESSION_COOKIE)
+        response.delete_cookie(CSRF_COOKIE)
+        return response
+
+    @app.post("/api/auth/password")
+    async def change_password(
+        value: PasswordChangeRequest,
+        request: Request,
+    ) -> Response:
+        if not require_auth:
+            raise HTTPException(
+                status_code=409,
+                detail="authentication is disabled",
+            )
+        if auth_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="authentication is unavailable",
+            )
+        try:
+            await auth_service.change_admin_password(
+                request.state.admin.username,
+                value.current_password.get_secret_value(),
+                value.current_totp_code,
+                value.new_password.get_secret_value(),
+            )
+        except AuthenticationError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        response = Response(status_code=204)
+        response.delete_cookie(SESSION_COOKIE)
+        response.delete_cookie(CSRF_COOKIE)
+        return response
+
+    @app.post("/api/auth/totp/rotate")
+    async def rotate_totp(
+        value: TotpRotationRequest,
+        request: Request,
+    ) -> Response:
+        if not require_auth:
+            raise HTTPException(
+                status_code=409,
+                detail="authentication is disabled",
+            )
+        if auth_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="authentication is unavailable",
+            )
+        if not value.confirmed:
+            raise HTTPException(
+                status_code=400,
+                detail="TOTP rotation requires explicit confirmation",
+            )
+        try:
+            provisioning_uri = await auth_service.rotate_admin_totp(
+                request.state.admin.username,
+                value.current_password.get_secret_value(),
+                value.current_totp_code,
+            )
+        except AuthenticationError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        response = JSONResponse({"provisioning_uri": provisioning_uri})
         response.delete_cookie(SESSION_COOKIE)
         response.delete_cookie(CSRF_COOKIE)
         return response
