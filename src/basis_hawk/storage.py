@@ -681,7 +681,7 @@ class TradeIntentRow(Base):
         ),
         CheckConstraint(
             "failure_code IS NULL OR failure_code IN "
-            "('market_data_expired', 'no_fills', "
+            "('market_data_expired', 'market_unexecutable', 'no_fills', "
             "'exposure_neutralized', 'state_transition_failed', "
             "'credential_missing', 'account_client_failed', "
             "'account_snapshot_failed', 'remote_state_failed', "
@@ -2357,7 +2357,15 @@ class Database:
         self,
         *,
         intent_id: str,
+        adjusted_perp_limit_price: Decimal | None = None,
     ) -> tuple[TradeIntentRow, list[OrderLegRow], bool] | None:
+        if (
+            adjusted_perp_limit_price is not None
+            and adjusted_perp_limit_price <= 0
+        ):
+            raise ValueError(
+                "adjusted perpetual limit price must be positive"
+            )
         async with self.sessions() as session:
             intent = await session.scalar(
                 select(TradeIntentRow)
@@ -2400,6 +2408,19 @@ class Database:
                 return intent, legs, False
             if any(item.status != "created" for item in primary.values()):
                 raise ValueError("live order legs are not ready for first submission")
+            if adjusted_perp_limit_price is not None:
+                perpetual = primary["perp"]
+                if (
+                    perpetual.side == "buy"
+                    and adjusted_perp_limit_price > perpetual.limit_price
+                ) or (
+                    perpetual.side == "sell"
+                    and adjusted_perp_limit_price < perpetual.limit_price
+                ):
+                    raise ValueError(
+                        "adjusted perpetual limit price weakens protection"
+                    )
+                perpetual.limit_price = adjusted_perp_limit_price
             if intent.action == "close":
                 if intent.paired_position_id is None:
                     raise ValueError("live close intent is missing its paired position")
@@ -2560,6 +2581,49 @@ class Database:
                     position.closing_intent_id = None
             intent.status = "failed"
             intent.failure_code = "market_data_expired"
+            intent.version += 1
+            intent.updated_at = now
+            await session.commit()
+            return True
+
+    async def fail_market_unexecutable_trade_intent(
+        self,
+        *,
+        intent_id: str,
+    ) -> bool:
+        async with self.sessions() as session:
+            intent = await session.scalar(
+                select(TradeIntentRow)
+                .where(TradeIntentRow.id == intent_id)
+                .with_for_update()
+            )
+            if (
+                intent is None
+                or intent.environment not in {"sandbox", "live"}
+                or intent.status != "planned"
+            ):
+                return False
+            now = datetime.now(UTC)
+            if (
+                intent.action == "close"
+                and intent.paired_position_id is not None
+            ):
+                position = await session.scalar(
+                    select(PairedPositionRow)
+                    .where(
+                        PairedPositionRow.id == intent.paired_position_id
+                    )
+                    .with_for_update()
+                )
+                if (
+                    position is not None
+                    and position.status == "closing"
+                    and position.closing_intent_id == intent.id
+                ):
+                    position.status = "open"
+                    position.closing_intent_id = None
+            intent.status = "failed"
+            intent.failure_code = "market_unexecutable"
             intent.version += 1
             intent.updated_at = now
             await session.commit()

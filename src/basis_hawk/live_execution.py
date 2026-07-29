@@ -29,6 +29,7 @@ from basis_hawk.executable_quotes import (
     market_quote_from_opportunity,
     opportunity_with_executable_quote,
 )
+from basis_hawk.gate_price_guard import GatePerpPriceGuard, PerpPriceGuard
 from basis_hawk.models import Exchange, InstrumentPair, Opportunity
 from basis_hawk.sizing import compensation_quantity
 from basis_hawk.storage import Database, OrderLegRow, TradeIntentRow
@@ -69,10 +70,18 @@ class LiveExecutionService:
             [Exchange, ExchangeSecrets, ExchangeEnvironment],
             PrivateAccountClient,
         ] = create_account_client,
+        gate_price_guard_factory: Callable[
+            [ExchangeEnvironment],
+            PerpPriceGuard,
+        ]
+        | None = None,
     ) -> None:
         self.database = database
         self.credentials = credentials
         self.account_client_factory = account_client_factory
+        self.gate_price_guard_factory = gate_price_guard_factory or (
+            lambda environment: GatePerpPriceGuard(environment)
+        )
 
     async def run_once(self) -> LiveExecutionResult:
         control = await self.database.execution_control()
@@ -204,16 +213,6 @@ class LiveExecutionService:
                     )
                 except Exception as exc:
                     raise LivePreflightError("balance_insufficient") from exc
-                try:
-                    await client.configure_perp(
-                        symbol=primary["perp"].symbol,
-                        leverage=intent.leverage,
-                        position_mode=snapshot.position_mode,
-                    )
-                except Exception as exc:
-                    raise LivePreflightError(
-                        "perp_configuration_failed"
-                    ) from exc
             else:
                 try:
                     await LiveCompensationService._validate_close_state(
@@ -228,8 +227,43 @@ class LiveExecutionService:
                     )
                 except Exception as exc:
                     raise LivePreflightError("close_state_mismatch") from exc
+            gate_sandbox = (
+                exchange == Exchange.GATE
+                and environment == ExchangeEnvironment.SANDBOX
+            )
+            adjusted_perp_limit_price: Decimal | None = None
+            if gate_sandbox:
+                try:
+                    adjusted_perp_limit_price = (
+                        await _gate_sandbox_guarded_perp_limit(
+                            self.gate_price_guard_factory,
+                            environment=environment,
+                            leg=primary["perp"],
+                        )
+                    )
+                except Exception:
+                    # Public price-protection metadata is allowed to recover
+                    # until the original market observation expires.
+                    return False, 0
+                if adjusted_perp_limit_price is None:
+                    await self.database.fail_market_unexecutable_trade_intent(
+                        intent_id=intent.id
+                    )
+                    return False, 0
+            if intent.action == "open":
+                try:
+                    await client.configure_perp(
+                        symbol=primary["perp"].symbol,
+                        leverage=intent.leverage,
+                        position_mode=snapshot.position_mode,
+                    )
+                except Exception as exc:
+                    raise LivePreflightError(
+                        "perp_configuration_failed"
+                    ) from exc
             prepared = await self.database.prepare_live_submission(
-                intent_id=intent.id
+                intent_id=intent.id,
+                adjusted_perp_limit_price=adjusted_perp_limit_price,
             )
             if prepared is None or not prepared[2]:
                 return False, 0
@@ -254,10 +288,6 @@ class LiveExecutionService:
                     )
                 )
 
-            gate_sandbox = (
-                exchange == Exchange.GATE
-                and environment == ExchangeEnvironment.SANDBOX
-            )
             ordered_legs = (
                 [prepared_legs["perp"], prepared_legs["spot"]]
                 if gate_sandbox
@@ -356,12 +386,20 @@ class LiveCompensationService:
             ExchangeAdapter,
         ]
         | None = None,
+        gate_price_guard_factory: Callable[
+            [ExchangeEnvironment],
+            PerpPriceGuard,
+        ]
+        | None = None,
     ) -> None:
         self.database = database
         self.credentials = credentials
         self.account_client_factory = account_client_factory
         self.gate_adapter_factory = gate_adapter_factory or (
             lambda environment: GateAdapter(environment=environment)
+        )
+        self.gate_price_guard_factory = gate_price_guard_factory or (
+            lambda environment: GatePerpPriceGuard(environment)
         )
 
     async def run_once(self) -> LiveCompensationResult:
@@ -494,6 +532,22 @@ class LiveCompensationService:
             side=compensation.side,
             price_increment=price_increment,
         )
+        if (
+            exchange == Exchange.GATE
+            and environment == ExchangeEnvironment.SANDBOX
+            and compensation.market == "perp"
+        ):
+            guarded_limit = await _gate_sandbox_guarded_perp_limit(
+                self.gate_price_guard_factory,
+                environment=environment,
+                leg=compensation,
+                planned_limit_price=limit_price,
+            )
+            if guarded_limit is None:
+                raise RuntimeError(
+                    "Gate Sandbox compensation is outside the price band"
+                )
+            limit_price = guarded_limit
         base_quantity = executable_quantity * compensation.base_multiplier
         capacity = (
             opportunity.close_top_book_notional
@@ -760,3 +814,28 @@ def _decimal_equal(left: Decimal, right: Decimal) -> bool:
 
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+async def _gate_sandbox_guarded_perp_limit(
+    factory: Callable[[ExchangeEnvironment], PerpPriceGuard],
+    *,
+    environment: ExchangeEnvironment,
+    leg: OrderLegRow,
+    planned_limit_price: Decimal | None = None,
+) -> Decimal | None:
+    guard = factory(environment)
+    try:
+        return await guard.executable_limit(
+            symbol=leg.symbol,
+            side=leg.side,
+            planned_limit_price=(
+                planned_limit_price
+                if planned_limit_price is not None
+                else leg.limit_price
+            ),
+        )
+    finally:
+        try:
+            await guard.close()
+        except Exception:
+            pass

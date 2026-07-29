@@ -22,6 +22,7 @@ from basis_hawk.executable_quotes import (
     market_quote_from_opportunity,
     opportunity_with_executable_quote,
 )
+from basis_hawk.gate_price_guard import GatePerpPriceGuard, PerpPriceGuard
 from basis_hawk.models import (
     Exchange,
     FeeRate,
@@ -30,6 +31,7 @@ from basis_hawk.models import (
     Opportunity,
     Quality,
 )
+from basis_hawk.sizing import protective_limit_price
 from basis_hawk.storage import Database
 from basis_hawk.trading import (
     IdempotencyConflict,
@@ -403,11 +405,19 @@ class AutomaticTradingService:
             ExchangeAdapter,
         ]
         | None = None,
+        gate_price_guard_factory: Callable[
+            [ExchangeEnvironment],
+            PerpPriceGuard,
+        ]
+        | None = None,
     ) -> None:
         self.database = database
         self.ledger = ledger or TradeLedger(database)
         self.gate_adapter_factory = gate_adapter_factory or (
             lambda environment: GateAdapter(environment=environment)
+        )
+        self.gate_price_guard_factory = gate_price_guard_factory or (
+            lambda environment: GatePerpPriceGuard(environment)
         )
 
     async def run_once(self) -> AutomaticTradingResult:
@@ -535,6 +545,24 @@ class AutomaticTradingService:
                 action=decision.action,
                 reason="current instrument trading rules are incomplete",
             )
+        if (
+            decision.opportunity.exchange == Exchange.GATE
+            and config.environment == ExchangeEnvironment.SANDBOX.value
+            and not await self._gate_sandbox_decision_is_executable(
+                decision=decision,
+                pair=pair,
+                maximum_slippage=config.normal_max_slippage,
+            )
+        ):
+            return AutomaticTradingResult(
+                evaluated=True,
+                created=False,
+                action=decision.action,
+                reason=(
+                    "Gate Sandbox perpetual top book is outside the "
+                    "exchange price-protection band"
+                ),
+            )
         idempotency_key = uuid.uuid5(
             uuid.NAMESPACE_URL,
             ":".join(
@@ -607,6 +635,45 @@ class AutomaticTradingService:
             action=decision.action,
             reason=decision.reason,
         )
+
+    async def _gate_sandbox_decision_is_executable(
+        self,
+        *,
+        decision: AutomaticDecision,
+        pair: InstrumentPair,
+        maximum_slippage: Decimal,
+    ) -> bool:
+        side = "sell" if decision.action == "open" else "buy"
+        reference_price = (
+            decision.opportunity.perp_bid
+            if side == "sell"
+            else decision.opportunity.perp_ask
+        )
+        planned_limit_price = protective_limit_price(
+            reference_price=reference_price,
+            maximum_slippage=maximum_slippage,
+            side=side,
+            price_increment=pair.perp_price_increment,
+        )
+        guard = self.gate_price_guard_factory(
+            ExchangeEnvironment.SANDBOX
+        )
+        try:
+            return (
+                await guard.executable_limit(
+                    symbol=pair.perp_symbol,
+                    side=side,
+                    planned_limit_price=planned_limit_price,
+                )
+                is not None
+            )
+        except Exception:
+            return False
+        finally:
+            try:
+                await guard.close()
+            except Exception:
+                pass
 
     async def _refresh_gate_automatic_capacity(
         self,

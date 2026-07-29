@@ -547,6 +547,11 @@ def _trade_notification(
                 "and execution remains paused."
             ),
         )
+    if (
+        status == "failed"
+        and intent.failure_code == "market_unexecutable"
+    ):
+        return None
     if status in {"failed", "manual_review"}:
         return (
             f"trade.{status}",

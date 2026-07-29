@@ -508,6 +508,26 @@ class _GateDepthAdapter:
         self.closed = True
 
 
+class _GateDecisionGuard:
+    def __init__(self, executable: bool) -> None:
+        self.executable = executable
+        self.calls: list[tuple[str, str, Decimal]] = []
+        self.closed = False
+
+    async def executable_limit(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        planned_limit_price: Decimal,
+    ) -> Decimal | None:
+        self.calls.append((symbol, side, planned_limit_price))
+        return planned_limit_price if self.executable else None
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 async def test_gate_automatic_service_fetches_bounded_sandbox_depth() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()
@@ -583,17 +603,42 @@ async def test_gate_automatic_service_fetches_bounded_sandbox_depth() -> None:
         environments.append(environment)
         return adapter
 
+    blocked_guard = _GateDecisionGuard(False)
+    blocked = await AutomaticTradingService(
+        database,
+        gate_adapter_factory=gate_adapter_factory,
+        gate_price_guard_factory=lambda environment: blocked_guard,
+    ).run_once()
+
+    assert blocked.created is False
+    assert blocked.action == "open"
+    assert "price-protection band" in blocked.reason
+    assert blocked_guard.calls == [
+        ("GATE00_USDT", "sell", Decimal("10.09"))
+    ]
+    assert blocked_guard.closed is True
+    assert await database.recoverable_trade_intents() == []
+
+    allowed_guard = _GateDecisionGuard(True)
     result = await AutomaticTradingService(
         database,
         gate_adapter_factory=gate_adapter_factory,
+        gate_price_guard_factory=lambda environment: allowed_guard,
     ).run_once()
 
     assert result.created is True
     assert result.action == "open"
-    assert environments == [ExchangeEnvironment.SANDBOX]
-    assert len(adapter.calls) == GATE_AUTOMATIC_DEPTH_CANDIDATES
+    assert environments == [
+        ExchangeEnvironment.SANDBOX,
+        ExchangeEnvironment.SANDBOX,
+    ]
+    assert len(adapter.calls) == GATE_AUTOMATIC_DEPTH_CANDIDATES * 2
     assert adapter.calls[0] == "GATE00"
     assert adapter.closed is True
+    assert allowed_guard.calls == [
+        ("GATE00_USDT", "sell", Decimal("10.09"))
+    ]
+    assert allowed_guard.closed is True
     recoverable = await database.recoverable_trade_intents()
     assert len(recoverable) == 1
     assert recoverable[0].exchange == Exchange.GATE.value

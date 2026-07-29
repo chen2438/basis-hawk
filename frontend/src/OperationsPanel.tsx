@@ -99,6 +99,7 @@ export const reconciliationReason = (reason: string) => {
 };
 const tradeFailureReasons: Record<string, string> = {
   market_data_expired: "行情数据过期，订单未提交",
+  market_unexecutable: "Gate 测试网盘口超出交易所价格保护范围，双腿均未提交",
   no_fills: "现货与永续均未成交",
   exposure_neutralized: "单腿成交后已补偿归零，未建立持仓",
   state_transition_failed: "交易状态机已终止该意图",

@@ -130,6 +130,53 @@ async def test_projection_routes_trade_success_and_imbalance() -> None:
     await database.close()
 
 
+async def test_projection_does_not_alert_expected_market_unexecutable_skip() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    now = datetime.now(UTC)
+    intent_id = str(uuid.uuid4())
+    async with database.sessions() as session:
+        session.add(
+            TradeIntentRow(
+                id=intent_id,
+                paired_position_id=None,
+                idempotency_key=str(uuid.uuid4()),
+                request_fingerprint="f" * 64,
+                exchange="gate",
+                environment="sandbox",
+                base_asset="SWARMS",
+                action="close",
+                emergency=False,
+                status="planned",
+                leverage=1,
+                requested_notional=Decimal("10"),
+                base_quantity=Decimal("100"),
+                spot_fee_rate=Decimal("0.001"),
+                perp_fee_rate=Decimal("0.00075"),
+                market_observed_at=now,
+                config_version="config",
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+    projector = NotificationProjectionService(database)
+    await projector.run_once(emit_initial_alerts=False)
+    async with database.sessions() as session:
+        intent = await session.get(TradeIntentRow, intent_id)
+        assert intent is not None
+        intent.status = "failed"
+        intent.failure_code = "market_unexecutable"
+        intent.version += 1
+        intent.updated_at = datetime.now(UTC)
+        await session.commit()
+
+    assert await projector.run_once() == 0
+    assert await database.notification_outbox() == []
+    await database.close()
+
+
 async def test_projection_sends_one_summary_for_completed_utc_day() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()

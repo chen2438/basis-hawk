@@ -642,6 +642,12 @@ describe("Basis Hawk dashboard", () => {
     expect(screen.getByRole("heading", { name: "实际资金费" })).toBeTruthy();
     expect(screen.getByText(/最近 100 条持久化开平仓请求/)).toBeTruthy();
     expect(screen.getByText("行情数据过期，订单未提交")).toBeTruthy();
+    expect(tradeFailureReason({
+      status: "failed",
+      failure_code: "market_unexecutable",
+    } as Parameters<typeof tradeFailureReason>[0])).toBe(
+      "Gate 测试网盘口超出交易所价格保护范围，双腿均未提交",
+    );
     expect(screen.getAllByText("failed-i")).toHaveLength(3);
     expect(screen.getAllByText("创建时间")).toHaveLength(2);
     expect(screen.getByText("状态更新时间")).toBeTruthy();

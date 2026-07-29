@@ -168,6 +168,26 @@ class FakeLiveAccountClient:
         self.closed = True
 
 
+class FakeGatePriceGuard:
+    def __init__(self, result: Decimal | None) -> None:
+        self.result = result
+        self.calls: list[tuple[str, str, Decimal]] = []
+        self.closed = False
+
+    async def executable_limit(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        planned_limit_price: Decimal,
+    ) -> Decimal | None:
+        self.calls.append((symbol, side, planned_limit_price))
+        return self.result
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 async def _planned_live_intent(
     database: Database,
     *,
@@ -205,16 +225,22 @@ async def _planned_live_close(
     database: Database,
     *,
     emergency: bool = False,
+    exchange: Exchange = Exchange.OKX,
+    environment: ExchangeEnvironment = ExchangeEnvironment.LIVE,
 ) -> tuple[CredentialService, str, str]:
-    credentials, opening_intent_id = await _planned_live_intent(database)
+    credentials, opening_intent_id = await _planned_live_intent(
+        database,
+        exchange=exchange,
+        environment=environment,
+    )
     opening = await database.trade_intent(opening_intent_id)
     assert opening is not None
     now = datetime.now(UTC)
     position = PairedPositionRow(
         id=str(uuid.uuid4()),
         opening_intent_id=opening_intent_id,
-        exchange=Exchange.OKX.value,
-        environment=ExchangeEnvironment.LIVE.value,
+        exchange=exchange.value,
+        environment=environment.value,
         base_asset="ORDER",
         initial_quantity=opening[0].base_quantity,
         quantity=opening[0].base_quantity,
@@ -233,11 +259,13 @@ async def _planned_live_close(
         await session.commit()
     closing, _ = await TradeLedger(database).plan_live_close(
         position_id=position.id,
-        opportunity=_opportunity(),
-        pair=_pair(),
+        opportunity=_opportunity().model_copy(
+            update={"exchange": exchange}
+        ),
+        pair=_pair().model_copy(update={"exchange": exchange}),
         idempotency_key=uuid.uuid4(),
         settings=ScannerSettings(),
-        environment=ExchangeEnvironment.LIVE,
+        environment=environment,
         maximum_slippage=(
             Decimal("0.2") if emergency else Decimal("0.001")
         ),
@@ -295,19 +323,79 @@ async def test_gate_sandbox_submits_perp_before_spot_without_parallel_requests()
         exchange=Exchange.GATE,
         environment=ExchangeEnvironment.SANDBOX,
     )
+    guard = FakeGatePriceGuard(Decimal("0.05095"))
 
     result = await LiveExecutionService(
         database,
         credentials,
         account_client_factory=lambda exchange, secrets, environment: client,
+        gate_price_guard_factory=lambda environment: guard,
     ).run_once()
 
     assert result.submitted == 1
     assert result.uncertain == 0
     assert [item.market for item in client.placed] == ["perp", "spot"]
+    assert client.placed[0].limit_price == Decimal("0.05095")
+    assert guard.closed is True
     stored = await database.trade_intent(intent_id)
     assert stored is not None
     assert {item.status for item in stored[1]} == {"acknowledged"}
+    await database.close()
+
+
+async def test_gate_sandbox_unexecutable_close_submits_neither_leg() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    credentials, intent_id, position_id = await _planned_live_close(
+        database,
+        exchange=Exchange.GATE,
+        environment=ExchangeEnvironment.SANDBOX,
+    )
+    await database.set_execution_control(state="ready", reason="test")
+    client = FakeLiveAccountClient(
+        database,
+        exchange=Exchange.GATE,
+        environment=ExchangeEnvironment.SANDBOX,
+        positions=[
+            RemotePosition(
+                symbol="ORDER-USDT-SWAP",
+                side="short",
+                quantity=Decimal("200"),
+                entry_price=Decimal("0.051"),
+                mark_price=Decimal("0.05"),
+                liquidation_price=Decimal("0.09"),
+                leverage=Decimal("2"),
+                isolated=True,
+            )
+        ],
+    )
+    guard = FakeGatePriceGuard(None)
+
+    result = await LiveExecutionService(
+        database,
+        credentials,
+        account_client_factory=lambda exchange, secrets, environment: client,
+        gate_price_guard_factory=lambda environment: guard,
+    ).run_once()
+
+    stored = await database.trade_intent(intent_id)
+    position = await database.paired_position(position_id)
+    control = await database.execution_control()
+    assert result.examined == 1
+    assert result.submitted == 0
+    assert result.preflight_failed == 0
+    assert client.placed == []
+    assert client.configured == []
+    assert stored is not None
+    assert stored[0].status == "failed"
+    assert stored[0].failure_code == "market_unexecutable"
+    assert {item.status for item in stored[1]} == {"created"}
+    assert position is not None
+    assert position.status == "open"
+    assert position.closing_intent_id is None
+    assert control is not None
+    assert control.state == "ready"
+    assert guard.closed is True
     await database.close()
 
 
