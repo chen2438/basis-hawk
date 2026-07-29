@@ -480,6 +480,11 @@ async def test_gate_account_snapshot_and_signature() -> None:
             )
         if request.url.path.endswith("/wallet/fee"):
             return httpx.Response(
+                403,
+                json={"label": "FORBIDDEN", "message": "wallet permission required"},
+            )
+        if request.url.path.endswith("/spot/fee"):
+            return httpx.Response(
                 200,
                 json={"gt_discount": False, "debit_fee": 3},
             )

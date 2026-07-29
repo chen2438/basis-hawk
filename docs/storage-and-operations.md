@@ -256,10 +256,11 @@ Gate LIVE/SANDBOX 各自使用现货与 USDT 永续两条私有连接。LIVE RES
 任一通道断开即使整个 Gate 连接失败并由监督器重连。Gate LIVE 与 SANDBOX 凭据以
 `(exchange, environment)` 分别保存，worker 可同时热重载两套连接；账户快照、私有流状态、订单、
 仓位和交易意图始终携带环境，禁止跨环境组成套利双腿。常驻 worker 已装配 Gate。
-Gate 账户快照同时签名读取官方 `/wallet/fee`。只有 `gt_discount=false` 且 `debit_fee` 明确不为
-GT 或点卡抵扣时，系统才把 `spot_buy_fee_in_base=true` 持久化到本轮 `account_snapshots`；任一替代
-抵扣启用写为 false，请求失败或字段不完整写为 null。只有 true 才允许开仓规划提前按配置的现货
-taker 费率折减预计基础币净到账量；其他状态保持原双腿毛数量规划。
+Gate 账户快照同时签名读取官方 `/wallet/fee`；当 API Key 没有钱包读取权限时，再只读回退到 Gate
+仍兼容的 `/spot/fee`，不因权限范围扩大要求而丢失扣费模式。只有 `gt_discount=false` 且
+`debit_fee` 明确不为 GT 或点卡抵扣时，系统才把 `spot_buy_fee_in_base=true` 持久化到本轮
+`account_snapshots`；任一替代抵扣启用写为 false，两个接口均失败或字段不完整写为 null。只有 true
+才允许开仓规划提前按配置的现货 taker 费率折减预计基础币净到账量；其他状态保持原双腿毛数量规划。
 MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
 `spot@private.orders.v3.api.pb`、`spot@private.deals.v3.api.pb` 和
 `spot@private.account.v3.api.pb` 三个 Protobuf 频道；每 30 分钟续期，续期失败或返回不同 key 即断线，

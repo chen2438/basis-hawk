@@ -3049,11 +3049,12 @@ class GateAccountClient(PrivateAccountClient):
             self._get("/api/v4/spot/accounts", currency="USDT"),
             self._get("/api/v4/futures/usdt/accounts"),
         )
-        try:
-            account_fee = await self._get("/api/v4/wallet/fee")
-        except PrivateRequestError:
-            spot_buy_fee_in_base = None
-        else:
+        spot_buy_fee_in_base = None
+        for fee_path in ("/api/v4/wallet/fee", "/api/v4/spot/fee"):
+            try:
+                account_fee = await self._get(fee_path)
+            except PrivateRequestError:
+                continue
             gt_discount = (
                 account_fee.get("gt_discount")
                 if isinstance(account_fee, dict)
@@ -3064,11 +3065,14 @@ class GateAccountClient(PrivateAccountClient):
                 if isinstance(account_fee, dict)
                 else None
             )
-            spot_buy_fee_in_base = (
+            confirmed_fee_mode = (
                 gt_discount is False and debit_fee not in {1, 2}
                 if isinstance(gt_discount, bool) and type(debit_fee) is int
                 else None
             )
+            if confirmed_fee_mode is not None:
+                spot_buy_fee_in_base = confirmed_fee_mode
+                break
         margin_mode = int(perp.get("margin_mode") or 0)
         if margin_mode not in {0, 2}:
             raise PrivateRequestError(
