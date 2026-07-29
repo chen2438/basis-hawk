@@ -518,6 +518,11 @@ class PrivateAccountClient(ABC):
     @abstractmethod
     async def snapshot(self) -> AccountSnapshot: ...
 
+    async def spot_asset_available(self, asset: str) -> Decimal:
+        raise UnsupportedTradingError(
+            f"{self.exchange.value} spot inventory lookup is not implemented"
+        )
+
     @abstractmethod
     async def trading_state(self) -> RemoteTradingState: ...
 
@@ -712,9 +717,7 @@ class BinanceAccountClient(PrivateAccountClient):
             environment=self.environment,
             observed_at=datetime.now(UTC),
             spot_usdt_available=Decimal(str(spot_usdt.get("free") or "0")),
-            perp_usdt_available=Decimal(
-                str(perp_usdt.get("availableBalance") or "0")
-            ),
+            perp_usdt_available=Decimal(str(perp_usdt.get("availableBalance") or "0")),
             perp_usdt_equity=Decimal(str(perp_usdt.get("walletBalance") or "0")),
             shared_balance=False,
             account_mode=str(spot.get("accountType") or "spot+usdt_futures"),
@@ -725,6 +728,21 @@ class BinanceAccountClient(PrivateAccountClient):
             ),
             trade_permission=bool(spot.get("canTrade"))
             and bool(configuration.get("canTrade")),
+        )
+
+    async def spot_asset_available(self, asset: str) -> Decimal:
+        payload = await self._get(self.spot, "/api/v3/account")
+        item = next(
+            (
+                row
+                for row in payload.get("balances", [])
+                if str(row.get("asset") or "").upper() == asset.upper()
+            ),
+            {},
+        )
+        return _required_non_negative_decimal(
+            item.get("free") or "0",
+            f"Binance {asset.upper()} available balance",
         )
 
     async def submit_internal_transfer(
@@ -784,15 +802,9 @@ class BinanceAccountClient(PrivateAccountClient):
         )
         rows = payload.get("rows")
         if not isinstance(rows, list):
-            raise PrivateRequestError(
-                "Binance internal transfer history is incomplete"
-            )
+            raise PrivateRequestError("Binance internal transfer history is incomplete")
         match = next(
-            (
-                item
-                for item in rows
-                if str(item.get("tranId") or "") == transfer_id
-            ),
+            (item for item in rows if str(item.get("tranId") or "") == transfer_id),
             None,
         )
         if match is None:
@@ -948,9 +960,7 @@ class BinanceAccountClient(PrivateAccountClient):
                 client_id="clientOrderId",
                 quantity="origQty",
                 filled="executedQty",
-                reduce_only=(
-                    _binance_reduce_only(item) if market == "perp" else False
-                ),
+                reduce_only=(_binance_reduce_only(item) if market == "perp" else False),
             ),
             complete=True,
         )
@@ -1058,9 +1068,7 @@ class BinanceAccountClient(PrivateAccountClient):
         return OrderSubmission(
             market=order.market,
             symbol=str(item.get("symbol") or order.symbol),
-            client_order_id=str(
-                item.get("clientOrderId") or order.client_order_id
-            ),
+            client_order_id=str(item.get("clientOrderId") or order.client_order_id),
             exchange_order_id=(
                 str(item["orderId"]) if item.get("orderId") is not None else None
             ),
@@ -1119,8 +1127,7 @@ class BinanceAccountClient(PrivateAccountClient):
         )
         if not isolated:
             has_position = any(
-                Decimal(str(item.get("positionAmt") or "0")) != 0
-                for item in positions
+                Decimal(str(item.get("positionAmt") or "0")) != 0 for item in positions
             )
             if orders or has_position:
                 raise PrivateRequestError(
@@ -1134,7 +1141,9 @@ class BinanceAccountClient(PrivateAccountClient):
                 marginType="ISOLATED",
             )
             if int(result.get("code") or 0) != 200:
-                raise PrivateRequestError("Binance isolated margin configuration failed")
+                raise PrivateRequestError(
+                    "Binance isolated margin configuration failed"
+                )
         result = await self._signed_request(
             self.perp,
             "POST",
@@ -1143,7 +1152,9 @@ class BinanceAccountClient(PrivateAccountClient):
             leverage=leverage,
         )
         if int(result.get("leverage") or 0) != leverage:
-            raise PrivateRequestError("Binance leverage configuration was not confirmed")
+            raise PrivateRequestError(
+                "Binance leverage configuration was not confirmed"
+            )
         return PerpConfiguration(
             symbol=symbol,
             leverage=leverage,
@@ -1175,7 +1186,9 @@ class OkxAccountClient(PrivateAccountClient):
         self.secrets = secrets
         self.environment = environment
         self.clock = clock or (lambda: datetime.now(UTC))
-        self.http = client or httpx.AsyncClient(base_url="https://www.okx.com", timeout=timeout)
+        self.http = client or httpx.AsyncClient(
+            base_url="https://www.okx.com", timeout=timeout
+        )
         self._owned = client is None
 
     async def _get(self, path: str, **params: object) -> Any:
@@ -1209,8 +1222,11 @@ class OkxAccountClient(PrivateAccountClient):
         *,
         body: str = "",
     ) -> dict[str, str]:
-        timestamp = self.clock().astimezone(UTC).isoformat(timespec="milliseconds").replace(
-            "+00:00", "Z"
+        timestamp = (
+            self.clock()
+            .astimezone(UTC)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
         )
         headers = {
             "OK-ACCESS-KEY": self.secrets.api_key,
@@ -1259,9 +1275,27 @@ class OkxAccountClient(PrivateAccountClient):
                 if configuration.get("posMode") == "net_mode"
                 else PositionMode.UNKNOWN
             ),
-            trade_permission=(
-                "trade" in permissions if permissions else None
+            trade_permission=("trade" in permissions if permissions else None),
+        )
+
+    async def spot_asset_available(self, asset: str) -> Decimal:
+        payload = await self._get(
+            "/api/v5/account/balance",
+            ccy=asset.upper(),
+        )
+        _okx_success(payload)
+        account = (payload.get("data") or [{}])[0]
+        item = next(
+            (
+                row
+                for row in account.get("details") or []
+                if str(row.get("ccy") or "").upper() == asset.upper()
             ),
+            {},
+        )
+        return _required_non_negative_decimal(
+            item.get("availBal") or "0",
+            f"OKX {asset.upper()} available balance",
         )
 
     async def trading_state(self) -> RemoteTradingState:
@@ -1315,7 +1349,9 @@ class OkxAccountClient(PrivateAccountClient):
             orders,
             normalized_positions,
             complete=complete,
-            incomplete_reason=None if complete else "OKX reconciliation result may be paginated",
+            incomplete_reason=None
+            if complete
+            else "OKX reconciliation result may be paginated",
         )
 
     async def fills_for_order(
@@ -1343,9 +1379,7 @@ class OkxAccountClient(PrivateAccountClient):
                 exchange_trade_id=str(item.get("tradeId") or item.get("billId") or ""),
                 exchange_order_id=str(item.get("ordId") or exchange_order_id or ""),
                 client_order_id=(
-                    str(item["clOrdId"])
-                    if item.get("clOrdId")
-                    else client_order_id
+                    str(item["clOrdId"]) if item.get("clOrdId") else client_order_id
                 ),
                 market=market,
                 symbol=str(item.get("instId") or symbol),
@@ -1394,9 +1428,7 @@ class OkxAccountClient(PrivateAccountClient):
         return RemoteOrderLookup(
             order=RemoteOrder(
                 exchange_order_id=str(item.get("ordId") or ""),
-                client_order_id=(
-                    str(item["clOrdId"]) if item.get("clOrdId") else None
-                ),
+                client_order_id=(str(item["clOrdId"]) if item.get("clOrdId") else None),
                 market=market,
                 symbol=str(item.get("instId") or symbol),
                 side=str(item.get("side") or "").lower(),
@@ -1431,9 +1463,7 @@ class OkxAccountClient(PrivateAccountClient):
                     str(item.get("instId") or ""),
                 ),
                 asset=str(item.get("ccy") or ""),
-                amount=Decimal(
-                    str(item.get("balChg") or item.get("pnl") or "0")
-                ),
+                amount=Decimal(str(item.get("balChg") or item.get("pnl") or "0")),
                 occurred_at=_from_milliseconds(item.get("ts")),
             )
             for item in items
@@ -1474,9 +1504,7 @@ class OkxAccountClient(PrivateAccountClient):
             )
         values: dict[str, object] = {
             "instId": order.symbol,
-            "tdMode": (
-                "cash" if order.market == "spot" else order.margin_mode.value
-            ),
+            "tdMode": ("cash" if order.market == "spot" else order.margin_mode.value),
             "clOrdId": order.client_order_id,
             "side": order.side,
             "ordType": {
@@ -1501,9 +1529,7 @@ class OkxAccountClient(PrivateAccountClient):
             market=order.market,
             symbol=order.symbol,
             client_order_id=str(item.get("clOrdId") or order.client_order_id),
-            exchange_order_id=(
-                str(item["ordId"]) if item.get("ordId") else None
-            ),
+            exchange_order_id=(str(item["ordId"]) if item.get("ordId") else None),
         )
 
     async def cancel_order(
@@ -1561,9 +1587,9 @@ class OkxAccountClient(PrivateAccountClient):
             ),
             None,
         )
-        if current is not None and Decimal(
-            str(current.get("lever") or "0")
-        ) == Decimal(leverage):
+        if current is not None and Decimal(str(current.get("lever") or "0")) == Decimal(
+            leverage
+        ):
             return PerpConfiguration(
                 symbol=symbol,
                 leverage=leverage,
@@ -1735,12 +1761,9 @@ class BybitAccountClient(PrivateAccountClient):
         contract_permissions = {
             str(item) for item in permissions.get("ContractTrade") or []
         }
-        spot_permissions = {
-            str(item) for item in permissions.get("Spot") or []
-        }
-        permission_known = (
-            key_details.get("readOnly") is not None
-            and isinstance(raw_permissions, dict)
+        spot_permissions = {str(item) for item in permissions.get("Spot") or []}
+        permission_known = key_details.get("readOnly") is not None and isinstance(
+            raw_permissions, dict
         )
         wallet_balance = Decimal(str(coin.get("walletBalance") or "0"))
         locked = Decimal(str(coin.get("locked") or "0"))
@@ -1751,16 +1774,10 @@ class BybitAccountClient(PrivateAccountClient):
         if str(details.get("marginMode") or "") == "ISOLATED_MARGIN":
             available = max(
                 Decimal("0"),
-                wallet_balance
-                - total_position_im
-                - total_order_im
-                - locked
-                - bonus,
+                wallet_balance - total_position_im - total_order_im - locked - bonus,
             )
         else:
-            available = Decimal(
-                str(account.get("totalAvailableBalance") or "0")
-            )
+            available = Decimal(str(account.get("totalAvailableBalance") or "0"))
         spot_available = max(
             Decimal("0"),
             wallet_balance - locked - spot_borrow,
@@ -1787,6 +1804,36 @@ class BybitAccountClient(PrivateAccountClient):
             ),
         )
 
+    async def spot_asset_available(self, asset: str) -> Decimal:
+        payload = await self._get(
+            "/v5/account/wallet-balance",
+            accountType="UNIFIED",
+            coin=asset.upper(),
+        )
+        _bybit_success(payload)
+        account = ((payload.get("result") or {}).get("list") or [{}])[0]
+        item = next(
+            (
+                row
+                for row in account.get("coin", [])
+                if str(row.get("coin") or "").upper() == asset.upper()
+            ),
+            {},
+        )
+        wallet = _required_non_negative_decimal(
+            item.get("walletBalance") or "0",
+            f"Bybit {asset.upper()} wallet balance",
+        )
+        locked = _required_non_negative_decimal(
+            item.get("locked") or "0",
+            f"Bybit {asset.upper()} locked balance",
+        )
+        borrowed = _required_non_negative_decimal(
+            item.get("spotBorrow") or "0",
+            f"Bybit {asset.upper()} borrowed balance",
+        )
+        return max(Decimal("0"), wallet - locked - borrowed)
+
     async def trading_state(self) -> RemoteTradingState:
         spot_orders, perp_orders, positions = await _gather(
             self._paged("/v5/order/realtime", category="spot", limit=50),
@@ -1803,10 +1850,7 @@ class BybitAccountClient(PrivateAccountClient):
                 limit=200,
             ),
         )
-        orders = [
-            _bybit_order(item, market="spot")
-            for item in spot_orders
-        ]
+        orders = [_bybit_order(item, market="spot") for item in spot_orders]
         orders.extend(_bybit_order(item, market="perp") for item in perp_orders)
         normalized_positions = [
             RemotePosition(
@@ -1985,9 +2029,7 @@ class BybitAccountClient(PrivateAccountClient):
             "category": "spot" if order.market == "spot" else "linear",
             "symbol": order.symbol,
             "side": order.side.title(),
-            "orderType": (
-                "Market" if order.mode == OrderMode.MARKET else "Limit"
-            ),
+            "orderType": ("Market" if order.mode == OrderMode.MARKET else "Limit"),
             "qty": format(order.quantity, "f"),
             "orderLinkId": order.client_order_id,
         }
@@ -2001,11 +2043,7 @@ class BybitAccountClient(PrivateAccountClient):
             values["isLeverage"] = 0
         else:
             values["positionIdx"] = (
-                (
-                    1
-                    if order.position_side == PerpPositionSide.LONG
-                    else 2
-                )
+                (1 if order.position_side == PerpPositionSide.LONG else 2)
                 if order.position_mode == PositionMode.HEDGE
                 else 0
             )
@@ -2018,9 +2056,7 @@ class BybitAccountClient(PrivateAccountClient):
         return OrderSubmission(
             market=order.market,
             symbol=order.symbol,
-            client_order_id=str(
-                result.get("orderLinkId") or order.client_order_id
-            ),
+            client_order_id=str(result.get("orderLinkId") or order.client_order_id),
             exchange_order_id=exchange_order_id,
         )
 
@@ -2121,8 +2157,7 @@ class BybitAccountClient(PrivateAccountClient):
             ),
         )
         if open_orders or any(
-            Decimal(str(item.get("size") or "0")) != 0
-            for item in all_positions
+            Decimal(str(item.get("size") or "0")) != 0 for item in all_positions
         ):
             raise PrivateRequestError(
                 "cannot change Bybit margin or leverage with open orders or positions"
@@ -2281,9 +2316,10 @@ class BitgetAccountClient(PrivateAccountClient):
         )
         _bitget_success(classic)
         details = classic.get("data")
-        if not isinstance(details, dict) or str(
-            details.get("posMode") or ""
-        ) not in {"one_way_mode", "hedge_mode"}:
+        if not isinstance(details, dict) or str(details.get("posMode") or "") not in {
+            "one_way_mode",
+            "hedge_mode",
+        }:
             raise PrivateRequestError(
                 "Bitget account generation could not be identified safely"
             )
@@ -2369,8 +2405,7 @@ class BitgetAccountClient(PrivateAccountClient):
             perp_usdt_equity=Decimal(str(contract.get("accountEquity") or "0")),
             shared_balance=contract.get("assetMode") == "union",
             account_mode=(
-                f"{contract.get('assetMode', 'unknown')}:"
-                f"{contract.get('marginMode', 'unknown')}"
+                f"{contract.get('assetMode', 'unknown')}:{contract.get('marginMode', 'unknown')}"
             ),
             position_mode=(
                 PositionMode.HEDGE
@@ -2383,6 +2418,32 @@ class BitgetAccountClient(PrivateAccountClient):
                 info,
                 generation="classic",
             ),
+        )
+
+    async def spot_asset_available(self, asset: str) -> Decimal:
+        generation = await self._detect_account_generation()
+        if generation == "uta":
+            payload = await self._get("/api/v3/account/assets")
+            assets = _bitget_result(payload, "UTA account assets")
+            rows = assets.get("assets") or []
+        else:
+            payload = await self._get(
+                "/api/v2/spot/account/assets",
+                coin=asset.upper(),
+            )
+            _bitget_success(payload)
+            rows = payload.get("data") or []
+        item = next(
+            (
+                row
+                for row in rows
+                if str(row.get("coin") or "").upper() == asset.upper()
+            ),
+            {},
+        )
+        return _required_non_negative_decimal(
+            item.get("available") or "0",
+            f"Bitget {asset.upper()} available balance",
         )
 
     async def trading_state(self) -> RemoteTradingState:
@@ -2412,9 +2473,7 @@ class BitgetAccountClient(PrivateAccountClient):
             spot_orders = spot_data.get("list") or []
             perp_orders = perp_data.get("list") or []
             position_items = position_data.get("list") or []
-            orders = [
-                _bitget_uta_order(item, market="spot") for item in spot_orders
-            ]
+            orders = [_bitget_uta_order(item, market="spot") for item in spot_orders]
             orders.extend(
                 _bitget_uta_order(item, market="perp") for item in perp_orders
             )
@@ -2425,13 +2484,9 @@ class BitgetAccountClient(PrivateAccountClient):
                     quantity=Decimal(str(item.get("total") or "0")),
                     entry_price=Decimal(str(item.get("avgPrice") or "0")),
                     mark_price=Decimal(str(item.get("markPrice") or "0")),
-                    liquidation_price=_optional_decimal(
-                        item.get("liquidationPrice")
-                    ),
+                    liquidation_price=_optional_decimal(item.get("liquidationPrice")),
                     leverage=Decimal(str(item.get("leverage") or "0")),
-                    isolated=(
-                        str(item.get("marginMode") or "").lower() == "isolated"
-                    ),
+                    isolated=(str(item.get("marginMode") or "").lower() == "isolated"),
                 )
                 for item in position_items
                 if Decimal(str(item.get("total") or "0")) != 0
@@ -2468,10 +2523,7 @@ class BitgetAccountClient(PrivateAccountClient):
         perp_data = perp_payload.get("data") or {}
         perp_orders = perp_data.get("entrustedList") or []
         position_items = position_payload.get("data") or []
-        orders = [
-            _bitget_order(item, market="spot")
-            for item in spot_orders
-        ]
+        orders = [_bitget_order(item, market="spot") for item in spot_orders]
         orders.extend(_bitget_order(item, market="perp") for item in perp_orders)
         positions = [
             RemotePosition(
@@ -2527,9 +2579,7 @@ class BitgetAccountClient(PrivateAccountClient):
                     exchange_trade_id=str(
                         item.get("execId") or item.get("execLinkId") or ""
                     ),
-                    exchange_order_id=str(
-                        item.get("orderId") or exchange_order_id
-                    ),
+                    exchange_order_id=str(item.get("orderId") or exchange_order_id),
                     client_order_id=(
                         str(item["clientOid"])
                         if item.get("clientOid")
@@ -2584,9 +2634,7 @@ class BitgetAccountClient(PrivateAccountClient):
                 exchange_trade_id=str(item.get("tradeId") or ""),
                 exchange_order_id=str(item.get("orderId") or exchange_order_id or ""),
                 client_order_id=(
-                    str(item["clientOid"])
-                    if item.get("clientOid")
-                    else client_order_id
+                    str(item["clientOid"]) if item.get("clientOid") else client_order_id
                 ),
                 market=market,
                 symbol=str(item.get("symbol") or symbol),
@@ -2610,14 +2658,10 @@ class BitgetAccountClient(PrivateAccountClient):
                 fee_amount=_bitget_fee(item),
                 fee_asset=_bitget_fee_asset(item),
                 liquidity=str(
-                    item.get("tradeScope")
-                    or item.get("tradeSide")
-                    or "taker"
+                    item.get("tradeScope") or item.get("tradeSide") or "taker"
                 ).lower(),
                 occurred_at=_from_milliseconds(
-                    item.get("cTime")
-                    or item.get("createdTime")
-                    or item.get("uTime")
+                    item.get("cTime") or item.get("createdTime") or item.get("uTime")
                 ),
             )
             for item in items
@@ -2763,9 +2807,7 @@ class BitgetAccountClient(PrivateAccountClient):
                 symbol=str(item.get("symbol") or ""),
                 position_side=(
                     str(item.get("holdSide") or item.get("posSide") or "net").lower()
-                    if str(
-                        item.get("holdSide") or item.get("posSide") or "net"
-                    ).lower()
+                    if str(item.get("holdSide") or item.get("posSide") or "net").lower()
                     in {"long", "short", "net"}
                     else "net"
                 ),
@@ -2785,17 +2827,14 @@ class BitgetAccountClient(PrivateAccountClient):
         if generation == "uta":
             if not re.fullmatch(r"[.A-Za-z0-9_:/\-]{1,32}", order.client_order_id):
                 raise ValueError(
-                    "Bitget UTA client order IDs must be at most 32 supported "
-                    "ASCII characters"
+                    "Bitget UTA client order IDs must be at most 32 supported ASCII characters"
                 )
             values: dict[str, object] = {
                 "category": _bitget_uta_category(order.market),
                 "symbol": order.symbol,
                 "qty": format(order.quantity, "f"),
                 "side": order.side,
-                "orderType": (
-                    "market" if order.mode == OrderMode.MARKET else "limit"
-                ),
+                "orderType": ("market" if order.mode == OrderMode.MARKET else "limit"),
                 "clientOid": order.client_order_id,
             }
             if order.limit_price is not None:
@@ -2814,9 +2853,7 @@ class BitgetAccountClient(PrivateAccountClient):
                     values["reduceOnly"] = "yes"
             payload = await self._post("/api/v3/trade/place-order", **values)
             result = _bitget_result(payload, "UTA order submission")
-            result_client_id = str(
-                result.get("clientOid") or order.client_order_id
-            )
+            result_client_id = str(result.get("clientOid") or order.client_order_id)
             if not result_client_id:
                 raise PrivateRequestError(
                     "Bitget UTA order submission returned no client order ID"
@@ -2836,9 +2873,7 @@ class BitgetAccountClient(PrivateAccountClient):
         values: dict[str, object] = {
             "symbol": order.symbol,
             "side": order.side,
-            "orderType": (
-                "market" if order.mode == OrderMode.MARKET else "limit"
-            ),
+            "orderType": ("market" if order.mode == OrderMode.MARKET else "limit"),
             "size": format(order.quantity, "f"),
             "clientOid": order.client_order_id,
         }
@@ -2860,9 +2895,7 @@ class BitgetAccountClient(PrivateAccountClient):
             )
             if order.position_mode == PositionMode.HEDGE:
                 values["side"] = (
-                    "buy"
-                    if order.position_side == PerpPositionSide.LONG
-                    else "sell"
+                    "buy" if order.position_side == PerpPositionSide.LONG else "sell"
                 )
                 values["tradeSide"] = "close" if order.reduce_only else "open"
             else:
@@ -2905,14 +2938,10 @@ class BitgetAccountClient(PrivateAccountClient):
             payload = await self._post("/api/v3/trade/cancel-order", **values)
             result = _bitget_result(payload, "UTA order cancellation")
             result_order_id = (
-                str(result["orderId"])
-                if result.get("orderId")
-                else exchange_order_id
+                str(result["orderId"]) if result.get("orderId") else exchange_order_id
             )
             result_client_id = (
-                str(result["clientOid"])
-                if result.get("clientOid")
-                else client_order_id
+                str(result["clientOid"]) if result.get("clientOid") else client_order_id
             )
             if result_order_id is None and result_client_id is None:
                 raise PrivateRequestError(
@@ -2929,9 +2958,7 @@ class BitgetAccountClient(PrivateAccountClient):
         path = "/api/v2/spot/trade/cancel-order"
         if market == "perp":
             path = "/api/v2/mix/order/cancel-order"
-            values.update(
-                {"productType": "USDT-FUTURES", "marginCoin": "USDT"}
-            )
+            values.update({"productType": "USDT-FUTURES", "marginCoin": "USDT"})
         if exchange_order_id is not None:
             values["orderId"] = exchange_order_id
         else:
@@ -2993,11 +3020,9 @@ class BitgetAccountClient(PrivateAccountClient):
             raise PrivateRequestError(
                 "Bitget position mode does not match the requested configuration"
             )
-        if (
-            str(details.get("marginMode") or "").lower() == "isolated"
-            and Decimal(str(details.get("isolatedShortLever") or "0"))
-            == Decimal(leverage)
-        ):
+        if str(details.get("marginMode") or "").lower() == "isolated" and Decimal(
+            str(details.get("isolatedShortLever") or "0")
+        ) == Decimal(leverage):
             return PerpConfiguration(
                 symbol=symbol,
                 leverage=leverage,
@@ -3056,9 +3081,7 @@ class BitgetAccountClient(PrivateAccountClient):
             != Decimal(leverage)
             or str(leverage_result.get("marginMode") or "").lower() != "isolated"
         ):
-            raise PrivateRequestError(
-                "Bitget leverage configuration was not confirmed"
-            )
+            raise PrivateRequestError("Bitget leverage configuration was not confirmed")
         confirmed = await self._get(
             "/api/v2/mix/account/account",
             symbol=symbol,
@@ -3067,13 +3090,11 @@ class BitgetAccountClient(PrivateAccountClient):
         )
         _bitget_success(confirmed)
         confirmed_details = confirmed.get("data") or {}
-        if (
-            str(confirmed_details.get("marginMode") or "").lower() != "isolated"
-            or Decimal(
-                str(confirmed_details.get("isolatedShortLever") or "0")
-            )
-            != Decimal(leverage)
-        ):
+        if str(
+            confirmed_details.get("marginMode") or ""
+        ).lower() != "isolated" or Decimal(
+            str(confirmed_details.get("isolatedShortLever") or "0")
+        ) != Decimal(leverage):
             raise PrivateRequestError(
                 "Bitget isolated leverage was not confirmed by account state"
             )
@@ -3209,9 +3230,7 @@ class BitgetAccountClient(PrivateAccountClient):
         _bitget_success(payload)
         rows = payload.get("data")
         if not isinstance(rows, list):
-            raise PrivateRequestError(
-                "Bitget internal transfer history is incomplete"
-            )
+            raise PrivateRequestError("Bitget internal transfer history is incomplete")
         match = next(
             (
                 item
@@ -3353,9 +3372,7 @@ class GateAccountClient(PrivateAccountClient):
                 else None
             )
             debit_fee = (
-                account_fee.get("debit_fee")
-                if isinstance(account_fee, dict)
-                else None
+                account_fee.get("debit_fee") if isinstance(account_fee, dict) else None
             )
             confirmed_fee_mode = (
                 gt_discount is False and debit_fee not in {1, 2}
@@ -3424,15 +3441,12 @@ class GateAccountClient(PrivateAccountClient):
                     if perp.get("in_dual_mode") is True
                     else PositionMode.ONE_WAY
                 ),
-                trade_permission=(
-                    False if not futures_enabled else trade_permission
-                ),
+                trade_permission=(False if not futures_enabled else trade_permission),
                 trade_block_reason=(
                     None
                     if futures_enabled
                     else (
-                        "Gate 组合保证金账户尚未启用 USDT 永续；"
-                        "请先在统一账户设置中开启 USDT 永续"
+                        "Gate 组合保证金账户尚未启用 USDT 永续；请先在统一账户设置中开启 USDT 永续"
                     )
                 ),
                 perp_margin_mode=PerpMarginMode.CROSS,
@@ -3452,9 +3466,7 @@ class GateAccountClient(PrivateAccountClient):
             perp_usdt_equity=Decimal(str(perp.get("total") or "0")),
             shared_balance=False,
             account_mode=(
-                "evolved_classic"
-                if perp.get("enable_evolved_classic")
-                else "classic"
+                "evolved_classic" if perp.get("enable_evolved_classic") else "classic"
             ),
             position_mode=(
                 PositionMode.HEDGE
@@ -3464,6 +3476,31 @@ class GateAccountClient(PrivateAccountClient):
             trade_permission=trade_permission,
             perp_margin_mode=PerpMarginMode.ISOLATED,
             spot_buy_fee_in_base=spot_buy_fee_in_base,
+        )
+
+    async def spot_asset_available(self, asset: str) -> Decimal:
+        if self._account_mode == "portfolio":
+            payload = await self._get("/api/v4/unified/accounts")
+            balances = payload.get("balances") if isinstance(payload, dict) else None
+            item = balances.get(asset.upper()) if isinstance(balances, dict) else None
+            value = item.get("available") if isinstance(item, dict) else "0"
+        else:
+            payload = await self._get(
+                "/api/v4/spot/accounts",
+                currency=asset.upper(),
+            )
+            item = next(
+                (
+                    row
+                    for row in payload
+                    if str(row.get("currency") or "").upper() == asset.upper()
+                ),
+                {},
+            )
+            value = item.get("available") or "0"
+        return _required_non_negative_decimal(
+            value,
+            f"Gate {asset.upper()} available balance",
         )
 
     async def submit_internal_transfer(
@@ -3485,15 +3522,9 @@ class GateAccountClient(PrivateAccountClient):
                 "client_order_id": transfer_id,
             },
         )
-        remote_id = (
-            str(payload.get("tx_id") or "")
-            if isinstance(payload, dict)
-            else ""
-        )
+        remote_id = str(payload.get("tx_id") or "") if isinstance(payload, dict) else ""
         if not remote_id:
-            raise PrivateRequestError(
-                "Gate internal transfer response is incomplete"
-            )
+            raise PrivateRequestError("Gate internal transfer response is incomplete")
         return InternalTransferSubmission(
             transfer_id=remote_id,
             status="completed",
@@ -3552,9 +3583,7 @@ class GateAccountClient(PrivateAccountClient):
             self._get("/api/v4/futures/usdt/positions"),
         )
         spot_orders = [
-            item
-            for group in spot_groups
-            for item in (group.get("orders") or [])
+            item for group in spot_groups for item in (group.get("orders") or [])
         ]
         orders = [_gate_spot_order(item) for item in spot_orders]
         orders.extend(_gate_perp_order(item) for item in perp_orders)
@@ -3608,7 +3637,9 @@ class GateAccountClient(PrivateAccountClient):
             orders,
             positions,
             complete=complete,
-            incomplete_reason=None if complete else "Gate open-order result is paginated",
+            incomplete_reason=None
+            if complete
+            else "Gate open-order result is paginated",
         )
 
     async def fills_for_order(
@@ -3651,15 +3682,11 @@ class GateAccountClient(PrivateAccountClient):
             fills.append(
                 RemoteFill(
                     exchange_trade_id=str(item.get("id") or ""),
-                    exchange_order_id=str(
-                        item.get("order_id") or exchange_order_id
-                    ),
+                    exchange_order_id=str(item.get("order_id") or exchange_order_id),
                     client_order_id=client_order_id,
                     market=market,
                     symbol=str(
-                        item.get("currency_pair")
-                        or item.get("contract")
-                        or symbol
+                        item.get("currency_pair") or item.get("contract") or symbol
                     ),
                     side=(
                         str(item.get("side") or "").lower()
@@ -3672,9 +3699,7 @@ class GateAccountClient(PrivateAccountClient):
                     price=Decimal(str(item.get("price") or "0")),
                     fee_amount=raw_fee,
                     fee_asset=str(
-                        item.get("fee_currency")
-                        or item.get("settle")
-                        or "USDT"
+                        item.get("fee_currency") or item.get("settle") or "USDT"
                     ),
                     liquidity=str(item.get("role") or "taker").lower(),
                     occurred_at=(
@@ -3795,23 +3820,17 @@ class GateAccountClient(PrivateAccountClient):
             body: dict[str, object] = {
                 "text": order.client_order_id,
                 "currency_pair": order.symbol,
-                "type": (
-                    "market" if order.mode == OrderMode.MARKET else "limit"
-                ),
+                "type": ("market" if order.mode == OrderMode.MARKET else "limit"),
                 "account": self._spot_account(),
                 "side": order.side,
                 "amount": _plain_decimal(order.quantity),
-                "time_in_force": (
-                    "poc" if order.mode == OrderMode.MAKER else "ioc"
-                ),
+                "time_in_force": ("poc" if order.mode == OrderMode.MAKER else "ioc"),
             }
             if order.limit_price is not None:
                 body["price"] = _plain_decimal(order.limit_price)
         else:
             path = "/api/v4/futures/usdt/orders"
-            signed_quantity = (
-                order.quantity if order.side == "buy" else -order.quantity
-            )
+            signed_quantity = order.quantity if order.side == "buy" else -order.quantity
             wire_quantity: int | str = (
                 int(signed_quantity)
                 if signed_quantity == signed_quantity.to_integral_value()
@@ -3825,9 +3844,7 @@ class GateAccountClient(PrivateAccountClient):
                     if order.mode == OrderMode.MARKET
                     else _plain_decimal(order.limit_price)
                 ),
-                "tif": (
-                    "poc" if order.mode == OrderMode.MAKER else "ioc"
-                ),
+                "tif": ("poc" if order.mode == OrderMode.MAKER else "ioc"),
                 "text": order.client_order_id,
                 "reduce_only": order.reduce_only,
             }
@@ -3927,8 +3944,7 @@ class GateAccountClient(PrivateAccountClient):
             self._account_mode = "portfolio"
             if leverage != 1:
                 raise PrivateRequestError(
-                    "Gate portfolio margin automation only supports "
-                    "conservative 1x accounting"
+                    "Gate portfolio margin automation only supports conservative 1x accounting"
                 )
             return PerpConfiguration(
                 symbol=symbol,
@@ -3956,11 +3972,7 @@ class GateAccountClient(PrivateAccountClient):
         isolated = (
             str((target or {}).get("pos_margin_mode") or "").lower() == "isolated"
         )
-        if (
-            target is not None
-            and isolated
-            and current_leverage == Decimal(leverage)
-        ):
+        if target is not None and isolated and current_leverage == Decimal(leverage):
             return PerpConfiguration(
                 symbol=symbol,
                 leverage=leverage,
@@ -3995,16 +4007,13 @@ class GateAccountClient(PrivateAccountClient):
         )
         if not isinstance(configured, dict):
             raise PrivateRequestError("Gate leverage configuration returned no result")
-        confirmed_margin_mode = str(
-            configured.get("pos_margin_mode") or ""
-        ).lower()
+        confirmed_margin_mode = str(configured.get("pos_margin_mode") or "").lower()
         confirmed_leverage = _gate_position_leverage(
             configured,
             confirmed_margin_mode,
         )
-        if (
-            confirmed_margin_mode != target_margin_mode
-            or confirmed_leverage != Decimal(leverage)
+        if confirmed_margin_mode != target_margin_mode or confirmed_leverage != Decimal(
+            leverage
         ):
             raise PrivateRequestError(
                 "Gate margin and leverage configuration was not confirmed"
@@ -4133,9 +4142,7 @@ class MexcAccountClient(PrivateAccountClient):
             environment=self.environment,
             observed_at=datetime.now(UTC),
             spot_usdt_available=Decimal(str(spot_usdt.get("free") or "0")),
-            perp_usdt_available=Decimal(
-                str(contract.get("availableBalance") or "0")
-            ),
+            perp_usdt_available=Decimal(str(contract.get("availableBalance") or "0")),
             perp_usdt_equity=Decimal(str(contract.get("equity") or "0")),
             shared_balance=False,
             account_mode=str(spot.get("accountType") or "spot+contract"),
@@ -4158,6 +4165,21 @@ class MexcAccountClient(PrivateAccountClient):
             ),
         )
 
+    async def spot_asset_available(self, asset: str) -> Decimal:
+        payload = await self._spot_get("/api/v3/account")
+        item = next(
+            (
+                row
+                for row in payload.get("balances", [])
+                if str(row.get("asset") or "").upper() == asset.upper()
+            ),
+            {},
+        )
+        return _required_non_negative_decimal(
+            item.get("free") or "0",
+            f"MEXC {asset.upper()} available balance",
+        )
+
     async def submit_internal_transfer(
         self,
         *,
@@ -4175,20 +4197,10 @@ class MexcAccountClient(PrivateAccountClient):
             asset="USDT",
             amount=format(amount, "f"),
         )
-        item = (
-            payload[0]
-            if isinstance(payload, list) and payload
-            else payload
-        )
-        remote_id = (
-            str(item.get("tranId") or "")
-            if isinstance(item, dict)
-            else ""
-        )
+        item = payload[0] if isinstance(payload, list) and payload else payload
+        remote_id = str(item.get("tranId") or "") if isinstance(item, dict) else ""
         if not remote_id:
-            raise PrivateRequestError(
-                "MEXC internal transfer response is incomplete"
-            )
+            raise PrivateRequestError("MEXC internal transfer response is incomplete")
         return InternalTransferSubmission(
             transfer_id=remote_id,
             status="pending",
@@ -4210,9 +4222,7 @@ class MexcAccountClient(PrivateAccountClient):
             tranId=transfer_id,
         )
         if not isinstance(item, dict):
-            raise PrivateRequestError(
-                "MEXC internal transfer lookup is incomplete"
-            )
+            raise PrivateRequestError("MEXC internal transfer lookup is incomplete")
         if (
             str(item.get("tranId") or "") != transfer_id
             or str(item.get("asset") or "").upper() != "USDT"
@@ -4254,9 +4264,7 @@ class MexcAccountClient(PrivateAccountClient):
             raise PrivateRequestError("MEXC trading-state reconciliation failed")
         perp_data = perp_payload.get("data") or {}
         perp_orders = (
-            perp_data.get("resultList")
-            if isinstance(perp_data, dict)
-            else perp_data
+            perp_data.get("resultList") if isinstance(perp_data, dict) else perp_data
         ) or []
         position_items = position_payload.get("data") or []
         orders = [
@@ -4285,9 +4293,11 @@ class MexcAccountClient(PrivateAccountClient):
             for item in position_items
             if Decimal(str(item.get("holdVol") or "0")) != 0
         ]
-        total = int(perp_data.get("totalCount") or len(perp_orders)) if isinstance(
-            perp_data, dict
-        ) else len(perp_orders)
+        total = (
+            int(perp_data.get("totalCount") or len(perp_orders))
+            if isinstance(perp_data, dict)
+            else len(perp_orders)
+        )
         complete = total <= len(perp_orders)
         return _state(
             self.exchange,
@@ -4295,7 +4305,9 @@ class MexcAccountClient(PrivateAccountClient):
             orders,
             positions,
             complete=complete,
-            incomplete_reason=None if complete else "MEXC open-order result is paginated",
+            incomplete_reason=None
+            if complete
+            else "MEXC open-order result is paginated",
         )
 
     async def fills_for_order(
@@ -4356,11 +4368,7 @@ class MexcAccountClient(PrivateAccountClient):
                 client_order_id=client_order_id,
                 market=market,
                 symbol=str(item.get("symbol") or symbol),
-                side=(
-                    "buy"
-                    if int(item.get("side") or 0) in {1, 2}
-                    else "sell"
-                ),
+                side=("buy" if int(item.get("side") or 0) in {1, 2} else "sell"),
                 quantity=Decimal(str(item.get("vol") or "0")),
                 price=Decimal(str(item.get("price") or "0")),
                 fee_amount=Decimal(str(item.get("fee") or "0")),
@@ -4484,9 +4492,7 @@ class MexcAccountClient(PrivateAccountClient):
             return OrderSubmission(
                 market=order.market,
                 symbol=order.symbol,
-                client_order_id=str(
-                    item.get("clientOrderId") or order.client_order_id
-                ),
+                client_order_id=str(item.get("clientOrderId") or order.client_order_id),
                 exchange_order_id=exchange_order_id,
             )
         leverage = self._configured_leverage.get(order.symbol)
@@ -4527,17 +4533,12 @@ class MexcAccountClient(PrivateAccountClient):
                     OrderMode.PROTECTED_IOC: 3,
                     OrderMode.MARKET: 5,
                 }[order.mode],
-                "openType": (
-                    1 if order.margin_mode == PerpMarginMode.ISOLATED else 2
-                ),
+                "openType": (1 if order.margin_mode == PerpMarginMode.ISOLATED else 2),
                 "externalOid": order.client_order_id,
-                "positionMode": (
-                    1 if order.position_mode == PositionMode.HEDGE else 2
-                ),
+                "positionMode": (1 if order.position_mode == PositionMode.HEDGE else 2),
                 **(
                     {"reduceOnly": True}
-                    if order.position_mode == PositionMode.ONE_WAY
-                    and order.reduce_only
+                    if order.position_mode == PositionMode.ONE_WAY and order.reduce_only
                     else {}
                 ),
             },
@@ -4703,8 +4704,7 @@ class MexcAccountClient(PrivateAccountClient):
             else pending_data
         ) or []
         if open_orders or any(
-            Decimal(str(item.get("holdVol") or "0")) != 0
-            for item in position_items
+            Decimal(str(item.get("holdVol") or "0")) != 0 for item in position_items
         ):
             raise PrivateRequestError(
                 "cannot change MEXC leverage with open orders or positions"
@@ -4743,9 +4743,9 @@ class MexcAccountClient(PrivateAccountClient):
             ),
             None,
         )
-        if short is None or Decimal(
-            str(short.get("leverage") or "0")
-        ) != Decimal(leverage):
+        if short is None or Decimal(str(short.get("leverage") or "0")) != Decimal(
+            leverage
+        ):
             self._configured_leverage.pop(symbol, None)
             raise PrivateRequestError(
                 "MEXC isolated leverage configuration was not confirmed"
@@ -4800,9 +4800,7 @@ def _okx_command_item(
 ) -> dict[str, Any]:
     _okx_success(payload)
     items = payload.get("data") or []
-    if not items or (
-        require_subcode and str(items[0].get("sCode") or "") != "0"
-    ):
+    if not items or (require_subcode and str(items[0].get("sCode") or "") != "0"):
         raise PrivateRequestError(f"OKX {action} was rejected")
     return items[0]
 
@@ -4905,16 +4903,10 @@ def _bitget_uta_configuration_matches(
         return False
     raw_leverage = configuration.get("leverage")
     if isinstance(raw_leverage, list):
-        values = {
-            Decimal(str(item))
-            for item in raw_leverage
-            if item not in (None, "")
-        }
+        values = {Decimal(str(item)) for item in raw_leverage if item not in (None, "")}
         leverage_matches = Decimal(leverage) in values
     else:
-        leverage_matches = Decimal(
-            str(raw_leverage or "0")
-        ) == Decimal(leverage)
+        leverage_matches = Decimal(str(raw_leverage or "0")) == Decimal(leverage)
     return (
         str(configuration.get("marginMode") or "").lower() == "isolated"
         and leverage_matches
@@ -4929,20 +4921,16 @@ def _bitget_trade_permission(
     if generation == "uta":
         permission_type = str(info.get("permType") or "").lower()
         permissions = {
-            str(item).lower()
-            for item in (info.get("permissions") or [])
-            if item
+            str(item).lower() for item in (info.get("permissions") or []) if item
         }
         if not permission_type or not permissions:
             return None
-        return (
-            permission_type == "read-and-write"
-            and {"uta_trade", "uta_mgt"}.issubset(permissions)
-        )
+        return permission_type == "read-and-write" and {
+            "uta_trade",
+            "uta_mgt",
+        }.issubset(permissions)
     authorities = {
-        str(item).lower()
-        for item in (info.get("authorities") or [])
-        if item
+        str(item).lower() for item in (info.get("authorities") or []) if item
     }
     if not authorities:
         return None
@@ -4995,18 +4983,13 @@ def _masked_key_matches(masked: str, value: str) -> bool:
     prefix, _, remainder = masked.partition("*")
     suffix = remainder.lstrip("*")
     return (
-        bool(prefix or suffix)
-        and value.startswith(prefix)
-        and value.endswith(suffix)
+        bool(prefix or suffix) and value.startswith(prefix) and value.endswith(suffix)
     )
 
 
 def _gate_portfolio_futures_enabled(mode: dict[str, object]) -> bool:
     settings = mode.get("settings")
-    return (
-        isinstance(settings, dict)
-        and settings.get("usdt_futures") is True
-    )
+    return isinstance(settings, dict) and settings.get("usdt_futures") is True
 
 
 def _mexc_success(payload: Any) -> bool:
@@ -5154,10 +5137,7 @@ def _bitget_fee(item: dict[str, Any]) -> Decimal:
 def _bitget_uta_fee(item: dict[str, Any]) -> Decimal:
     details = _bitget_fee_details(item)
     return sum(
-        (
-            abs(Decimal(str(detail.get("fee") or "0")))
-            for detail in details
-        ),
+        (abs(Decimal(str(detail.get("fee") or "0"))) for detail in details),
         Decimal("0"),
     )
 

@@ -41,7 +41,12 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from basis_hawk.models import FundingObservation, InstrumentPair, Opportunity, ScannerSettings
+from basis_hawk.models import (
+    FundingObservation,
+    InstrumentPair,
+    Opportunity,
+    ScannerSettings,
+)
 
 if TYPE_CHECKING:
     from basis_hawk.accounts import OrderSubmission, RemoteFill, RemoteOrder
@@ -60,10 +65,7 @@ class TransferLimitSettings:
 
     @property
     def enabled(self) -> bool:
-        return (
-            self.per_request_limit_usdt > 0
-            and self.daily_limit_usdt > 0
-        )
+        return self.per_request_limit_usdt > 0 and self.daily_limit_usdt > 0
 
 
 def _validate_transfer_limits(
@@ -77,9 +79,7 @@ def _validate_transfer_limits(
             "internal transfer limits must both be zero or both be positive"
         )
     if per_request_limit > daily_limit:
-        raise ValueError(
-            "per-request transfer limit cannot exceed daily limit"
-        )
+        raise ValueError("per-request transfer limit cannot exceed daily limit")
 
 
 def _transfer_limit_settings(
@@ -163,7 +163,9 @@ class FundingRow(Base):
     funding_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     rate: Mapped[str] = mapped_column(String(48))
     interval_hours: Mapped[str] = mapped_column(String(32))
-    __table_args__ = (Index("uq_funding", "exchange", "base_asset", "funding_at", unique=True),)
+    __table_args__ = (
+        Index("uq_funding", "exchange", "base_asset", "funding_at", unique=True),
+    )
 
 
 class SnapshotRow(Base):
@@ -173,7 +175,9 @@ class SnapshotRow(Base):
     base_asset: Mapped[str] = mapped_column(String(40))
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     payload: Mapped[str] = mapped_column(Text)
-    __table_args__ = (Index("ix_snapshot_history", "exchange", "base_asset", "observed_at"),)
+    __table_args__ = (
+        Index("ix_snapshot_history", "exchange", "base_asset", "observed_at"),
+    )
 
 
 class LatestOpportunityRow(Base):
@@ -204,7 +208,9 @@ class AdminUserRow(Base):
 class AdminSessionRow(Base):
     __tablename__ = "admin_sessions"
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
-    admin_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id", ondelete="CASCADE"))
+    admin_id: Mapped[int] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="CASCADE")
+    )
     csrf_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -423,9 +429,7 @@ class InternalTransferRow(Base):
             name="ck_internal_transfer_amount_positive",
         ),
         CheckConstraint(
-            "status IN "
-            "('planned', 'submitted', 'pending', 'completed', 'failed', "
-            "'manual_review')",
+            "status IN ('planned', 'submitted', 'pending', 'completed', 'failed', 'manual_review')",
             name="ck_internal_transfer_status",
         ),
         Index(
@@ -862,9 +866,7 @@ class PnlRealizationRow(Base):
     )
     quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     gross_pnl_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
-    opening_fee_allocated_usdt: Mapped[Decimal] = mapped_column(
-        Numeric(38, 18)
-    )
+    opening_fee_allocated_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     closing_fees_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     net_pnl_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     realized_at: Mapped[datetime] = mapped_column(
@@ -1109,8 +1111,7 @@ class ExecutionTaskLegRow(Base):
             name="ck_execution_task_leg_maker_policy",
         ),
         CheckConstraint(
-            "maker_fallback_mode IS NULL OR "
-            "maker_fallback_mode IN ('protected_ioc', 'market')",
+            "maker_fallback_mode IS NULL OR maker_fallback_mode IN ('protected_ioc', 'market')",
             name="ck_execution_task_leg_maker_fallback",
         ),
         CheckConstraint(
@@ -1173,6 +1174,9 @@ class ExecutionOrderRow(Base):
     client_order_id: Mapped[str] = mapped_column(String(100), unique=True)
     exchange_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     order_mode: Mapped[str] = mapped_column(String(30))
+    side: Mapped[str] = mapped_column(String(10))
+    reduce_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    purpose: Mapped[str] = mapped_column(String(20), default="primary", index=True)
     status: Mapped[str] = mapped_column(String(30), index=True)
     quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     base_multiplier: Mapped[Decimal] = mapped_column(
@@ -1220,6 +1224,14 @@ class ExecutionOrderRow(Base):
         CheckConstraint(
             "filled_quantity >= 0 AND filled_quantity <= quantity",
             name="ck_execution_order_filled_quantity",
+        ),
+        CheckConstraint(
+            "side IN ('buy', 'sell')",
+            name="ck_execution_order_side",
+        ),
+        CheckConstraint(
+            "purpose IN ('primary', 'compensation')",
+            name="ck_execution_order_purpose",
         ),
     )
 
@@ -1358,8 +1370,7 @@ class StrategyPnlEventRow(Base):
     )
     __table_args__ = (
         CheckConstraint(
-            "quantity >= 0 AND opening_fee_allocated_usdt >= 0 "
-            "AND closing_fees_usdt >= 0",
+            "quantity >= 0 AND opening_fee_allocated_usdt >= 0 AND closing_fees_usdt >= 0",
             name="ck_strategy_pnl_event_nonnegative",
         ),
     )
@@ -1389,8 +1400,7 @@ class AdlSnapshotRow(Base):
             "observed_at",
         ),
         CheckConstraint(
-            "normalized_level IS NULL OR "
-            "(normalized_level >= 1 AND normalized_level <= 5)",
+            "normalized_level IS NULL OR (normalized_level >= 1 AND normalized_level <= 5)",
             name="ck_adl_snapshot_level",
         ),
     )
@@ -1460,9 +1470,7 @@ def _live_compensation_leg(
         raise ValueError("live compensation multiplier must be positive")
     side = "buy" if excess_leg.side == "sell" else "sell"
     reduce_only = (
-        excess_leg.market == "perp"
-        and side == "buy"
-        and intent.action == "open"
+        excess_leg.market == "perp" and side == "buy" and intent.action == "open"
     )
     return OrderLegRow(
         id=str(uuid.uuid4()),
@@ -1494,12 +1502,8 @@ def _compensation_pnl(
     if primary.average_price is None or compensation.average_price is None:
         raise ValueError("live compensation prices are incomplete")
     if primary.side == "buy":
-        return (
-            compensation.average_price - primary.average_price
-        ) * base_quantity
-    return (
-        primary.average_price - compensation.average_price
-    ) * base_quantity
+        return (compensation.average_price - primary.average_price) * base_quantity
+    return (primary.average_price - compensation.average_price) * base_quantity
 
 
 def _compensated_base_quantities(
@@ -1523,9 +1527,7 @@ def _compensated_base_quantities(
         )
     ):
         raise ValueError("live compensation quantity is incomplete")
-    compensated_base = (
-        compensation.filled_quantity * compensation.base_multiplier
-    )
+    compensated_base = compensation.filled_quantity * compensation.base_multiplier
     adjusted_spot = spot_base
     adjusted_perp = perp_base
     if excess_leg.market == "spot":
@@ -1541,16 +1543,12 @@ def _compensated_base_quantities(
         if action == "open"
         else adjusted_perp - adjusted_spot
     )
-    if dust < 0 or (
-        tolerance == 0
-        and not _numeric_equal(dust, Decimal("0"))
-    ) or (
-        tolerance > 0
-        and dust >= tolerance
+    if (
+        dust < 0
+        or (tolerance == 0 and not _numeric_equal(dust, Decimal("0")))
+        or (tolerance > 0 and dust >= tolerance)
     ):
-        raise ValueError(
-            "live compensation leaves unsafe residual exposure"
-        )
+        raise ValueError("live compensation leaves unsafe residual exposure")
     return adjusted_spot, adjusted_perp
 
 
@@ -1673,8 +1671,12 @@ class Database:
                         for item in trading_state.positions
                     )
             state_complete = bool(trading_state and trading_state.complete)
-            open_order_count = len(trading_state.open_orders) if trading_state is not None else 0
-            position_count = len(trading_state.positions) if trading_state is not None else 0
+            open_order_count = (
+                len(trading_state.open_orders) if trading_state is not None else 0
+            )
+            position_count = (
+                len(trading_state.positions) if trading_state is not None else 0
+            )
             row = await session.get(
                 AccountReconciliationRow,
                 {"exchange": exchange, "environment": environment},
@@ -1794,14 +1796,10 @@ class Database:
             post_update_reason = (
                 "software update completed; fresh safety reconciliation required"
             )
-            if (
-                row.state == "reconciling"
-                and row.reason == post_update_reason
-            ):
+            if row.state == "reconciling" and row.reason == post_update_reason:
                 return True
             if not (
-                row.state == "paused"
-                and row.reason == "software update requested"
+                row.state == "paused" and row.reason == "software update requested"
             ):
                 return False
             row.state = "reconciling"
@@ -1828,12 +1826,9 @@ class Database:
             if row is None:
                 return False
             already_paused = (
-                row.state == "paused"
-                and row.reason == "software update requested"
+                row.state == "paused" and row.reason == "software update requested"
             )
-            if row.state != "ready" and not (
-                allow_existing_pause and already_paused
-            ):
+            if row.state != "ready" and not (allow_existing_pause and already_paused):
                 return False
             row.state = "paused"
             row.reason = "software update requested"
@@ -1950,11 +1945,7 @@ class Database:
             leg_rows = list(
                 await session.scalars(
                     select(ExecutionTaskLegRow)
-                    .where(
-                        ExecutionTaskLegRow.task_id.in_(
-                            [item.id for item in rows]
-                        )
-                    )
+                    .where(ExecutionTaskLegRow.task_id.in_([item.id for item in rows]))
                     .order_by(
                         ExecutionTaskLegRow.task_id,
                         ExecutionTaskLegRow.ordinal,
@@ -1977,8 +1968,7 @@ class Database:
         async with self.sessions() as session:
             existing = await session.scalar(
                 select(ExecutionTaskRow).where(
-                    ExecutionTaskRow.idempotency_key
-                    == task["idempotency_key"]
+                    ExecutionTaskRow.idempotency_key == task["idempotency_key"]
                 )
             )
             if existing is not None:
@@ -2023,8 +2013,7 @@ class Database:
                 await session.rollback()
                 existing = await session.scalar(
                     select(ExecutionTaskRow).where(
-                        ExecutionTaskRow.idempotency_key
-                        == task["idempotency_key"]
+                        ExecutionTaskRow.idempotency_key == task["idempotency_key"]
                     )
                 )
                 if existing is None:
@@ -2165,9 +2154,7 @@ class Database:
             if row.version != expected_version:
                 raise ValueError("execution task version changed")
             if row.status not in {"draft", "preflight_ready", "queued"}:
-                raise ValueError(
-                    "only a task that has not started can be canceled"
-                )
+                raise ValueError("only a task that has not started can be canceled")
             now = datetime.now(UTC)
             row.status = "emergency_stopped"
             row.preflight_payload = None
@@ -2300,7 +2287,9 @@ class Database:
             )
             by_leg = {item.id: item for item in leg_rows}
             if set(by_leg) != {str(item["task_leg_id"]) for item in fills}:
-                raise ValueError("paper execution must fill every task leg exactly once")
+                raise ValueError(
+                    "paper execution must fill every task leg exactly once"
+                )
             base_by_leg = {
                 str(item["task_leg_id"]): (
                     Decimal(str(item["native_quantity"]))
@@ -2358,6 +2347,9 @@ class Database:
                     client_order_id=f"paper-{order_id}",
                     exchange_order_id=f"paper-{order_id}",
                     order_mode=leg.order_mode,
+                    side=leg.side,
+                    reduce_only=leg.reduce_only,
+                    purpose="primary",
                     status="filled",
                     quantity=native_quantity,
                     base_multiplier=base_multiplier,
@@ -2381,9 +2373,7 @@ class Database:
                         price=price,
                         fee_amount=fee_usdt,
                         fee_asset="USDT",
-                        liquidity=(
-                            "maker" if leg.order_mode == "maker" else "taker"
-                        ),
+                        liquidity=("maker" if leg.order_mode == "maker" else "taker"),
                         occurred_at=now,
                     )
                 )
@@ -2470,6 +2460,60 @@ class Database:
             run.worker_id = worker_id
             run.finished_at = now
             run.updated_at = now
+            if manual_review:
+                control = await session.scalar(
+                    select(ExecutionControlRow)
+                    .where(ExecutionControlRow.id == 1)
+                    .with_for_update()
+                )
+                if control is not None:
+                    control.state = "paused"
+                    control.reason = failure_code
+                    control.updated_at = now
+            await session.commit()
+
+    async def begin_execution_task_compensation(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        failure_code: str,
+        worker_id: str,
+    ) -> None:
+        async with self.sessions() as session:
+            task = await session.scalar(
+                select(ExecutionTaskRow)
+                .where(ExecutionTaskRow.id == task_id)
+                .with_for_update()
+            )
+            run = await session.scalar(
+                select(ExecutionRunRow)
+                .where(ExecutionRunRow.id == run_id)
+                .with_for_update()
+            )
+            if task is None or run is None or run.task_id != task_id:
+                raise ValueError("execution task or run was not found")
+            if task.status not in {"running", "hedging", "compensating"}:
+                raise ValueError("execution task cannot enter compensation")
+            now = datetime.now(UTC)
+            if task.status != "compensating":
+                task.status = "compensating"
+                task.version += 1
+            task.failure_code = failure_code
+            task.updated_at = now
+            run.status = "running"
+            run.failure_code = failure_code
+            run.worker_id = worker_id
+            run.updated_at = now
+            control = await session.scalar(
+                select(ExecutionControlRow)
+                .where(ExecutionControlRow.id == 1)
+                .with_for_update()
+            )
+            if control is not None:
+                control.state = "paused"
+                control.reason = failure_code
+                control.updated_at = now
             await session.commit()
 
     async def claim_live_execution_task(
@@ -2497,7 +2541,7 @@ class Database:
                     .where(
                         ExecutionTaskRow.environment.in_({"sandbox", "live"}),
                         ExecutionTaskRow.status.in_(
-                            {"queued", "running", "hedging"}
+                            {"queued", "running", "hedging", "compensating"}
                         ),
                     )
                     .order_by(ExecutionTaskRow.created_at)
@@ -2584,11 +2628,18 @@ class Database:
         task_leg_id: str,
         client_order_id: str,
         order_mode: str,
+        side: str,
+        reduce_only: bool,
+        purpose: str,
         quantity: Decimal,
         base_multiplier: Decimal,
         limit_price: Decimal | None,
         parent_order_id: str | None = None,
     ) -> ExecutionOrderRow:
+        if side not in {"buy", "sell"}:
+            raise ValueError("execution order side is invalid")
+        if purpose not in {"primary", "compensation"}:
+            raise ValueError("execution order purpose is invalid")
         async with self.sessions() as session:
             run = await session.scalar(
                 select(ExecutionRunRow)
@@ -2618,9 +2669,7 @@ class Database:
                 .limit(1)
             )
             if active is not None:
-                raise ValueError(
-                    "a nonterminal order already exists for this task leg"
-                )
+                raise ValueError("a nonterminal order already exists for this task leg")
             parent: ExecutionOrderRow | None = None
             if parent_order_id is not None:
                 parent = await session.scalar(
@@ -2640,9 +2689,7 @@ class Database:
                     "rejected",
                     "failed",
                 }:
-                    raise ValueError(
-                        "parent execution order is not terminal"
-                    )
+                    raise ValueError("parent execution order is not terminal")
                 attempt_number = parent.attempt_number
                 chase_number = parent.chase_number + 1
             else:
@@ -2665,6 +2712,9 @@ class Database:
                 client_order_id=client_order_id,
                 exchange_order_id=None,
                 order_mode=order_mode,
+                side=side,
+                reduce_only=reduce_only,
+                purpose=purpose,
                 status="created",
                 quantity=quantity,
                 base_multiplier=base_multiplier,
@@ -2719,11 +2769,7 @@ class Database:
                 list(
                     await session.scalars(
                         select(ExecutionOrderRow)
-                        .where(
-                            ExecutionOrderRow.run_id.in_(
-                                [item.id for item in runs]
-                            )
-                        )
+                        .where(ExecutionOrderRow.run_id.in_([item.id for item in runs]))
                         .order_by(
                             ExecutionOrderRow.created_at,
                             ExecutionOrderRow.attempt_number,
@@ -2754,11 +2800,14 @@ class Database:
     async def arbitrage_strategy(
         self,
         strategy_id: str,
-    ) -> tuple[
-        ArbitrageStrategyRow,
-        list[StrategyLegRow],
-        dict[str, ExecutionTaskLegRow],
-    ] | None:
+    ) -> (
+        tuple[
+            ArbitrageStrategyRow,
+            list[StrategyLegRow],
+            dict[str, ExecutionTaskLegRow],
+        ]
+        | None
+    ):
         async with self.sessions() as session:
             strategy = await session.get(ArbitrageStrategyRow, strategy_id)
             if strategy is None:
@@ -2804,14 +2853,12 @@ class Database:
         async with self.sessions() as session:
             statement = select(ArbitrageStrategyRow)
             if statuses is not None:
-                statement = statement.where(
-                    ArbitrageStrategyRow.status.in_(statuses)
-                )
+                statement = statement.where(ArbitrageStrategyRow.status.in_(statuses))
             strategies = list(
                 await session.scalars(
-                    statement.order_by(
-                        ArbitrageStrategyRow.opened_at.desc()
-                    ).limit(limit)
+                    statement.order_by(ArbitrageStrategyRow.opened_at.desc()).limit(
+                        limit
+                    )
                 )
             )
             if not strategies:
@@ -2820,9 +2867,7 @@ class Database:
                 await session.scalars(
                     select(StrategyLegRow)
                     .where(
-                        StrategyLegRow.strategy_id.in_(
-                            [item.id for item in strategies]
-                        )
+                        StrategyLegRow.strategy_id.in_([item.id for item in strategies])
                     )
                     .order_by(
                         StrategyLegRow.strategy_id,
@@ -3042,13 +3087,10 @@ class Database:
                     if (
                         existing.quantity != Decimal(str(item["quantity"]))
                         or existing.price != Decimal(str(item["price"]))
-                        or existing.fee_amount
-                        != Decimal(str(item["fee_amount"]))
+                        or existing.fee_amount != Decimal(str(item["fee_amount"]))
                         or existing.fee_asset != str(item["fee_asset"])
                     ):
-                        raise ValueError(
-                            "execution fill changed after persistence"
-                        )
+                        raise ValueError("execution fill changed after persistence")
                     continue
                 session.add(
                     ExecutionFillRow(
@@ -3080,7 +3122,7 @@ class Database:
         task_id: str,
         status: str,
     ) -> None:
-        if status not in {"running", "hedging"}:
+        if status not in {"running", "hedging", "compensating"}:
             raise ValueError("unsupported execution task phase")
         async with self.sessions() as session:
             row = await session.scalar(
@@ -3090,7 +3132,7 @@ class Database:
             )
             if row is None:
                 raise ValueError("execution task was not found")
-            if row.status not in {"running", "hedging"}:
+            if row.status not in {"running", "hedging", "compensating"}:
                 raise ValueError("execution task is not active")
             if row.status != status:
                 row.status = status
@@ -3120,9 +3162,7 @@ class Database:
                     row.resolved_base_quantity != base_quantity
                     or row.signed_base_ratio != signed_base_ratio
                 ):
-                    raise ValueError(
-                        "resolved task-leg quantity cannot change"
-                    )
+                    raise ValueError("resolved task-leg quantity cannot change")
                 return row
             row.resolved_base_quantity = base_quantity
             row.signed_base_ratio = signed_base_ratio
@@ -3164,24 +3204,24 @@ class Database:
             )
             orders = list(
                 await session.scalars(
-                    select(ExecutionOrderRow).where(
-                        ExecutionOrderRow.run_id == run_id
-                    )
+                    select(ExecutionOrderRow).where(ExecutionOrderRow.run_id == run_id)
                 )
             )
             order_by_id = {item.id: item for item in orders}
-            fill_rows = list(
-                await session.scalars(
-                    select(ExecutionFillRow).where(
-                        ExecutionFillRow.execution_order_id.in_(
-                            list(order_by_id)
+            fill_rows = (
+                list(
+                    await session.scalars(
+                        select(ExecutionFillRow).where(
+                            ExecutionFillRow.execution_order_id.in_(list(order_by_id))
                         )
                     )
                 )
-            ) if order_by_id else []
-            fills_by_leg: dict[str, list[tuple[ExecutionOrderRow, ExecutionFillRow]]] = {
-                leg.id: [] for leg in legs
-            }
+                if order_by_id
+                else []
+            )
+            fills_by_leg: dict[
+                str, list[tuple[ExecutionOrderRow, ExecutionFillRow]]
+            ] = {leg.id: [] for leg in legs}
             for fill in fill_rows:
                 order = order_by_id[fill.execution_order_id]
                 fills_by_leg[order.task_leg_id].append((order, fill))
@@ -3189,22 +3229,15 @@ class Database:
             for leg in legs:
                 values = fills_by_leg[leg.id]
                 base_quantity = sum(
-                    (
-                        fill.quantity * order.base_multiplier
-                        for order, fill in values
-                    ),
+                    (fill.quantity * order.base_multiplier for order, fill in values),
                     Decimal("0"),
                 )
                 target = leg.resolved_base_quantity or leg.target_quantity
                 if base_quantity < target:
-                    raise ValueError(
-                        "live execution task is not fully filled"
-                    )
+                    raise ValueError("live execution task is not fully filled")
                 weighted_notional = sum(
                     (
-                        fill.quantity
-                        * order.base_multiplier
-                        * fill.price
+                        fill.quantity * order.base_multiplier * fill.price
                         for order, fill in values
                     ),
                     Decimal("0"),
@@ -3307,8 +3340,7 @@ class Database:
                 select(AccountSnapshotRow)
                 .join(
                     AccountReconciliationRow,
-                    AccountReconciliationRow.snapshot_id
-                    == AccountSnapshotRow.id,
+                    AccountReconciliationRow.snapshot_id == AccountSnapshotRow.id,
                 )
                 .where(
                     AccountReconciliationRow.exchange == exchange,
@@ -3340,9 +3372,7 @@ class Database:
                 )
                 session.add(control)
                 await session.flush()
-            latest = await session.scalar(
-                select(func.max(StrategyVersionRow.version))
-            )
+            latest = await session.scalar(select(func.max(StrategyVersionRow.version)))
             row = StrategyVersionRow(
                 id=str(uuid.uuid4()),
                 version=int(latest or 0) + 1,
@@ -3535,8 +3565,7 @@ class Database:
             and row.fills_subscribed
             and row.positions_subscribed
             and heartbeat
-            >= datetime.now(UTC)
-            - timedelta(seconds=maximum_heartbeat_age_seconds)
+            >= datetime.now(UTC) - timedelta(seconds=maximum_heartbeat_age_seconds)
         )
 
     async def reset_private_stream_states(self) -> None:
@@ -3603,17 +3632,14 @@ class Database:
             if row.confirmation_idempotency_key is not None:
                 if row.confirmation_idempotency_key != idempotency_key:
                     raise ValueError(
-                        "trade preview was already confirmed with another "
-                        "idempotency key"
+                        "trade preview was already confirmed with another idempotency key"
                     )
                 return row
             observed_now = now or datetime.now(UTC)
             if _utc(row.expires_at) <= observed_now:
                 raise ValueError("trade preview has expired")
             if row.request_fingerprint != request_fingerprint:
-                raise ValueError(
-                    "market or configuration changed after trade preview"
-                )
+                raise ValueError("market or configuration changed after trade preview")
             row.confirmation_idempotency_key = idempotency_key
             row.confirmed_at = observed_now
             await session.commit()
@@ -3748,7 +3774,9 @@ class Database:
             row = result.one_or_none()
             return (row[0], row[1]) if row is not None else None
 
-    async def trade_intent(self, intent_id: str) -> tuple[TradeIntentRow, list[OrderLegRow]] | None:
+    async def trade_intent(
+        self, intent_id: str
+    ) -> tuple[TradeIntentRow, list[OrderLegRow]] | None:
         async with self.sessions() as session:
             row = await session.get(TradeIntentRow, intent_id)
             if row is None:
@@ -3818,12 +3846,9 @@ class Database:
         status: str | None = None,
     ) -> list[tuple[OrderLegRow, TradeIntentRow]]:
         async with self.sessions() as session:
-            statement = (
-                select(OrderLegRow, TradeIntentRow)
-                .join(
-                    TradeIntentRow,
-                    OrderLegRow.trade_intent_id == TradeIntentRow.id,
-                )
+            statement = select(OrderLegRow, TradeIntentRow).join(
+                TradeIntentRow,
+                OrderLegRow.trade_intent_id == TradeIntentRow.id,
             )
             if status is not None:
                 statement = statement.where(OrderLegRow.status == status)
@@ -3941,9 +3966,7 @@ class Database:
             if exchange is not None:
                 statement = statement.where(FundingIncomeRow.exchange == exchange)
             if environment is not None:
-                statement = statement.where(
-                    FundingIncomeRow.environment == environment
-                )
+                statement = statement.where(FundingIncomeRow.environment == environment)
             return list(
                 await session.scalars(
                     statement.order_by(
@@ -3973,7 +3996,9 @@ class Database:
     ) -> tuple[TradeIntentRow, list[OrderLegRow]] | None:
         async with self.sessions() as session:
             row = await session.scalar(
-                select(TradeIntentRow).where(TradeIntentRow.idempotency_key == idempotency_key)
+                select(TradeIntentRow).where(
+                    TradeIntentRow.idempotency_key == idempotency_key
+                )
             )
             if row is None:
                 return None
@@ -4037,7 +4062,9 @@ class Database:
                 if item.market != leg.market or item.symbol != leg.symbol:
                     raise ValueError("remote fill does not match the local order leg")
                 if item.side != leg.side:
-                    raise ValueError("remote fill side does not match the local order leg")
+                    raise ValueError(
+                        "remote fill side does not match the local order leg"
+                    )
                 if item.client_order_id not in {None, leg.client_order_id}:
                     raise ValueError(
                         "remote fill client order ID does not match the local order leg"
@@ -4061,9 +4088,7 @@ class Database:
                     select(FillRow).where(FillRow.order_leg_id == leg.id)
                 )
             )
-            existing_by_trade = {
-                item.exchange_trade_id: item for item in existing_rows
-            }
+            existing_by_trade = {item.exchange_trade_id: item for item in existing_rows}
             for item in fills:
                 existing = existing_by_trade.get(item.exchange_trade_id)
                 if existing is not None and (
@@ -4096,24 +4121,16 @@ class Database:
                 seen_ids.add(item.exchange_trade_id)
             session.add_all(new_rows)
             await session.flush()
-            filled_quantity = (
-                await session.scalar(
-                    select(func.sum(FillRow.quantity)).where(
-                        FillRow.order_leg_id == leg.id
-                    )
-                )
-                or Decimal("0")
-            )
+            filled_quantity = await session.scalar(
+                select(func.sum(FillRow.quantity)).where(FillRow.order_leg_id == leg.id)
+            ) or Decimal("0")
             if filled_quantity > leg.quantity:
                 raise ValueError("remote fills exceed the local order quantity")
-            filled_notional = (
-                await session.scalar(
-                    select(func.sum(FillRow.quantity * FillRow.price)).where(
-                        FillRow.order_leg_id == leg.id
-                    )
+            filled_notional = await session.scalar(
+                select(func.sum(FillRow.quantity * FillRow.price)).where(
+                    FillRow.order_leg_id == leg.id
                 )
-                or Decimal("0")
-            )
+            ) or Decimal("0")
             average_price = (
                 filled_notional / filled_quantity if filled_quantity > 0 else None
             )
@@ -4123,13 +4140,12 @@ class Database:
                 leg.status = "filled"
             elif filled_quantity > 0 and leg.status not in {"canceled", "failed"}:
                 leg.status = "partially_filled"
-            average_price_changed = (
-                (previous_average_price is None) != (average_price is None)
-                or (
-                    previous_average_price is not None
-                    and average_price is not None
-                    and not _numeric_equal(previous_average_price, average_price)
-                )
+            average_price_changed = (previous_average_price is None) != (
+                average_price is None
+            ) or (
+                previous_average_price is not None
+                and average_price is not None
+                and not _numeric_equal(previous_average_price, average_price)
             )
             if (
                 previous_exchange_order_id != leg.exchange_order_id
@@ -4170,7 +4186,10 @@ class Database:
                 raise ValueError(
                     "remote order quantity does not match the local order leg"
                 )
-            if order.filled_quantity < 0 or order.filled_quantity > order.original_quantity:
+            if (
+                order.filled_quantity < 0
+                or order.filled_quantity > order.original_quantity
+            ):
                 raise ValueError("remote order filled quantity is invalid")
             if order.reduce_only != leg.reduce_only:
                 raise ValueError(
@@ -4267,9 +4286,7 @@ class Database:
                 .values(
                     status=status,
                     failure_code=(
-                        "state_transition_failed"
-                        if status == "failed"
-                        else None
+                        "state_transition_failed" if status == "failed" else None
                     ),
                     version=TradeIntentRow.version + 1,
                     updated_at=datetime.now(UTC),
@@ -4287,13 +4304,8 @@ class Database:
         intent_id: str,
         adjusted_perp_limit_price: Decimal | None = None,
     ) -> tuple[TradeIntentRow, list[OrderLegRow], bool] | None:
-        if (
-            adjusted_perp_limit_price is not None
-            and adjusted_perp_limit_price <= 0
-        ):
-            raise ValueError(
-                "adjusted perpetual limit price must be positive"
-            )
+        if adjusted_perp_limit_price is not None and adjusted_perp_limit_price <= 0:
+            raise ValueError("adjusted perpetual limit price must be positive")
         async with self.sessions() as session:
             intent = await session.scalar(
                 select(TradeIntentRow)
@@ -4329,10 +4341,7 @@ class Database:
                 if intent.emergency and intent.action == "close"
                 else {"ready"}
             )
-            if (
-                control is None
-                or control.state not in allowed_control_states
-            ):
+            if control is None or control.state not in allowed_control_states:
                 return intent, legs, False
             if any(item.status != "created" for item in primary.values()):
                 raise ValueError("live order legs are not ready for first submission")
@@ -4365,14 +4374,8 @@ class Database:
                     raise ValueError(
                         "paired position is not reserved by the live close intent"
                     )
-                spot_base = (
-                    primary["spot"].quantity
-                    * primary["spot"].base_multiplier
-                )
-                perp_base = (
-                    primary["perp"].quantity
-                    * primary["perp"].base_multiplier
-                )
+                spot_base = primary["spot"].quantity * primary["spot"].base_multiplier
+                perp_base = primary["perp"].quantity * primary["perp"].base_multiplier
                 if (
                     not _numeric_equal(spot_base, position.quantity)
                     or not _numeric_equal(perp_base, position.quantity)
@@ -4408,9 +4411,7 @@ class Database:
         if quantity <= 0:
             raise ValueError("live compensation quantity must be positive")
         if tolerance_base <= 0:
-            raise ValueError(
-                "live compensation tolerance must be positive"
-            )
+            raise ValueError("live compensation tolerance must be positive")
         async with self.sessions() as session:
             intent = await session.scalar(
                 select(TradeIntentRow)
@@ -4430,9 +4431,7 @@ class Database:
                 item for item in legs if item.leg.endswith("_compensation")
             ]
             if len(compensations) != 1:
-                raise ValueError(
-                    "compensating intent must contain one protection leg"
-                )
+                raise ValueError("compensating intent must contain one protection leg")
             compensation = compensations[0]
             if intent.status != "compensating":
                 return intent, compensation, False
@@ -4495,9 +4494,7 @@ class Database:
             if intent.action == "close" and intent.paired_position_id is not None:
                 position = await session.scalar(
                     select(PairedPositionRow)
-                    .where(
-                        PairedPositionRow.id == intent.paired_position_id
-                    )
+                    .where(PairedPositionRow.id == intent.paired_position_id)
                     .with_for_update()
                 )
                 if (
@@ -4532,15 +4529,10 @@ class Database:
             ):
                 return False
             now = datetime.now(UTC)
-            if (
-                intent.action == "close"
-                and intent.paired_position_id is not None
-            ):
+            if intent.action == "close" and intent.paired_position_id is not None:
                 position = await session.scalar(
                     select(PairedPositionRow)
-                    .where(
-                        PairedPositionRow.id == intent.paired_position_id
-                    )
+                    .where(PairedPositionRow.id == intent.paired_position_id)
                     .with_for_update()
                 )
                 if (
@@ -4732,51 +4724,38 @@ class Database:
                 or len(compensations) > 1
                 or len(legs) != 2 + len(compensations)
             ):
-                raise ValueError(
-                    "live intent contains an invalid compensation layout"
-                )
+                raise ValueError("live intent contains an invalid compensation layout")
             terminal = {"filled", "canceled", "failed"}
             if any(item.status not in terminal for item in primary.values()):
                 return intent, None, False
             spot_base = (
-                primary["spot"].filled_quantity
-                * primary["spot"].base_multiplier
+                primary["spot"].filled_quantity * primary["spot"].base_multiplier
             )
             perp_base = (
-                primary["perp"].filled_quantity
-                * primary["perp"].base_multiplier
+                primary["perp"].filled_quantity * primary["perp"].base_multiplier
             )
-            spot_base_fee = (
-                await session.scalar(
-                    select(func.sum(FillRow.fee_amount)).where(
-                        FillRow.order_leg_id == primary["spot"].id,
-                        func.upper(FillRow.fee_asset)
-                        == intent.base_asset.upper(),
-                    )
+            spot_base_fee = await session.scalar(
+                select(func.sum(FillRow.fee_amount)).where(
+                    FillRow.order_leg_id == primary["spot"].id,
+                    func.upper(FillRow.fee_asset) == intent.base_asset.upper(),
                 )
-                or Decimal("0")
-            )
+            ) or Decimal("0")
             if primary["spot"].side == "buy":
                 spot_base -= spot_base_fee
             else:
                 spot_base += spot_base_fee
             if spot_base < 0:
-                raise ValueError(
-                    "spot base-asset fees exceed the filled quantity"
-                )
+                raise ValueError("spot base-asset fees exceed the filled quantity")
             common_base = min(spot_base, perp_base)
             planned_spot_residual_limit = (
-                primary["spot"].quantity
-                * primary["spot"].base_multiplier
+                primary["spot"].quantity * primary["spot"].base_multiplier
                 - intent.base_quantity
             )
             fee_aware_open_is_hedged = (
                 intent.spot_buy_fee_in_base
                 and planned_spot_residual_limit > 0
-                and primary["spot"].filled_quantity
-                == primary["spot"].quantity
-                and primary["perp"].filled_quantity
-                == primary["perp"].quantity
+                and primary["spot"].filled_quantity == primary["spot"].quantity
+                and primary["perp"].filled_quantity == primary["perp"].quantity
                 and _numeric_equal(perp_base, intent.base_quantity)
                 and spot_base >= perp_base
                 and spot_base - perp_base < planned_spot_residual_limit
@@ -4791,9 +4770,7 @@ class Database:
                 and not fee_aware_open_is_hedged
             ):
                 excess_leg = (
-                    primary["spot"]
-                    if spot_base > perp_base
-                    else primary["perp"]
+                    primary["spot"] if spot_base > perp_base else primary["perp"]
                 )
                 excess_base = abs(spot_base - perp_base)
                 if intent.status == "executing" and not compensations:
@@ -4833,19 +4810,14 @@ class Database:
                     intent.updated_at = now
                     await session.commit()
                     return intent, None, True
-                compensation = (
-                    compensations[0] if len(compensations) == 1 else None
-                )
-                if (
-                    compensation is not None
-                    and compensation.status
-                    not in {"filled", "canceled", "failed"}
-                ):
+                compensation = compensations[0] if len(compensations) == 1 else None
+                if compensation is not None and compensation.status not in {
+                    "filled",
+                    "canceled",
+                    "failed",
+                }:
                     return intent, None, False
-                if (
-                    compensation is None
-                    or compensation.average_price is None
-                ):
+                if compensation is None or compensation.average_price is None:
                     intent.status = "manual_review"
                     await self._pause_live_settlement(session, now)
                 else:
@@ -4860,14 +4832,12 @@ class Database:
                         )
                     )
                     try:
-                        _, adjusted_perp_base = (
-                            _compensated_base_quantities(
-                                action="open",
-                                spot_base=spot_base,
-                                perp_base=perp_base,
-                                excess_leg=excess_leg,
-                                compensation=compensation,
-                            )
+                        _, adjusted_perp_base = _compensated_base_quantities(
+                            action="open",
+                            spot_base=spot_base,
+                            perp_base=perp_base,
+                            excess_leg=excess_leg,
+                            compensation=compensation,
                         )
                         common_base = adjusted_perp_base
                         fees = _live_fees_usdt(
@@ -4905,12 +4875,8 @@ class Database:
                                 base_asset=intent.base_asset,
                                 initial_quantity=common_base,
                                 quantity=common_base,
-                                spot_entry_price=primary[
-                                    "spot"
-                                ].average_price,
-                                perp_entry_price=primary[
-                                    "perp"
-                                ].average_price,
+                                spot_entry_price=primary["spot"].average_price,
+                                perp_entry_price=primary["perp"].average_price,
                                 opening_fees_usdt=opening_cost,
                                 remaining_opening_fees_usdt=opening_cost,
                                 status="open",
@@ -5003,11 +4969,7 @@ class Database:
                     .with_for_update()
                 )
             )
-            primary = {
-                item.leg: item
-                for item in legs
-                if item.leg in {"spot", "perp"}
-            }
+            primary = {item.leg: item for item in legs if item.leg in {"spot", "perp"}}
             compensations = [
                 item for item in legs if item.leg.endswith("_compensation")
             ]
@@ -5016,19 +4978,15 @@ class Database:
                 or len(compensations) > 1
                 or len(legs) != 2 + len(compensations)
             ):
-                raise ValueError(
-                    "live intent contains an invalid compensation layout"
-                )
+                raise ValueError("live intent contains an invalid compensation layout")
             terminal = {"filled", "canceled", "failed"}
             if any(item.status not in terminal for item in primary.values()):
                 return intent, position, False
             spot_base = (
-                primary["spot"].filled_quantity
-                * primary["spot"].base_multiplier
+                primary["spot"].filled_quantity * primary["spot"].base_multiplier
             )
             perp_base = (
-                primary["perp"].filled_quantity
-                * primary["perp"].base_multiplier
+                primary["perp"].filled_quantity * primary["perp"].base_multiplier
             )
             now = datetime.now(UTC)
             if spot_base == 0 and perp_base == 0:
@@ -5039,9 +4997,7 @@ class Database:
             elif not _numeric_equal(spot_base, perp_base):
                 common_base = min(spot_base, perp_base)
                 excess_leg = (
-                    primary["spot"]
-                    if spot_base > perp_base
-                    else primary["perp"]
+                    primary["spot"] if spot_base > perp_base else primary["perp"]
                 )
                 excess_base = abs(spot_base - perp_base)
                 if intent.status == "executing" and not compensations:
@@ -5081,14 +5037,12 @@ class Database:
                     intent.updated_at = now
                     await session.commit()
                     return intent, position, True
-                compensation = (
-                    compensations[0] if len(compensations) == 1 else None
-                )
-                if (
-                    compensation is not None
-                    and compensation.status
-                    not in {"filled", "canceled", "failed"}
-                ):
+                compensation = compensations[0] if len(compensations) == 1 else None
+                if compensation is not None and compensation.status not in {
+                    "filled",
+                    "canceled",
+                    "failed",
+                }:
                     return intent, position, False
                 if (
                     compensation is None
@@ -5115,20 +5069,16 @@ class Database:
                         )
                     )
                     try:
-                        _, adjusted_perp_base = (
-                            _compensated_base_quantities(
-                                action="close",
-                                spot_base=spot_base,
-                                perp_base=perp_base,
-                                excess_leg=excess_leg,
-                                compensation=compensation,
-                            )
+                        _, adjusted_perp_base = _compensated_base_quantities(
+                            action="close",
+                            spot_base=spot_base,
+                            perp_base=perp_base,
+                            excess_leg=excess_leg,
+                            compensation=compensation,
                         )
                         common_base = adjusted_perp_base
                         if common_base > position.quantity:
-                            raise ValueError(
-                                "live close compensation exceeds position"
-                            )
+                            raise ValueError("live close compensation exceeds position")
                         closing_fees = _live_fees_usdt(
                             fill_rows,
                             intent.base_asset,
@@ -5177,9 +5127,7 @@ class Database:
                                 )
                                 * common_base
                             )
-                            gross_pnl = (
-                                common_gross_pnl + compensation_profit
-                            )
+                            gross_pnl = common_gross_pnl + compensation_profit
                         else:
                             spot_gross_pnl = (
                                 Decimal("0")
@@ -5200,26 +5148,16 @@ class Database:
                                 * perp_base
                             )
                             gross_pnl = (
-                                spot_gross_pnl
-                                + perp_gross_pnl
-                                + compensation_profit
+                                spot_gross_pnl + perp_gross_pnl + compensation_profit
                             )
-                        net_pnl = (
-                            gross_pnl
-                            - opening_fee_allocation
-                            - closing_fees
-                        )
+                        net_pnl = gross_pnl - opening_fee_allocation - closing_fees
                         position.closing_fees_usdt = (
-                            position.closing_fees_usdt
-                            or Decimal("0")
+                            position.closing_fees_usdt or Decimal("0")
                         ) + closing_fees
                         position.realized_pnl_usdt = (
-                            position.realized_pnl_usdt
-                            or Decimal("0")
+                            position.realized_pnl_usdt or Decimal("0")
                         ) + net_pnl
-                        position.remaining_opening_fees_usdt -= (
-                            opening_fee_allocation
-                        )
+                        position.remaining_opening_fees_usdt -= opening_fee_allocation
                         position.quantity -= common_base
                         session.add(
                             PnlRealizationRow(
@@ -5228,17 +5166,13 @@ class Database:
                                 closing_intent_id=intent.id,
                                 quantity=common_base,
                                 gross_pnl_usdt=gross_pnl,
-                                opening_fee_allocated_usdt=(
-                                    opening_fee_allocation
-                                ),
+                                opening_fee_allocated_usdt=(opening_fee_allocation),
                                 closing_fees_usdt=closing_fees,
                                 net_pnl_usdt=net_pnl,
                                 realized_at=now,
                             )
                         )
-                        intent.status = (
-                            "closed" if common_base > 0 else "failed"
-                        )
+                        intent.status = "closed" if common_base > 0 else "failed"
                         if common_base == 0:
                             intent.failure_code = "exposure_neutralized"
                         if _numeric_equal(
@@ -5288,29 +5222,17 @@ class Database:
                         )
                     )
                     gross_pnl = (
-                        (
-                            primary["spot"].average_price
-                            - position.spot_entry_price
-                        )
-                        + (
-                            position.perp_entry_price
-                            - primary["perp"].average_price
-                        )
+                        (primary["spot"].average_price - position.spot_entry_price)
+                        + (position.perp_entry_price - primary["perp"].average_price)
                     ) * spot_base
-                    net_pnl = (
-                        gross_pnl
-                        - opening_fee_allocation
-                        - closing_fees
-                    )
+                    net_pnl = gross_pnl - opening_fee_allocation - closing_fees
                     position.closing_fees_usdt = (
                         position.closing_fees_usdt or Decimal("0")
                     ) + closing_fees
                     position.realized_pnl_usdt = (
                         position.realized_pnl_usdt or Decimal("0")
                     ) + net_pnl
-                    position.remaining_opening_fees_usdt -= (
-                        opening_fee_allocation
-                    )
+                    position.remaining_opening_fees_usdt -= opening_fee_allocation
                     position.quantity -= spot_base
                     session.add(
                         PnlRealizationRow(
@@ -5319,9 +5241,7 @@ class Database:
                             closing_intent_id=intent.id,
                             quantity=spot_base,
                             gross_pnl_usdt=gross_pnl,
-                            opening_fee_allocated_usdt=(
-                                opening_fee_allocation
-                            ),
+                            opening_fee_allocated_usdt=(opening_fee_allocation),
                             closing_fees_usdt=closing_fees,
                             net_pnl_usdt=net_pnl,
                             realized_at=now,
@@ -5391,12 +5311,16 @@ class Database:
     ) -> tuple[TradeIntentRow, PairedPositionRow | None, bool] | None:
         async with self.sessions() as session:
             intent = await session.scalar(
-                select(TradeIntentRow).where(TradeIntentRow.id == intent_id).with_for_update()
+                select(TradeIntentRow)
+                .where(TradeIntentRow.id == intent_id)
+                .with_for_update()
             )
             if intent is None:
                 return None
             existing_position = await session.scalar(
-                select(PairedPositionRow).where(PairedPositionRow.opening_intent_id == intent.id)
+                select(PairedPositionRow).where(
+                    PairedPositionRow.opening_intent_id == intent.id
+                )
             )
             if existing_position is not None:
                 return intent, existing_position, False
@@ -5430,7 +5354,9 @@ class Database:
             total_fees = Decimal("0")
             for leg_name, leg in by_leg.items():
                 filled_quantity = fill_quantities[leg_name]
-                fee_rate = intent.spot_fee_rate if leg_name == "spot" else intent.perp_fee_rate
+                fee_rate = (
+                    intent.spot_fee_rate if leg_name == "spot" else intent.perp_fee_rate
+                )
                 fee = filled_quantity * leg.limit_price * fee_rate
                 total_fees += fee
                 leg.exchange_order_id = f"paper:{leg.id}"
@@ -5463,7 +5389,9 @@ class Database:
             position: PairedPositionRow | None = None
             if excess_quantity:
                 excess_leg = (
-                    by_leg["spot"] if spot_fill_quantity > perp_fill_quantity else by_leg["perp"]
+                    by_leg["spot"]
+                    if spot_fill_quantity > perp_fill_quantity
+                    else by_leg["perp"]
                 )
                 compensation_leg_name = f"{excess_leg.leg}_compensation"
                 compensation_side = "sell" if excess_leg.side == "buy" else "buy"
@@ -5475,7 +5403,9 @@ class Database:
                         market=excess_leg.market,
                         symbol=excess_leg.symbol,
                         side=compensation_side,
-                        client_order_id=(f"{excess_leg.client_order_id.rsplit('-', 1)[0]}-c"),
+                        client_order_id=(
+                            f"{excess_leg.client_order_id.rsplit('-', 1)[0]}-c"
+                        ),
                         status="created",
                         quantity=excess_quantity,
                         limit_price=excess_leg.limit_price,
@@ -5524,12 +5454,16 @@ class Database:
     ) -> tuple[TradeIntentRow, PairedPositionRow | None, bool] | None:
         async with self.sessions() as session:
             intent = await session.scalar(
-                select(TradeIntentRow).where(TradeIntentRow.id == intent_id).with_for_update()
+                select(TradeIntentRow)
+                .where(TradeIntentRow.id == intent_id)
+                .with_for_update()
             )
             if intent is None:
                 return None
             existing_position = await session.scalar(
-                select(PairedPositionRow).where(PairedPositionRow.opening_intent_id == intent.id)
+                select(PairedPositionRow).where(
+                    PairedPositionRow.opening_intent_id == intent.id
+                )
             )
             if existing_position is not None:
                 return intent, existing_position, False
@@ -5548,8 +5482,13 @@ class Database:
             )
             by_leg = {item.leg: item for item in legs}
             primary = {name: by_leg.get(name) for name in ("spot", "perp")}
-            compensations = [item for item in legs if item.leg.endswith("_compensation")]
-            if any(item is None for item in primary.values()) or len(compensations) != 1:
+            compensations = [
+                item for item in legs if item.leg.endswith("_compensation")
+            ]
+            if (
+                any(item is None for item in primary.values())
+                or len(compensations) != 1
+            ):
                 return None
             compensation = compensations[0]
             now = datetime.now(UTC)
@@ -5579,7 +5518,9 @@ class Database:
                 return intent, None, True
 
             compensation_fee_rate = (
-                intent.spot_fee_rate if compensation.market == "spot" else intent.perp_fee_rate
+                intent.spot_fee_rate
+                if compensation.market == "spot"
+                else intent.perp_fee_rate
             )
             compensation_fee = (
                 compensation.quantity * compensation.limit_price * compensation_fee_rate
@@ -5611,7 +5552,11 @@ class Database:
                 (
                     leg.filled_quantity
                     * leg.limit_price
-                    * (intent.spot_fee_rate if leg.market == "spot" else intent.perp_fee_rate)
+                    * (
+                        intent.spot_fee_rate
+                        if leg.market == "spot"
+                        else intent.perp_fee_rate
+                    )
                 )
                 for leg in (spot_leg, perp_leg)
             )
@@ -5673,7 +5618,9 @@ class Database:
     ) -> tuple[TradeIntentRow, PairedPositionRow, bool] | None:
         async with self.sessions() as session:
             intent = await session.scalar(
-                select(TradeIntentRow).where(TradeIntentRow.id == intent_id).with_for_update()
+                select(TradeIntentRow)
+                .where(TradeIntentRow.id == intent_id)
+                .with_for_update()
             )
             if intent is None or intent.paired_position_id is None:
                 return None
@@ -5717,7 +5664,9 @@ class Database:
             fills: list[FillRow] = []
             for leg_name, leg in by_leg.items():
                 filled_quantity = fill_quantities[leg_name]
-                fee_rate = intent.spot_fee_rate if leg_name == "spot" else intent.perp_fee_rate
+                fee_rate = (
+                    intent.spot_fee_rate if leg_name == "spot" else intent.perp_fee_rate
+                )
                 fee = filled_quantity * leg.limit_price * fee_rate
                 leg.exchange_order_id = f"paper:{leg.id}"
                 leg.status = (
@@ -5747,7 +5696,9 @@ class Database:
             excess_quantity = abs(spot_fill_quantity - perp_fill_quantity)
             if excess_quantity:
                 excess_leg = (
-                    by_leg["spot"] if spot_fill_quantity > perp_fill_quantity else by_leg["perp"]
+                    by_leg["spot"]
+                    if spot_fill_quantity > perp_fill_quantity
+                    else by_leg["perp"]
                 )
                 compensation_side = "buy" if excess_leg.side == "sell" else "sell"
                 session.add(
@@ -5758,7 +5709,9 @@ class Database:
                         market=excess_leg.market,
                         symbol=excess_leg.symbol,
                         side=compensation_side,
-                        client_order_id=(f"{excess_leg.client_order_id.rsplit('-', 1)[0]}-c"),
+                        client_order_id=(
+                            f"{excess_leg.client_order_id.rsplit('-', 1)[0]}-c"
+                        ),
                         status="created",
                         quantity=excess_quantity,
                         limit_price=excess_leg.limit_price,
@@ -5796,7 +5749,9 @@ class Database:
     ) -> tuple[TradeIntentRow, PairedPositionRow, bool] | None:
         async with self.sessions() as session:
             intent = await session.scalar(
-                select(TradeIntentRow).where(TradeIntentRow.id == intent_id).with_for_update()
+                select(TradeIntentRow)
+                .where(TradeIntentRow.id == intent_id)
+                .with_for_update()
             )
             if intent is None or intent.paired_position_id is None:
                 return None
@@ -5841,9 +5796,7 @@ class Database:
                 intent.version += 1
                 intent.updated_at = now
                 control = await session.get(ExecutionControlRow, 1)
-                reason = (
-                    "paired trade compensation failed; manual exposure review is required"
-                )
+                reason = "paired trade compensation failed; manual exposure review is required"
                 if control is None:
                     session.add(
                         ExecutionControlRow(
@@ -5920,12 +5873,8 @@ class Database:
         if common_quantity > position.quantity:
             raise ValueError("paper close fill exceeds the remaining position")
         primary_fees = (
-            spot_leg.filled_quantity
-            * spot_leg.limit_price
-            * intent.spot_fee_rate
-            + perp_leg.filled_quantity
-            * perp_leg.limit_price
-            * intent.perp_fee_rate
+            spot_leg.filled_quantity * spot_leg.limit_price * intent.spot_fee_rate
+            + perp_leg.filled_quantity * perp_leg.limit_price * intent.perp_fee_rate
         )
         attempt_fees = primary_fees + compensation_fee
         opening_fee_allocation = (
@@ -5943,12 +5892,11 @@ class Database:
         ) * common_quantity
         net_pnl = gross_pnl - opening_fee_allocation - attempt_fees
         position.closing_fees_usdt = (
-            (position.closing_fees_usdt or Decimal("0")) + attempt_fees
-        )
+            position.closing_fees_usdt or Decimal("0")
+        ) + attempt_fees
         position.realized_pnl_usdt = (
-            (position.realized_pnl_usdt or Decimal("0"))
-            + net_pnl
-        )
+            position.realized_pnl_usdt or Decimal("0")
+        ) + net_pnl
         position.remaining_opening_fees_usdt -= opening_fee_allocation
         position.quantity -= common_quantity
         if position.quantity == 0:
@@ -5989,8 +5937,7 @@ class Database:
                 select(func.coalesce(func.sum(PnlRealizationRow.net_pnl_usdt), 0))
                 .join(
                     PairedPositionRow,
-                    PnlRealizationRow.paired_position_id
-                    == PairedPositionRow.id,
+                    PnlRealizationRow.paired_position_id == PairedPositionRow.id,
                 )
                 .where(
                     PairedPositionRow.environment == environment,
@@ -6000,13 +5947,17 @@ class Database:
             )
             return Decimal(value or 0)
 
-    async def list_paired_positions(self, *, status: str | None = None) -> list[PairedPositionRow]:
+    async def list_paired_positions(
+        self, *, status: str | None = None
+    ) -> list[PairedPositionRow]:
         async with self.sessions() as session:
             statement = select(PairedPositionRow)
             if status is not None:
                 statement = statement.where(PairedPositionRow.status == status)
             return list(
-                await session.scalars(statement.order_by(PairedPositionRow.opened_at.desc()))
+                await session.scalars(
+                    statement.order_by(PairedPositionRow.opened_at.desc())
+                )
             )
 
     async def list_paired_positions_with_opening_intents(
@@ -6042,31 +5993,16 @@ class Database:
                 )
                 .outerjoin(
                     FundingIncomeRow,
-                    (
-                        FundingIncomeRow.exchange
-                        == PairedPositionRow.exchange
-                    )
-                    & (
-                        FundingIncomeRow.environment
-                        == PairedPositionRow.environment
-                    )
-                    & (
-                        FundingIncomeRow.base_asset
-                        == PairedPositionRow.base_asset
-                    )
-                    & (
-                        FundingIncomeRow.occurred_at
-                        >= PairedPositionRow.opened_at
-                    )
+                    (FundingIncomeRow.exchange == PairedPositionRow.exchange)
+                    & (FundingIncomeRow.environment == PairedPositionRow.environment)
+                    & (FundingIncomeRow.base_asset == PairedPositionRow.base_asset)
+                    & (FundingIncomeRow.occurred_at >= PairedPositionRow.opened_at)
                     & (FundingIncomeRow.occurred_at <= _utc(through)),
                 )
                 .where(PairedPositionRow.id.in_(position_ids))
                 .group_by(PairedPositionRow.id)
             )
-            return {
-                position_id: Decimal(total or 0)
-                for position_id, total in rows
-            }
+            return {position_id: Decimal(total or 0) for position_id, total in rows}
 
     async def active_open_intent_keys(
         self,
@@ -6091,10 +6027,7 @@ class Database:
                     ),
                 )
             )
-            return {
-                f"{exchange}:{base_asset}"
-                for exchange, base_asset in rows
-            }
+            return {f"{exchange}:{base_asset}" for exchange, base_asset in rows}
 
     async def position_liquidation_buffers(
         self,
@@ -6113,8 +6046,7 @@ class Database:
                 )
                 .join(
                     TradeIntentRow,
-                    PairedPositionRow.opening_intent_id
-                    == TradeIntentRow.id,
+                    PairedPositionRow.opening_intent_id == TradeIntentRow.id,
                 )
                 .join(
                     OrderLegRow,
@@ -6123,10 +6055,7 @@ class Database:
                 )
                 .join(
                     AccountReconciliationRow,
-                    (
-                        AccountReconciliationRow.exchange
-                        == PairedPositionRow.exchange
-                    )
+                    (AccountReconciliationRow.exchange == PairedPositionRow.exchange)
                     & (
                         AccountReconciliationRow.environment
                         == PairedPositionRow.environment
@@ -6138,10 +6067,7 @@ class Database:
                         RemotePositionSnapshotRow.account_snapshot_id
                         == AccountReconciliationRow.snapshot_id
                     )
-                    & (
-                        RemotePositionSnapshotRow.symbol
-                        == OrderLegRow.symbol
-                    ),
+                    & (RemotePositionSnapshotRow.symbol == OrderLegRow.symbol),
                 )
                 .where(
                     PairedPositionRow.environment == environment,
@@ -6158,10 +6084,9 @@ class Database:
                 ):
                     values[position_id] = None
                 else:
-                    values[position_id] = (
-                        liquidation_price - mark_price
-                    ) / mark_price
+                    values[position_id] = (liquidation_price - mark_price) / mark_price
             return values
+
     async def paired_perp_exposures(
         self,
         *,
@@ -6178,8 +6103,7 @@ class Database:
                     )
                     .join(
                         TradeIntentRow,
-                        PairedPositionRow.opening_intent_id
-                        == TradeIntentRow.id,
+                        PairedPositionRow.opening_intent_id == TradeIntentRow.id,
                     )
                     .join(
                         OrderLegRow,
@@ -6216,7 +6140,11 @@ class Database:
     async def load_settings(self) -> ScannerSettings:
         async with self.sessions() as session:
             row = await session.get(SettingRow, "scanner")
-            return ScannerSettings.model_validate_json(row.payload) if row else ScannerSettings()
+            return (
+                ScannerSettings.model_validate_json(row.payload)
+                if row
+                else ScannerSettings()
+            )
 
     async def save_settings(self, settings: ScannerSettings) -> None:
         async with self.sessions() as session:
@@ -6405,7 +6333,9 @@ class Database:
             )
             await session.commit()
 
-    async def admin_for_session(self, *, token_hash: str, now: datetime) -> AdminUserRow | None:
+    async def admin_for_session(
+        self, *, token_hash: str, now: datetime
+    ) -> AdminUserRow | None:
         async with self.sessions() as session:
             return await session.scalar(
                 select(AdminUserRow)
@@ -6416,7 +6346,9 @@ class Database:
                 )
             )
 
-    async def csrf_hash_for_session(self, *, token_hash: str, now: datetime) -> str | None:
+    async def csrf_hash_for_session(
+        self, *, token_hash: str, now: datetime
+    ) -> str | None:
         async with self.sessions() as session:
             return await session.scalar(
                 select(AdminSessionRow.csrf_hash).where(
@@ -6432,7 +6364,9 @@ class Database:
             )
             await session.commit()
 
-    async def append_audit(self, event_type: str, *, actor: str, details: dict[str, Any]) -> None:
+    async def append_audit(
+        self, event_type: str, *, actor: str, details: dict[str, Any]
+    ) -> None:
         async with self.sessions() as session:
             session.add(
                 AuditEventRow(
@@ -6460,7 +6394,9 @@ class Database:
         if event_type:
             statement = statement.where(AuditEventRow.event_type == event_type)
         statement = (
-            statement.order_by(AuditEventRow.occurred_at.desc(), AuditEventRow.id.desc())
+            statement.order_by(
+                AuditEventRow.occurred_at.desc(), AuditEventRow.id.desc()
+            )
             .offset(offset)
             .limit(limit)
         )
@@ -6620,7 +6556,9 @@ class Database:
                 for character in error_code
             )
         ):
-            raise ValueError("notification error code must be a safe lowercase identifier")
+            raise ValueError(
+                "notification error code must be a safe lowercase identifier"
+            )
         failed_at = now or datetime.now(UTC)
         async with self.sessions() as session:
             statement = select(NotificationOutboxRow).where(
@@ -6655,7 +6593,13 @@ class Database:
             raise ValueError("notification list limit must be between 1 and 500")
         if offset < 0 or offset > 10000:
             raise ValueError("notification list offset must be between 0 and 10000")
-        if status is not None and status not in {"pending", "sending", "retry", "sent", "dead"}:
+        if status is not None and status not in {
+            "pending",
+            "sending",
+            "retry",
+            "sent",
+            "dead",
+        }:
             raise ValueError("unsupported notification status")
         if channel is not None and channel not in {"telegram", "email"}:
             raise ValueError("unsupported notification channel")
@@ -6703,9 +6647,8 @@ class Database:
     ) -> bool:
         if not source_key or len(source_key) > 150:
             raise ValueError("notification source key must contain 1-150 characters")
-        if (
-            len(fingerprint) != 64
-            or any(character not in "0123456789abcdef" for character in fingerprint)
+        if len(fingerprint) != 64 or any(
+            character not in "0123456789abcdef" for character in fingerprint
         ):
             raise ValueError("notification fingerprint must be lowercase SHA-256")
         projected_at = now or datetime.now(UTC)
@@ -6844,9 +6787,9 @@ class Database:
                 )
             )
             unhealthy_count = await session.scalar(
-                select(func.count()).select_from(AccountReconciliationRow).where(
-                    AccountReconciliationRow.status != "ready"
-                )
+                select(func.count())
+                .select_from(AccountReconciliationRow)
+                .where(AccountReconciliationRow.status != "ready")
             )
             return DailyNotificationSummary(
                 period_start=start,
@@ -6915,17 +6858,11 @@ class Database:
                 )
                 await session.flush()
             else:
-                limits = _parse_transfer_limit_payload(
-                    settings_row.payload
-                )
+                limits = _parse_transfer_limit_payload(settings_row.payload)
             if not limits.enabled:
-                raise ValueError(
-                    "internal transfers are disabled by zero limits"
-                )
+                raise ValueError("internal transfers are disabled by zero limits")
             if amount > limits.per_request_limit_usdt:
-                raise ValueError(
-                    "internal transfer exceeds the per-request limit"
-                )
+                raise ValueError("internal transfer exceeds the per-request limit")
             control = await session.scalar(
                 select(ExecutionControlRow)
                 .where(ExecutionControlRow.id == 1)
@@ -6941,12 +6878,9 @@ class Database:
                 session.add(control)
                 await session.flush()
             used = await session.scalar(
-                select(
-                    func.coalesce(func.sum(InternalTransferRow.amount), 0)
-                ).where(
+                select(func.coalesce(func.sum(InternalTransferRow.amount), 0)).where(
                     InternalTransferRow.created_at >= day_start,
-                    InternalTransferRow.created_at < day_start
-                    + timedelta(days=1),
+                    InternalTransferRow.created_at < day_start + timedelta(days=1),
                     InternalTransferRow.status.not_in({"failed"}),
                 )
             )
@@ -7115,7 +7049,9 @@ class Database:
             if row is None:
                 raise ValueError("internal transfer does not exist")
             if row.status not in {"submitted", "pending"}:
-                raise ValueError("internal transfer is not awaiting remote confirmation")
+                raise ValueError(
+                    "internal transfer is not awaiting remote confirmation"
+                )
             if (
                 row.exchange_transfer_id is not None
                 and row.exchange_transfer_id != exchange_transfer_id
@@ -7139,9 +7075,7 @@ class Database:
     ) -> InternalTransferRow:
         if status not in {"completed", "failed", "manual_review"}:
             raise ValueError("unsupported internal transfer terminal status")
-        if error_code is not None and (
-            not error_code or len(error_code) > 80
-        ):
+        if error_code is not None and (not error_code or len(error_code) > 80):
             raise ValueError("invalid internal transfer error code")
         observed_at = now or datetime.now(UTC)
         async with self.sessions() as session:
@@ -7154,7 +7088,9 @@ class Database:
                 raise ValueError("internal transfer does not exist")
             if row.status in {"completed", "failed", "manual_review"}:
                 if row.status != status:
-                    raise ValueError("internal transfer already has another terminal status")
+                    raise ValueError(
+                        "internal transfer already has another terminal status"
+                    )
                 return row
             row.status = status
             row.error_code = error_code
@@ -7243,12 +7179,16 @@ class Database:
             make_default = (
                 True
                 if not account_rows
-                else is_default if is_default is not None else False
+                else is_default
+                if is_default is not None
+                else False
             )
             make_scanner_default = (
                 True
                 if not account_rows
-                else scanner_default if scanner_default is not None else False
+                else scanner_default
+                if scanner_default is not None
+                else False
             )
             if make_default:
                 for item in account_rows:
@@ -7425,9 +7365,7 @@ class Database:
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
-                raise ValueError(
-                    "account is referenced by a task or strategy"
-                ) from exc
+                raise ValueError("account is referenced by a task or strategy") from exc
             return True
 
     async def delete_exchange_credential(
@@ -7477,9 +7415,13 @@ class Database:
             await session.commit()
             return True
 
-    async def replace_instruments(self, exchange: str, pairs: list[InstrumentPair]) -> None:
+    async def replace_instruments(
+        self, exchange: str, pairs: list[InstrumentPair]
+    ) -> None:
         async with self.sessions() as session:
-            await session.execute(delete(InstrumentRow).where(InstrumentRow.exchange == exchange))
+            await session.execute(
+                delete(InstrumentRow).where(InstrumentRow.exchange == exchange)
+            )
             now = datetime.now(UTC)
             session.add_all(
                 InstrumentRow(
@@ -7512,9 +7454,7 @@ class Database:
         async with self.sessions() as session:
             statement = select(InstrumentRow)
             if exchanges is not None:
-                statement = statement.where(
-                    InstrumentRow.exchange.in_(exchanges)
-                )
+                statement = statement.where(InstrumentRow.exchange.in_(exchanges))
             rows = list(
                 await session.scalars(
                     statement.order_by(
@@ -7595,9 +7535,7 @@ class Database:
                     LatestOpportunityRow.exchange.in_(exchanges)
                 )
             rows = list(
-                await session.scalars(
-                    statement.order_by(LatestOpportunityRow.exchange)
-                )
+                await session.scalars(statement.order_by(LatestOpportunityRow.exchange))
             )
         opportunities = [
             Opportunity.model_validate(item)
@@ -7696,10 +7634,14 @@ class Database:
         async with self.sessions() as session:
             ids = (
                 await session.scalars(
-                    select(SnapshotRow.id).where(SnapshotRow.observed_at < cutoff).limit(batch_size)
+                    select(SnapshotRow.id)
+                    .where(SnapshotRow.observed_at < cutoff)
+                    .limit(batch_size)
                 )
             ).all()
             if ids:
-                await session.execute(delete(SnapshotRow).where(SnapshotRow.id.in_(ids)))
+                await session.execute(
+                    delete(SnapshotRow).where(SnapshotRow.id.in_(ids))
+                )
             await session.commit()
             return len(ids)

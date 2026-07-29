@@ -10,6 +10,8 @@
 `20260729_0035` 为每条任务腿增加非空交易所。迁移先按 `account_id` 回填，再按旧 `trade_intents`
 回填迁移历史，最后只接受能由 `instruments` 唯一匹配的无账户纸面腿；仍无法唯一确定时在添加非空和
 六所检查约束前中止。不能仅凭 `BTCUSDT` 等多所重名 symbol 选择交易所。
+`20260729_0036` 为执行订单增加实际方向、reduce-only 和 primary/compensation 用途；既有订单只从
+不可变任务腿安全回填为 primary，之后反向保护订单不再依赖任务腿原始方向推断。
 `instruments` 表持久化六所现货/永续价格和数量步长、最小数量/名义额及永续合约乘数；旧目录记录迁移
 后以 0 表示未知，并在下一次公共目录刷新时更新。任一真实下单规划看到未知规则都必须阻断。
 Binance、OKX、Bybit、Bitget Classic V2/UTA V3、Gate 及 MEXC 永续配置只接受 1–10 倍杠杆。Binance
@@ -321,8 +323,10 @@ MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
 超过任务基础币上限。
 
 `execution_runs`、`execution_orders` 和 `execution_fills` 分别保存每轮执行、每次追价/重试产生的
-真实委托以及交易所成交。客户端订单 ID 全局唯一；同一腿的尝试号和追价号唯一；未确认旧单终态前
-不得创建下一条追价订单。`arbitrage_strategies`、`strategy_legs` 和 `strategy_pnl_events` 保存任务
+真实委托以及交易所成交。订单行固化实际 `side`、`reduce_only` 和 `primary/compensation` 用途，
+不能再从可变执行阶段反推反向补偿意图。客户端订单 ID 全局唯一；同一腿的尝试号和追价号唯一；
+未确认旧单终态前不得创建下一条追价订单。`arbitrage_strategies`、`strategy_legs` 和
+`strategy_pnl_events` 保存任务
 完成后的组合、逐腿剩余数量与不可变已实现 PnL。`funding_income` 增加可空的账户和策略腿关联，
 `adl_snapshots` 保存各所原生值及归一化 1–5 级风险。
 
@@ -338,12 +342,16 @@ relationship 模型的排序。UUID 幂等键和规范化请求指纹共同防�
 `strategy_legs`，兼容开启外键的 SQLite 测试和 PostgreSQL。所有腿成功后才一起把 run/task 标为
 completed；报价或规则失败则用固定 `paper_quote_unavailable` 终结 run/task，不持久化异常正文。
 
-实盘 worker 领取 sandbox/live queued/running/hedging 任务；新 queued 任务要求同一锁定事务看到全局
-execution ready，已有敞口的 running/hedging 任务即使全局暂停仍可继续查单和对冲。每条腿同时最多
+实盘 worker 领取 sandbox/live queued/running/hedging/compensating 任务；新 queued 任务要求同一
+锁定事务看到全局 execution ready，已有敞口的活动任务即使全局暂停仍可继续查单和补偿。每条腿同时最多
 一个 created/submitted/acknowledged/partially_filled/cancel_pending/unknown 订单。追价子订单必须
 引用同 run、同腿且已终态的 parent，并复用 attempt、递增 chase；普通重试递增 attempt、chase 归零。
 远端成交按“本地订单+交易所 trade ID”幂等，数量不得倒退或超过订单。任务失败前重新读当前 run 的
-累计成交；非零敞口把 task/run 标为 manual_review，零成交才标 failed，二者均只保存固定失败码。
+累计成交；未决或 unknown 订单直接把 task/run 标为 manual_review 并暂停。只有全部订单终态且存在
+已成交主腿时才原子暂停全局执行并进入 compensating，按每条腿的累计主成交减累计补偿成交创建相反
+方向保护 IOC；永续补偿强制 reduce-only。补偿可在重启后继续，全部归零后任务按原失败码标为 failed
+并保持暂停；补偿失败、超量或重试耗尽进入 manual_review 并暂停。现货卖单（包括反向卖出补偿）
+在每次提交前使用对应交易所私有余额接口核对基础币可用库存，禁止借币卖出或假定本地账本等于远端余额。
 
 任务活动读模型按 task 一次读取其 run，再限定到这些 run 的订单和成交，空集合不会生成无界
 `IN` 查询。组合读模型批量读取策略腿及其不可变开仓任务腿，用开仓腿补足交易所和角色；净 PnL

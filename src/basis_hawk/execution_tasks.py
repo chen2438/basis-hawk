@@ -115,6 +115,9 @@ class ExecutionOrderView(DecimalPayload):
     client_order_id: str
     exchange_order_id: str | None
     order_mode: str
+    side: str
+    reduce_only: bool
+    purpose: str
     status: str
     quantity: Decimal
     base_multiplier: Decimal
@@ -199,9 +202,7 @@ class ExecutionTaskService:
                 "hedge_trigger": spec.hedge_trigger.value,
                 "hedge_threshold": spec.hedge_threshold,
                 "maximum_base_exposure": spec.maximum_base_exposure,
-                "maximum_notional_exposure_usdt": (
-                    spec.maximum_notional_exposure_usdt
-                ),
+                "maximum_notional_exposure_usdt": (spec.maximum_notional_exposure_usdt),
                 "maximum_retries": spec.maximum_retries,
                 "status": "draft",
                 "failure_code": None,
@@ -248,9 +249,7 @@ class ExecutionTaskService:
                         else None
                     ),
                     "margin_mode": (
-                        leg.margin_mode.value
-                        if leg.margin_mode is not None
-                        else None
+                        leg.margin_mode.value if leg.margin_mode is not None else None
                     ),
                     "leverage": leg.leverage,
                     "reduce_only": leg.reduce_only,
@@ -275,9 +274,7 @@ class ExecutionTaskService:
     async def activity(self, task_id: str) -> ExecutionTaskActivityView:
         if await self.database.execution_task(task_id) is None:
             raise KeyError(task_id)
-        runs, orders, fills = await self.database.execution_task_activity(
-            task_id
-        )
+        runs, orders, fills = await self.database.execution_task_activity(task_id)
         return ExecutionTaskActivityView(
             runs=[
                 ExecutionRunView(
@@ -304,6 +301,9 @@ class ExecutionTaskService:
                     client_order_id=item.client_order_id,
                     exchange_order_id=item.exchange_order_id,
                     order_mode=item.order_mode,
+                    side=item.side,
+                    reduce_only=item.reduce_only,
+                    purpose=item.purpose,
                     status=item.status,
                     quantity=item.quantity,
                     base_multiplier=item.base_multiplier,
@@ -414,8 +414,7 @@ class ExecutionTaskService:
                     f"account {account_id} environment does not match the task"
                 )
             if any(
-                leg.account_id == account_id
-                and leg.exchange != summary.exchange
+                leg.account_id == account_id and leg.exchange != summary.exchange
                 for leg in spec.legs
             ):
                 raise ExecutionTaskValidationError(
@@ -458,7 +457,11 @@ class ExecutionTaskService:
                 )
                 snapshot = await client.snapshot()
                 trading_state = await client.trading_state()
-            except (PrivateRequestError, UnsupportedEnvironmentError, ValueError) as exc:
+            except (
+                PrivateRequestError,
+                UnsupportedEnvironmentError,
+                ValueError,
+            ) as exc:
                 raise ExecutionTaskValidationError(
                     f"{summary.exchange.value} account preflight failed"
                 ) from exc
@@ -476,11 +479,13 @@ class ExecutionTaskService:
                 raise ExecutionTaskValidationError(
                     f"{summary.exchange.value} trading state is incomplete"
                 )
-            if any(
-                leg.account_id == account_id
-                and leg.market_type == "perpetual"
-                for leg in legs
-            ) and snapshot.position_mode == PositionMode.UNKNOWN:
+            if (
+                any(
+                    leg.account_id == account_id and leg.market_type == "perpetual"
+                    for leg in legs
+                )
+                and snapshot.position_mode == PositionMode.UNKNOWN
+            ):
                 raise ExecutionTaskValidationError(
                     f"{summary.exchange.value} perpetual position mode is unknown"
                 )

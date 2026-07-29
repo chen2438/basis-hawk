@@ -74,6 +74,7 @@ class LiveQuoteProvider(Protocol):
         *,
         base_quantity: Decimal,
         mode: str,
+        side: str | None = None,
     ) -> LiveOrderQuote: ...
 
 
@@ -112,9 +113,7 @@ class LatestOpportunityLiveQuoteProvider:
             else opportunity.perp_bid
         )
         multiplier = (
-            Decimal("1")
-            if leg.market_type == "spot"
-            else pair.perp_contract_size
+            Decimal("1") if leg.market_type == "spot" else pair.perp_contract_size
         )
         increment = (
             pair.spot_quantity_increment
@@ -160,12 +159,11 @@ class LatestOpportunityLiveQuoteProvider:
         *,
         base_quantity: Decimal,
         mode: str,
+        side: str | None = None,
     ) -> LiveOrderQuote:
         opportunity, pair = await self._market(leg)
         multiplier = (
-            Decimal("1")
-            if leg.market_type == "spot"
-            else pair.perp_contract_size
+            Decimal("1") if leg.market_type == "spot" else pair.perp_contract_size
         )
         quantity_increment = (
             pair.spot_quantity_increment
@@ -184,29 +182,26 @@ class LatestOpportunityLiveQuoteProvider:
             else pair.perp_price_increment
         )
         bid = (
-            opportunity.spot_bid
-            if leg.market_type == "spot"
-            else opportunity.perp_bid
+            opportunity.spot_bid if leg.market_type == "spot" else opportunity.perp_bid
         )
         ask = (
-            opportunity.spot_ask
-            if leg.market_type == "spot"
-            else opportunity.perp_ask
+            opportunity.spot_ask if leg.market_type == "spot" else opportunity.perp_ask
         )
+        order_side = side or leg.side
         if mode == "market":
             limit_price = None
         elif mode == "maker":
             level = leg.maker_book_level or 1
             limit_price = (
                 bid - price_increment * (level - 1)
-                if leg.side == "buy"
+                if order_side == "buy"
                 else ask + price_increment * (level - 1)
             )
         else:
             limit_price = protective_limit_price(
-                reference_price=ask if leg.side == "buy" else bid,
+                reference_price=ask if order_side == "buy" else bid,
                 maximum_slippage=leg.maximum_slippage,
-                side=leg.side,
+                side=order_side,
                 price_increment=price_increment,
             )
         if limit_price is not None and limit_price <= 0:
@@ -239,9 +234,7 @@ class LatestOpportunityLiveQuoteProvider:
             or now - observed_at > self.maximum_age
         ):
             raise ValueError("live quote is stale")
-        pairs = await self.database.instrument_pairs(
-            exchanges={leg.exchange}
-        )
+        pairs = await self.database.instrument_pairs(exchanges={leg.exchange})
         pair = next(
             (
                 item
@@ -253,9 +246,7 @@ class LatestOpportunityLiveQuoteProvider:
         if pair is None or not pair.trading_rules_complete:
             raise ValueError("live instrument rules are incomplete")
         expected_symbol = (
-            pair.spot_symbol
-            if leg.market_type == "spot"
-            else pair.perp_symbol
+            pair.spot_symbol if leg.market_type == "spot" else pair.perp_symbol
         )
         if leg.symbol != expected_symbol:
             raise ValueError("task-leg symbol does not match instrument rules")
@@ -300,19 +291,50 @@ class MultiLegLiveExecutionService:
         task, legs, run, orders = claimed
         try:
             await self._progress(task, legs, run, orders)
-        except (ArithmeticError, KeyError, PrivateRequestError, ValueError):
-            current_orders = await self.database.execution_orders_for_run(
-                run.id
+        except (ArithmeticError, KeyError, RuntimeError, ValueError):
+            current_orders = await self.database.execution_orders_for_run(run.id)
+            has_primary_exposure = any(
+                item.purpose == "primary" and item.filled_quantity > 0
+                for item in current_orders
             )
-            has_exposure = any(
-                item.filled_quantity > 0 for item in current_orders
+            has_uncertain_order = any(
+                item.status
+                in {
+                    "submitted",
+                    "acknowledged",
+                    "partially_filled",
+                    "cancel_pending",
+                    "unknown",
+                }
+                for item in current_orders
             )
+            if (
+                task.status != "compensating"
+                and has_primary_exposure
+                and not has_uncertain_order
+            ):
+                await self.database.begin_execution_task_compensation(
+                    task_id=task.id,
+                    run_id=run.id,
+                    failure_code="multi_leg_execution_failed",
+                    worker_id=self.worker_id,
+                )
+                return MultiLegLiveExecutionResult(
+                    examined=1,
+                    progressed=1,
+                    completed=0,
+                    failed=0,
+                )
             await self.database.fail_execution_task_run(
                 task_id=task.id,
                 run_id=run.id,
                 failure_code="multi_leg_execution_failed",
                 worker_id=self.worker_id,
-                manual_review=has_exposure,
+                manual_review=(
+                    task.status == "compensating"
+                    or has_primary_exposure
+                    or has_uncertain_order
+                ),
             )
             return MultiLegLiveExecutionResult(
                 examined=1,
@@ -321,9 +343,7 @@ class MultiLegLiveExecutionService:
                 failed=1,
             )
         refreshed = await self.database.execution_task(task.id)
-        completed = int(
-            refreshed is not None and refreshed[0].status == "completed"
-        )
+        completed = int(refreshed is not None and refreshed[0].status == "completed")
         return MultiLegLiveExecutionResult(
             examined=1,
             progressed=1,
@@ -338,7 +358,8 @@ class MultiLegLiveExecutionService:
         run: ExecutionRunRow,
         orders: list[ExecutionOrderRow],
     ) -> None:
-        await self._resolve_legs(task, legs)
+        if task.status != "compensating":
+            await self._resolve_legs(task, legs)
         active = next(
             (item for item in orders if item.status in ACTIVE_ORDER_STATUSES),
             None,
@@ -347,12 +368,15 @@ class MultiLegLiveExecutionService:
             leg = next(item for item in legs if item.id == active.task_leg_id)
             await self._progress_order(task, leg, active)
             return
+        if task.status == "compensating":
+            await self._progress_compensation(task, legs, run, orders)
+            return
         filled_by_leg = {
             leg.id: sum(
                 (
                     order.filled_quantity * order.base_multiplier
                     for order in orders
-                    if order.task_leg_id == leg.id
+                    if order.task_leg_id == leg.id and order.purpose == "primary"
                 ),
                 Decimal("0"),
             )
@@ -370,8 +394,7 @@ class MultiLegLiveExecutionService:
             if (
                 task.hedge_trigger == "cumulative_percent"
                 and anchor_filled < anchor_target
-                and anchor_filled / anchor_target
-                < Decimal(task.hedge_threshold or 1)
+                and anchor_filled / anchor_target < Decimal(task.hedge_threshold or 1)
             ):
                 desired = Decimal("0")
             deficit = desired - filled_by_leg[leg.id]
@@ -525,10 +548,81 @@ class MultiLegLiveExecutionService:
             task_leg_id=leg.id,
             client_order_id=client_order_id,
             order_mode=mode,
+            side=leg.side,
+            reduce_only=leg.reduce_only,
+            purpose="primary",
             quantity=quote.native_quantity,
             base_multiplier=quote.base_multiplier,
             limit_price=quote.limit_price,
             parent_order_id=parent_id,
+        )
+
+    async def _progress_compensation(
+        self,
+        task: ExecutionTaskRow,
+        legs: list[ExecutionTaskLegRow],
+        run: ExecutionRunRow,
+        orders: list[ExecutionOrderRow],
+    ) -> None:
+        for leg in legs:
+            primary_base = sum(
+                (
+                    order.filled_quantity * order.base_multiplier
+                    for order in orders
+                    if order.task_leg_id == leg.id and order.purpose == "primary"
+                ),
+                Decimal("0"),
+            )
+            compensated_base = sum(
+                (
+                    order.filled_quantity * order.base_multiplier
+                    for order in orders
+                    if order.task_leg_id == leg.id and order.purpose == "compensation"
+                ),
+                Decimal("0"),
+            )
+            remaining = primary_base - compensated_base
+            if remaining < 0:
+                raise ValueError("compensation exceeded the primary fill")
+            if remaining == 0:
+                continue
+            attempts = [
+                item
+                for item in orders
+                if item.task_leg_id == leg.id and item.purpose == "compensation"
+            ]
+            if len(attempts) > task.maximum_retries:
+                raise ValueError("compensation retry limit reached")
+            side = "sell" if leg.side == "buy" else "buy"
+            quote = await self.quote_provider.quote_order(
+                leg,
+                base_quantity=remaining,
+                mode="protected_ioc",
+                side=side,
+            )
+            token = uuid.uuid4().hex
+            await self.database.create_execution_order_attempt(
+                run_id=run.id,
+                task_leg_id=leg.id,
+                client_order_id=_client_order_id(
+                    Exchange(leg.exchange),
+                    token,
+                ),
+                order_mode="protected_ioc",
+                side=side,
+                reduce_only=leg.market_type == "perpetual",
+                purpose="compensation",
+                quantity=quote.native_quantity,
+                base_multiplier=quote.base_multiplier,
+                limit_price=quote.limit_price,
+            )
+            return
+        await self.database.fail_execution_task_run(
+            task_id=task.id,
+            run_id=run.id,
+            failure_code=task.failure_code or "multi_leg_execution_compensated",
+            worker_id=self.worker_id,
+            manual_review=False,
         )
 
     async def _progress_order(
@@ -560,18 +654,12 @@ class MultiLegLiveExecutionService:
                 client_order_id=order.client_order_id,
             )
             if not lookup.complete:
-                await self.database.mark_execution_order_unknown(
-                    order_id=order.id
-                )
+                await self.database.mark_execution_order_unknown(order_id=order.id)
                 return
             if lookup.order is None:
                 if order.status == "cancel_pending":
                     fill_batch = await client.fills_for_order(
-                        market=(
-                            "spot"
-                            if leg.market_type == "spot"
-                            else "perp"
-                        ),
+                        market=("spot" if leg.market_type == "spot" else "perp"),
                         symbol=leg.symbol,
                         exchange_order_id=order.exchange_order_id,
                         client_order_id=order.client_order_id,
@@ -588,10 +676,7 @@ class MultiLegLiveExecutionService:
                     )
                     average_price = (
                         sum(
-                            (
-                                item.quantity * item.price
-                                for item in fill_batch.fills
-                            ),
+                            (item.quantity * item.price for item in fill_batch.fills),
                             Decimal("0"),
                         )
                         / filled_quantity
@@ -619,9 +704,7 @@ class MultiLegLiveExecutionService:
                     )
                     return
                 if order.status not in {"created", "unknown"}:
-                    await self.database.mark_execution_order_unknown(
-                        order_id=order.id
-                    )
+                    await self.database.mark_execution_order_unknown(order_id=order.id)
                     return
                 await self._submit_order(client, task, leg, order)
                 return
@@ -634,9 +717,7 @@ class MultiLegLiveExecutionService:
                 since=_utc(order.created_at),
             )
             if not fill_batch.complete:
-                await self.database.mark_execution_order_unknown(
-                    order_id=order.id
-                )
+                await self.database.mark_execution_order_unknown(order_id=order.id)
                 return
             filled_quantity = sum(
                 (item.quantity for item in fill_batch.fills),
@@ -658,10 +739,11 @@ class MultiLegLiveExecutionService:
                 filled_quantity=filled_quantity,
                 requested_quantity=order.quantity,
             )
-            if (
-                order.status == "cancel_pending"
-                and status in {"acknowledged", "partially_filled", "unknown"}
-            ):
+            if order.status == "cancel_pending" and status in {
+                "acknowledged",
+                "partially_filled",
+                "unknown",
+            }:
                 status = "cancel_pending"
             observed = await self.database.apply_execution_order_observation(
                 order_id=order.id,
@@ -709,6 +791,11 @@ class MultiLegLiveExecutionService:
         snapshot = await client.snapshot()
         if snapshot.trade_permission is False:
             raise ValueError("live execution account cannot trade")
+        if leg.market_type == "spot" and order.side == "sell":
+            available = await client.spot_asset_available(leg.base_asset)
+            required = order.quantity * order.base_multiplier
+            if available < required:
+                raise ValueError("spot inventory is insufficient for sell order")
         if leg.market_type == "perpetual":
             if snapshot.position_mode == PositionMode.UNKNOWN:
                 raise ValueError("live execution position mode is unknown")
@@ -730,23 +817,24 @@ class MultiLegLiveExecutionService:
         try:
             submission = await client.place_order(
                 PrivateOrderRequest(
-                    market=(
-                        "spot" if leg.market_type == "spot" else "perp"
-                    ),
+                    market=("spot" if leg.market_type == "spot" else "perp"),
                     symbol=leg.symbol,
-                    side=leg.side,
+                    side=order.side,
                     quantity=order.quantity,
                     mode=OrderMode(order.order_mode),
                     limit_price=order.limit_price,
                     client_order_id=order.client_order_id,
-                    reduce_only=leg.reduce_only,
+                    reduce_only=order.reduce_only,
                     position_mode=(
                         snapshot.position_mode
                         if leg.market_type == "perpetual"
                         else PositionMode.UNKNOWN
                     ),
                     position_side=(
-                        _position_side(leg)
+                        _position_side(
+                            side=order.side,
+                            reduce_only=order.reduce_only,
+                        )
                         if leg.market_type == "perpetual"
                         else None
                     ),
@@ -768,10 +856,14 @@ def _target(leg: ExecutionTaskLegRow) -> Decimal:
     return leg.resolved_base_quantity
 
 
-def _position_side(leg: ExecutionTaskLegRow) -> PerpPositionSide:
+def _position_side(
+    *,
+    side: str,
+    reduce_only: bool,
+) -> PerpPositionSide:
     return (
         PerpPositionSide.LONG
-        if (leg.side == "buy") != leg.reduce_only
+        if (side == "buy") != reduce_only
         else PerpPositionSide.SHORT
     )
 
@@ -828,15 +920,8 @@ def _remote_status(
 def _floor_to_increment(value: Decimal, increment: Decimal) -> Decimal:
     if increment <= 0:
         raise ValueError("quantity increment must be positive")
-    return (
-        (value / increment).to_integral_value(rounding=ROUND_DOWN)
-        * increment
-    )
+    return (value / increment).to_integral_value(rounding=ROUND_DOWN) * increment
 
 
 def _utc(value: datetime) -> datetime:
-    return (
-        value.replace(tzinfo=UTC)
-        if value.tzinfo is None
-        else value.astimezone(UTC)
-    )
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)

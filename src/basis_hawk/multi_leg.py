@@ -56,6 +56,7 @@ class ExecutionTaskStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     HEDGING = "hedging"
+    COMPENSATING = "compensating"
     PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -125,7 +126,9 @@ class ExecutionTaskLegSpec(DecimalPayload):
     target_quantity: Decimal = Field(gt=0)
     per_order_quantity: Decimal = Field(default=Decimal("0"), ge=0)
     order_mode: OrderMode
-    maximum_slippage: Decimal = Field(default=Decimal("0.001"), gt=0, le=Decimal("0.25"))
+    maximum_slippage: Decimal = Field(
+        default=Decimal("0.001"), gt=0, le=Decimal("0.25")
+    )
     maker_policy: MakerPolicy | None = None
     margin_mode: MarginMode | None = None
     leverage: int = Field(default=1, ge=1, le=10)
@@ -147,7 +150,9 @@ class ExecutionTaskLegSpec(DecimalPayload):
             if self.leverage != 1:
                 raise ValueError("spot legs must use 1x leverage")
             if self.reduce_only:
-                raise ValueError("spot inventory sells are reserved instead of reduce-only")
+                raise ValueError(
+                    "spot inventory sells are reserved instead of reduce-only"
+                )
         elif self.margin_mode is None:
             raise ValueError("perpetual legs require a margin mode")
         return self
@@ -186,7 +191,9 @@ class ExecutionTaskSpec(DecimalPayload):
         elif self.hedge_threshold is not None:
             raise ValueError("realtime hedging cannot define a cumulative threshold")
         if self.quantity_mode == QuantityMode.BASE:
-            target_delta = abs(sum((leg.signed_target for leg in self.legs), Decimal("0")))
+            target_delta = abs(
+                sum((leg.signed_target for leg in self.legs), Decimal("0"))
+            )
             if target_delta > self.maximum_base_exposure:
                 raise ValueError("planned base delta exceeds the task exposure limit")
         if self.environment != ExecutionEnvironment.PAPER and any(

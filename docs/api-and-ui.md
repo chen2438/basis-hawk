@@ -104,7 +104,8 @@ Demo 模式入口。
 - `GET /api/v2/execution-tasks` 和 `GET /api/v2/execution-tasks/{task_id}` 返回任务、乐观锁版本、
   有序腿和脱敏预检摘要；
 - `GET /api/v2/execution-tasks/{task_id}/activity` 返回该任务的全部 run、订单尝试、Maker
-  追价父子关系和逐笔成交，用于执行详情与重启恢复审计；
+  追价父子关系和逐笔成交；每条订单同时返回实际 `side`、`reduce_only` 与
+  `primary/compensation` 用途，用于区分原始腿和失败后的反向保护，并支持重启恢复审计；
 - `POST /api/v2/execution-tasks/{task_id}/preflight` 逐个账户读取余额快照与完整订单/仓位状态，永续
   账户还必须能确定持仓模式。结果有效 60 秒，响应和审计均不包含 Key、Secret 或交易所原始错误；
 - `POST /api/v2/execution-tasks/{task_id}/start` 要求 `confirmed=true` 和最新 `expected_version`。

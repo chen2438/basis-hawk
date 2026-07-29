@@ -498,7 +498,7 @@ export interface ExecutionTask {
 
 export interface ExecutionActivity {
   runs: Array<Record<string, string | number | null>>;
-  orders: Array<Record<string, string | number | null>>;
+  orders: Array<Record<string, string | number | boolean | null>>;
   fills: Array<Record<string, string | number | null>>;
 }
 
