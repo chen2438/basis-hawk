@@ -392,3 +392,149 @@ export interface LiveClosePreview {
   estimated_net_pnl_usdt: string;
   worst_case_basis: string;
 }
+
+export type V2OpportunityType = "funding" | "cross_funding" | "basis";
+
+export interface V2OpportunityLeg {
+  account_id: string | null;
+  exchange: Exchange;
+  market_type: "spot" | "perpetual";
+  side: "buy" | "sell";
+  symbol: string;
+  price: string;
+  quote_volume_24h: string;
+  funding_rate: string | null;
+  funding_interval_hours: string | null;
+  annualized_funding: string | null;
+  fee_rate: string;
+  fee_source: "actual" | "manual" | "default";
+}
+
+export interface V2Opportunity {
+  id: string;
+  opportunity_type: V2OpportunityType;
+  base_asset: string;
+  observed_at: string;
+  entry_spread: string;
+  annualized_return: string;
+  projected_return: string;
+  estimated_round_trip_fees: string;
+  holding_days: number;
+  executable_notional_usdt: string;
+  legs: V2OpportunityLeg[];
+}
+
+export interface V2Account {
+  id: string;
+  exchange: Exchange;
+  environment: Environment;
+  label: string;
+  masked_api_key: string;
+  position_mode: "one_way" | "hedge" | null;
+  trading_default: boolean;
+  scanner_default: boolean;
+  capabilities: Record<string, boolean | string | null>;
+  fees: {
+    spot_maker: string | null;
+    spot_taker: string | null;
+    perpetual_maker: string | null;
+    perpetual_taker: string | null;
+    source: "actual" | "manual" | "default";
+    checked_at: string | null;
+  };
+  updated_at: string;
+}
+
+export interface ExecutionTaskLeg {
+  id: string;
+  ordinal: number;
+  account_id: string | null;
+  exchange: Exchange;
+  role: "anchor" | "hedge";
+  market_type: "spot" | "perpetual";
+  side: "buy" | "sell";
+  base_asset: string;
+  symbol: string;
+  target_quantity: string;
+  resolved_base_quantity: string | null;
+  signed_base_ratio: string | null;
+  per_order_quantity: string | null;
+  order_mode: "maker" | "protected_ioc" | "market";
+  maximum_slippage: string;
+  maker_policy: {
+    book_level: number;
+    maximum_chases: number;
+    fallback_mode: "protected_ioc" | "market" | "fail";
+  } | null;
+  margin_mode: "isolated" | "cross" | null;
+  leverage: number | null;
+  reduce_only: boolean;
+}
+
+export interface ExecutionTask {
+  id: string;
+  name: string;
+  display_symbol: string;
+  environment: "paper" | Environment;
+  base_asset: string;
+  quantity_mode: "base" | "usdt";
+  source_opportunity_id: string | null;
+  create_strategy: boolean;
+  hedge_trigger: string;
+  hedge_threshold: string | null;
+  maximum_base_exposure: string;
+  maximum_notional_exposure_usdt: string;
+  maximum_retries: number;
+  status: string;
+  failure_code: string | null;
+  preflight: Record<string, unknown> | null;
+  preflight_expires_at: string | null;
+  created_by: string;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  legs: ExecutionTaskLeg[];
+}
+
+export interface ExecutionActivity {
+  runs: Array<Record<string, string | number | null>>;
+  orders: Array<Record<string, string | number | null>>;
+  fills: Array<Record<string, string | number | null>>;
+}
+
+export interface StrategyLeg {
+  id: string;
+  ordinal: number;
+  opening_task_leg_id: string;
+  account_id: string | null;
+  exchange: Exchange;
+  role: "anchor" | "hedge";
+  market_type: "spot" | "perpetual";
+  side: "buy" | "sell";
+  symbol: string;
+  initial_base_quantity: string;
+  remaining_base_quantity: string;
+  entry_price: string;
+  exit_price: string | null;
+  fees_usdt: string;
+  realized_pnl_usdt: string;
+}
+
+export interface Strategy {
+  id: string;
+  name: string;
+  environment: string;
+  base_asset: string;
+  opening_task_id: string;
+  closing_task_id: string | null;
+  status: "running" | "closing" | "ended" | "manual_review";
+  realized_pnl_usdt: string;
+  funding_income_usdt: string;
+  fees_usdt: string;
+  net_pnl_usdt: string;
+  opened_at: string;
+  closed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  legs: StrategyLeg[];
+}

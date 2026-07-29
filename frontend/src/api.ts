@@ -23,6 +23,12 @@ import type {
   Settings,
   TradeIntent,
   UpdateStatus,
+  ExecutionActivity,
+  ExecutionTask,
+  Strategy,
+  V2Account,
+  V2Opportunity,
+  V2OpportunityType,
 } from "./types";
 
 function cookie(name: string): string | null {
@@ -108,6 +114,67 @@ export const api = {
       body: JSON.stringify({ username, password, totp_code: totpCode }),
     }),
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
+  v2Opportunities: (
+    type: V2OpportunityType,
+    holdingDays = 7,
+    search = "",
+  ) => request<{
+    type: V2OpportunityType;
+    holding_days: number;
+    observed_at: string | null;
+    items: V2Opportunity[];
+  }>(
+    `/api/v2/opportunities?type=${type}&holding_days=${holdingDays}`
+      + `&search=${encodeURIComponent(search)}`,
+  ),
+  v2Accounts: () => request<{ items: V2Account[] }>("/api/v2/accounts"),
+  createV2Account: (value: Record<string, unknown>) =>
+    request<V2Account>("/api/v2/accounts", {
+      method: "POST",
+      body: JSON.stringify(value),
+    }),
+  v2ExecutionTasks: () =>
+    request<{ items: ExecutionTask[] }>("/api/v2/execution-tasks?limit=200"),
+  v2ExecutionTaskActivity: (taskId: string) =>
+    request<{ activity: ExecutionActivity }>(
+      `/api/v2/execution-tasks/${taskId}/activity`,
+    ),
+  createV2ExecutionTask: (
+    value: Record<string, unknown>,
+    idempotencyKey: string,
+  ) => request<{ created: boolean; task: ExecutionTask }>(
+    "/api/v2/execution-tasks",
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify(value),
+    },
+  ),
+  preflightV2ExecutionTask: (taskId: string) =>
+    request<{ task: ExecutionTask }>(
+      `/api/v2/execution-tasks/${taskId}/preflight`,
+      { method: "POST", body: "{}" },
+    ),
+  startV2ExecutionTask: (taskId: string, version: number) =>
+    request<{ task: ExecutionTask }>(
+      `/api/v2/execution-tasks/${taskId}/start`,
+      {
+        method: "POST",
+        body: JSON.stringify({ expected_version: version, confirmed: true }),
+      },
+    ),
+  cancelV2ExecutionTask: (taskId: string, version: number) =>
+    request<{ task: ExecutionTask }>(
+      `/api/v2/execution-tasks/${taskId}/cancel`,
+      {
+        method: "POST",
+        body: JSON.stringify({ expected_version: version }),
+      },
+    ),
+  v2Strategies: (status = "") =>
+    request<{ items: Strategy[] }>(
+      `/api/v2/strategies${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+    ),
   opportunities: (environment: Environment = "live") =>
     request<{ items: Opportunity[]; sequence: number }>(
       `/api/opportunities?page_size=3000&environment=${environment}`,

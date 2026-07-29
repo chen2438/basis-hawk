@@ -1,355 +1,511 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "./api";
 import { LoginPage } from "./LoginPage";
 import { OperationsPanel } from "./OperationsPanel";
 import type { OperationsTab } from "./OperationsPanel";
-import { SettingsPanel } from "./SettingsPanel";
-import type { Environment, Exchange, ExchangeStatus, Opportunity, Quality, Settings } from "./types";
+import type {
+  Environment,
+  Exchange,
+  ExecutionActivity,
+  ExecutionTask,
+  Strategy,
+  V2Account,
+  V2Opportunity,
+  V2OpportunityType,
+  Opportunity,
+} from "./types";
 
-const exchangeNames: Record<Exchange, string> = { binance: "Binance", okx: "OKX", mexc: "MEXC", bybit: "Bybit", bitget: "Bitget", gate: "Gate" };
+type Page =
+  | "accounts"
+  | "tasks"
+  | "funds"
+  | "positions"
+  | "opportunities"
+  | "dashboard"
+  | "strategies"
+  | "trades"
+  | "alerts"
+  | "adl"
+  | "email"
+  | "profile"
+  | "system";
+
+const exchangeNames: Record<Exchange, string> = {
+  binance: "Binance",
+  okx: "OKX",
+  mexc: "MEXC",
+  bybit: "Bybit",
+  bitget: "Bitget",
+  gate: "Gate",
+};
 const exchanges = Object.keys(exchangeNames) as Exchange[];
-const qualityNames: Record<Quality, string> = { healthy: "有效", warming: "预热中", stale: "已陈旧" };
-type DashboardPage = "market" | OperationsTab;
-const operationNavigation: { key: OperationsTab; label: string; icon: string }[] = [
-  { key: "system", label: "执行状态", icon: "◉" },
-  { key: "accounts", label: "交易所账户", icon: "◇" },
-  { key: "trades", label: "手动交易", icon: "⇄" },
-  { key: "positions", label: "配对持仓", icon: "◆" },
-  { key: "ledger", label: "交易账本", icon: "▤" },
-  { key: "transfers", label: "内部划转", icon: "⇆" },
-  { key: "automation", label: "自动策略", icon: "⌁" },
-  { key: "history", label: "审计与通知", icon: "◎" },
+const navigation: Array<{ page: Page; label: string; icon: string }> = [
+  { page: "accounts", label: "API 密钥", icon: "⌘" },
+  { page: "tasks", label: "自动下单", icon: "☷" },
+  { page: "funds", label: "资金统计", icon: "▣" },
+  { page: "positions", label: "持仓总览", icon: "◉" },
+  { page: "opportunities", label: "套利机会", icon: "◈" },
+  { page: "dashboard", label: "总览看板", icon: "▤" },
+  { page: "strategies", label: "策略列表", icon: "▥" },
+  { page: "trades", label: "成交选择", icon: "▧" },
+  { page: "alerts", label: "预警监控", icon: "!" },
+  { page: "adl", label: "ADL 监控", icon: "▲" },
+  { page: "email", label: "邮件推送", icon: "✉" },
+  { page: "profile", label: "账户设置", icon: "⚙" },
+  { page: "system", label: "系统管理", icon: "⌁" },
 ];
-const percent = (value: string | null, digits = 2) => value == null ? "—" : `${(Number(value) * 100).toFixed(digits)}%`;
-const money = (value: string) => Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value));
-const price = (value: string) => Number(value).toLocaleString("en-US", { maximumFractionDigits: 8 });
-const capacity = (value: string) => Number(value) > 0
-  ? `${Number(value).toLocaleString("zh-CN", { maximumFractionDigits: 4 })} USDT`
-  : "—";
 
-export function exchangeMarketUrl(item: Opportunity, environment: Environment): string {
+const pct = (value: string, digits = 2) =>
+  `${(Number(value) * 100).toFixed(digits)}%`;
+const number = (value: string | number, digits = 4) =>
+  Number(value).toLocaleString("zh-CN", { maximumFractionDigits: digits });
+const time = (value: string | null) =>
+  value ? new Date(value).toLocaleString("zh-CN") : "—";
+
+export function exchangeMarketUrl(
+  item: Opportunity,
+  environment: Environment,
+): string {
   const symbol = encodeURIComponent(item.perp_symbol);
-  switch (item.exchange) {
-    case "binance":
-      return `${environment === "sandbox" ? "https://demo.binance.com" : "https://www.binance.com"}/en/futures/${symbol}`;
-    case "okx":
-      return `https://www.okx.com/trade-swap/${item.perp_symbol.toLowerCase()}`;
-    case "mexc":
-      return `https://www.mexc.com/futures/${symbol}`;
-    case "bybit":
-      return `${environment === "sandbox" ? "https://testnet.bybit.com" : "https://www.bybit.com"}/trade/usdt/${symbol}`;
-    case "bitget":
-      return `https://www.bitget.com/futures/usdt/${symbol}`;
-    case "gate":
-      return `${environment === "sandbox" ? "https://testnet.gate.com" : "https://www.gate.com"}/futures/USDT/${symbol}`;
-  }
-}
-
-function Sparkline({ values, emptyText = "历史快照正在积累" }: { values: number[]; emptyText?: string }) {
-  if (values.length < 2) return <div className="empty-chart">{emptyText}</div>;
-  const min = Math.min(...values), max = Math.max(...values), span = max - min || 1;
-  const points = values.map((value, index) => `${(index / (values.length - 1)) * 100},${42 - ((value - min) / span) * 36}`).join(" ");
-  return <svg className="sparkline" viewBox="0 0 100 48" preserveAspectRatio="none" aria-label="历史收益趋势"><polyline points={points} /></svg>;
+  const hosts: Record<Exchange, string> = {
+    binance: environment === "sandbox" ? "https://demo.binance.com" : "https://www.binance.com",
+    okx: "https://www.okx.com",
+    mexc: "https://www.mexc.com",
+    bybit: environment === "sandbox" ? "https://testnet.bybit.com" : "https://www.bybit.com",
+    bitget: "https://www.bitget.com",
+    gate: environment === "sandbox" ? "https://testnet.gate.com" : "https://www.gate.com",
+  };
+  return `${hosts[item.exchange]}/trade/${symbol}`;
 }
 
 export default function App() {
   const [username, setUsername] = useState<string | null>(null);
-  const [checkingSession, setCheckingSession] = useState(true);
-
+  const [checking, setChecking] = useState(true);
   useEffect(() => {
     api.session()
-      .then((session) => setUsername(session.username))
+      .then((value) => setUsername(value.username))
       .catch(() => setUsername(null))
-      .finally(() => setCheckingSession(false));
+      .finally(() => setChecking(false));
   }, []);
-
-  if (checkingSession) return <main className="login-shell"><p>正在验证会话…</p></main>;
+  if (checking) return <main className="login-shell"><p>正在验证会话…</p></main>;
   if (!username) return <LoginPage onAuthenticated={setUsername} />;
-  return <Dashboard username={username} onLogout={() => setUsername(null)} />;
+  return <Console username={username} onLogout={() => setUsername(null)} />;
 }
 
-function Dashboard({ username, onLogout }: { username: string; onLogout: () => void }) {
-  const [liveItems, setLiveItems] = useState<Opportunity[]>([]);
-  const [liveStatuses, setLiveStatuses] = useState<ExchangeStatus[]>([]);
-  const [sandboxItems, setSandboxItems] = useState<Opportunity[]>([]);
-  const [sandboxStatuses, setSandboxStatuses] = useState<ExchangeStatus[]>([]);
-  const [marketEnvironment, setMarketEnvironment] = useState<Environment>("live");
-  const [sandboxLoading, setSandboxLoading] = useState(false);
-  const [settings, setSettings] = useState<Settings | null>(null);
-  const [selected, setSelected] = useState<Opportunity | null>(null);
-  const [selectedTopBook, setSelectedTopBook] = useState<Opportunity | null>(null);
-  const [topBookLoading, setTopBookLoading] = useState(false);
-  const [history, setHistory] = useState<Opportunity[]>([]);
-  const [range, setRange] = useState("24h");
-  const [exchange, setExchange] = useState<Exchange | "all">("all");
-  const [quality, setQuality] = useState<Quality | "all">("healthy");
-  const [search, setSearch] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
-  const [activePage, setActivePage] = useState<DashboardPage>("market");
-  const [error, setError] = useState<string | null>(null);
-  const lastSequence = useRef<number | null>(null);
-  const topBookRequest = useRef(0);
-
-  useEffect(() => {
-    Promise.all([api.opportunities("live"), api.statuses("live"), api.settings()])
-      .then(([opportunities, state, config]) => { setLiveItems(opportunities.items); setLiveStatuses(state.items); setSettings(config); })
-      .catch((reason: Error) => setError(reason.message));
-    const timer = window.setInterval(() => api.statuses("live").then((value) => setLiveStatuses(value.items)).catch(() => undefined), 5000);
-    const protocol = location.protocol === "https:" ? "wss" : "ws";
-    let stopped = false;
-    let socket: WebSocket | null = null;
-    let reconnectTimer = 0;
-    const restore = () => api.opportunities("live").then((value) => {
-      setLiveItems(value.items);
-      lastSequence.current = value.sequence;
-    }).catch((reason: Error) => setError(reason.message));
-    const connect = () => {
-      socket = new WebSocket(`${protocol}://${location.host}/api/ws/opportunities`);
-      socket.onmessage = (event) => {
-        const message = JSON.parse(event.data) as { type: string; sequence: number; items: Opportunity[] };
-        if (message.type === "snapshot") {
-          setLiveItems(message.items);
-          lastSequence.current = message.sequence;
-        } else if (lastSequence.current !== null && message.sequence !== lastSequence.current + 1) {
-          void restore();
-        } else {
-          lastSequence.current = message.sequence;
-          setLiveItems((current) => {
-            const merged = new Map(current.map((item) => [`${item.exchange}:${item.base_asset}`, item]));
-            message.items.forEach((item) => merged.set(`${item.exchange}:${item.base_asset}`, item));
-            return [...merged.values()];
-          });
-        }
-      };
-      socket.onclose = () => {
-        if (!stopped) {
-          void restore();
-          reconnectTimer = window.setTimeout(connect, 2000);
-        }
-      };
-    };
-    connect();
-    return () => {
-      stopped = true;
-      window.clearInterval(timer);
-      window.clearTimeout(reconnectTimer);
-      socket?.close();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!selected || marketEnvironment === "sandbox") {
-      setHistory([]);
-      return;
-    }
-    api.history(selected, range, marketEnvironment).then((value) => setHistory(value.items)).catch((reason: Error) => setError(reason.message));
-  }, [selected, range, marketEnvironment]);
-
-  useEffect(() => {
-    if (activePage !== "market" || marketEnvironment !== "sandbox") return;
-    let stopped = false;
-    const load = async () => {
-      setSandboxLoading(true);
-      try {
-        const [opportunities, state] = await Promise.all([
-          api.opportunities("sandbox"),
-          api.statuses("sandbox"),
-        ]);
-        if (!stopped) {
-          setSandboxItems(opportunities.items);
-          setSandboxStatuses(state.items);
-        }
-      } catch (reason) {
-        if (!stopped) setError((reason as Error).message);
-      } finally {
-        if (!stopped) setSandboxLoading(false);
-      }
-    };
-    void load();
-    const timer = window.setInterval(() => void load(), 5000);
-    return () => {
-      stopped = true;
-      window.clearInterval(timer);
-    };
-  }, [activePage, marketEnvironment]);
-
-  const items = marketEnvironment === "live" ? liveItems : sandboxItems;
-  const statuses = marketEnvironment === "live" ? liveStatuses : sandboxStatuses;
-  const marketExchanges: Exchange[] = exchanges;
-
-  const filtered = useMemo(() => items
-    .filter((item) => exchange === "all" || item.exchange === exchange)
-    .filter((item) => quality === "all" || item.quality === quality)
-    .filter((item) => item.base_asset.includes(search.trim().toUpperCase()))
-    .sort((a, b) => Number(b.net_return ?? b.current_apr) - Number(a.net_return ?? a.current_apr)), [items, exchange, quality, search]);
-
-  const healthy = items.filter((item) => item.quality === "healthy");
-  const best = healthy.reduce<Opportunity | null>((current, item) => !current || Number(item.net_return ?? -999) > Number(current.net_return ?? -999) ? item : current, null);
-  const selectOpportunity = (item: Opportunity) => {
-    const requestId = ++topBookRequest.current;
-    setSelected(item);
-    setSelectedTopBook(null);
-    setTopBookLoading(true);
-    api.topBook(item, marketEnvironment)
-      .then((value) => {
-        if (topBookRequest.current === requestId) setSelectedTopBook(value);
-      })
-      .catch((reason: Error) => {
-        if (topBookRequest.current === requestId) setError(reason.message);
-      })
-      .finally(() => {
-        if (topBookRequest.current === requestId) setTopBookLoading(false);
-      });
+function Console({ username, onLogout }: { username: string; onLogout: () => void }) {
+  const [page, setPage] = useState<Page>("opportunities");
+  const [seed, setSeed] = useState<V2Opportunity | null>(null);
+  const current = navigation.find((item) => item.page === page)!;
+  const openTask = (item: V2Opportunity) => {
+    setSeed(item);
+    setPage("tasks");
   };
-  const closeOpportunity = () => {
-    topBookRequest.current += 1;
-    setSelected(null);
-    setSelectedTopBook(null);
-    setTopBookLoading(false);
-  };
-  const selectMarketEnvironment = (environment: Environment) => {
-    if (environment === marketEnvironment) return;
-    closeOpportunity();
-    setHistory([]);
-    setExchange("all");
-    setMarketEnvironment(environment);
-  };
-  const detail = selectedTopBook ?? selected;
-  return <div className="dashboard-shell">
-    <aside className="sidebar">
-      <div className="sidebar-brand">
-        <div className="mark"><span /></div>
+  return <div className="bh-shell">
+    <aside className="bh-sidebar">
+      <div className="bh-brand">
+        <div className="bh-logo">BH</div>
         <div><strong>BASIS HAWK</strong><small>FUNDING STRATEGY</small></div>
       </div>
-      <nav className="sidebar-nav" aria-label="主菜单">
-        <span className="nav-group-label">MARKET</span>
-        <button aria-label="市场总览" className={activePage === "market" ? "active" : ""} onClick={() => setActivePage("market")}>
-          <span className="nav-icon">⌁</span><span>市场总览</span>
-        </button>
-        <span className="nav-group-label">OPERATIONS</span>
-        {operationNavigation.map((item) => <button aria-label={item.label} key={item.key} className={activePage === item.key ? "active" : ""} onClick={() => setActivePage(item.key)}>
-          <span className="nav-icon">{item.icon}</span><span>{item.label}</span>
-        </button>)}
+      <span className="bh-nav-label">MAIN</span>
+      <nav aria-label="主菜单">
+        {navigation.map((item) => <button
+          key={item.page}
+          aria-label={item.label}
+          className={page === item.page ? "active" : ""}
+          onClick={() => setPage(item.page)}
+        ><i>{item.icon}</i>{item.label}<b /></button>)}
       </nav>
-      <div className="sidebar-bottom">
-        <button aria-label="扫描设置" onClick={() => setShowSettings(true)}><span className="nav-icon">⚙</span><span>扫描设置</span></button>
-        <div className="sidebar-user"><span className="user-avatar">{username.slice(0, 1).toUpperCase()}</span><div><strong>{username}</strong><small>ADMINISTRATOR</small></div></div>
-        <button aria-label="退出登录" onClick={() => void api.logout().finally(onLogout)}><span className="nav-icon">↪</span><span>退出登录</span></button>
+      <div className="bh-sidebar-foot">
+        <span className="bh-avatar">{username.slice(0, 1).toUpperCase()}</span>
+        <div><strong>{username}</strong><small>ADMIN</small></div>
+        <button aria-label="退出登录" onClick={() => void api.logout().finally(onLogout)}>↪</button>
       </div>
     </aside>
-    <div className="dashboard-main">
-    <header className="topbar">
-      <div className="breadcrumb"><span>Basis Hawk</span><b>/</b><strong>{activePage === "market" ? "市场总览" : operationNavigation.find((item) => item.key === activePage)?.label}</strong></div>
-      <div className="top-actions">
-        {activePage === "market" ? <div className="environment-switch" role="group" aria-label="市场环境">
-          {(["live", "sandbox"] as Environment[]).map((environment) => <button
-            key={environment}
-            className={marketEnvironment === environment ? "active" : ""}
-            aria-pressed={marketEnvironment === environment}
-            onClick={() => selectMarketEnvironment(environment)}
-          ><i />{environment.toUpperCase()}</button>)}
-        </div> : <span className="read-only"><i /> LIVE</span>}
-        <span className="top-time">{new Date().toLocaleDateString("zh-CN")}</span>
-      </div>
-    </header>
-
-    {activePage === "market" ? <>
-    <main className="market-main">
-      <section className="hero">
-        <div><p className="eyebrow">{marketEnvironment.toUpperCase()} MARKET OVERVIEW</p><h1>资金费机会，一眼看清。</h1><p>{marketEnvironment === "live" ? "同所现货多头 × USDT 永续空头。基差与资金费分开衡量，收益估算透明可核。" : "五所官方 Demo / Testnet 行情独立读取；MEXC 暂无完整沙盒。历史不足时仅用当前资金费估算。"}</p></div>
-        <div className="hero-grid">
-          <div className="metric"><span>有效机会</span><strong>{healthy.length}</strong><small>{marketEnvironment === "live" ? "六所共同交易对" : "五所测试环境共同交易对"}</small></div>
-          <div className="metric accent"><span>最佳 30 天估算</span><strong>{percent(best?.net_return ?? null)}</strong><small>{best ? `${exchangeNames[best.exchange]} · ${best.base_asset}` : "等待历史预热"}</small></div>
-          <div className="metric"><span>扫描标的</span><strong>{sandboxLoading && !items.length ? "…" : items.length}</strong><small>5 秒价格刷新</small></div>
-        </div>
-      </section>
-
-      <section className={`status-strip ${marketEnvironment}`}>
-        {marketExchanges.map((name) => {
-          const status = statuses.find((item) => item.exchange === name);
-          const progress = Math.min(100, Math.max(0, status?.history_progress_percent ?? 0));
-          const downloadRate = status?.history_download_rate_per_minute;
-          const downloadLabel = status?.history_syncing
-            ? downloadRate == null
-              ? "正在检查历史"
-              : `下载 ${downloadRate.toFixed(1)} 标的/分`
-            : progress >= 100
-              ? "预热完成"
-              : downloadRate == null
-                ? "等待下轮"
-                : `上轮 ${downloadRate.toFixed(1)} 标的/分`;
-          return <div className="exchange-status" key={name}>
-            <span className={`status-dot ${status?.state ?? "starting"}`} />
-            <div>
-              <strong>{exchangeNames[name]}</strong>
-              <small>{status ? `${status.instruments} 标的 · 行情 ${status.latency_ms ?? "—"}ms` : "正在连接"}</small>
-              {status && (marketEnvironment === "sandbox" ? <>
-                <small>{status.error ?? "Demo / Testnet 当前资金费回退估算"}</small>
-              </> : <>
-                <small>预热 {progress.toFixed(1)}%（{status.history_ready}/{status.instruments}）· {downloadLabel}</small>
-                <span
-                  className="history-progress"
-                  role="progressbar"
-                  aria-label={`${exchangeNames[name]} 预热进度`}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={progress}
-                ><i style={{ width: `${progress}%` }} /></span>
-              </>)}
-            </div>
-          </div>;
-        })}
-      </section>
-
-      {error && <div className="error-banner">{error}<button onClick={() => setError(null)}>×</button></div>}
-
-      <section className="workspace">
-        <div className="table-card">
-          <header className="section-header"><div><p className="eyebrow">OPPORTUNITY RANKING</p><h2>机会排行榜</h2></div><span className="count">{filtered.length} 项</span></header>
-          <div className="filters">
-            <input className="search" placeholder="搜索币种，例如 BTC" value={search} onChange={(e) => setSearch(e.target.value)} />
-            <select value={exchange} onChange={(e) => setExchange(e.target.value as Exchange | "all")}><option value="all">{marketEnvironment === "live" ? "全部交易所" : "全部测试网交易所"}</option>{marketExchanges.map((key) => <option value={key} key={key}>{exchangeNames[key]}</option>)}</select>
-            <select value={quality} onChange={(e) => setQuality(e.target.value as Quality | "all")}><option value="healthy">仅有效</option><option value="all">全部状态</option><option value="warming">预热中</option><option value="stale">已陈旧</option></select>
-          </div>
-          <div className="table-wrap"><table><thead><tr><th>标的</th><th>当前费率 / 周期</th><th>当前年化</th><th>24h 年化</th><th>7d 年化</th><th>30d 净收益</th><th>可执行基差</th><th>两腿成交额</th><th>状态</th></tr></thead>
-            <tbody>{filtered.map((item) => <tr key={`${item.exchange}:${item.base_asset}`} className={selected?.exchange === item.exchange && selected.base_asset === item.base_asset ? "selected" : ""} onClick={() => selectOpportunity(item)}>
-              <td><div className="asset"><a
-                href={exchangeMarketUrl(item, marketEnvironment)}
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-label={`在 ${exchangeNames[item.exchange]} 打开 ${item.base_asset} 永续合约`}
-                onClick={(event) => event.stopPropagation()}
-              >{item.base_asset}<b aria-hidden="true">↗</b></a><span>{exchangeNames[item.exchange]}</span></div></td>
-              <td><strong className={Number(item.current_funding_rate) >= 0 ? "positive" : "negative"}>{percent(item.current_funding_rate, 4)}</strong><small className="cell-note">每 {item.funding_interval_hours}h</small></td>
-              <td>{percent(item.current_apr)}</td><td>{percent(item.apr_24h)}</td><td>{percent(item.apr_7d)}</td>
-              <td><strong className={Number(item.net_return ?? 0) >= 0 ? "positive" : "negative"}>{percent(item.net_return)}</strong></td>
-              <td>{percent(item.executable_basis, 3)}</td><td><span className="volume">{money(String(Math.min(Number(item.spot_quote_volume_24h), Number(item.perp_quote_volume_24h))))}</span></td>
-              <td><span className={`quality ${item.quality}`}>{qualityNames[item.quality]}</span></td>
-            </tr>)}</tbody>
-          </table>{!filtered.length && <div className="empty">当前筛选条件下没有机会</div>}</div>
-        </div>
-
-        <aside className={`detail-card ${selected ? "open" : ""}`}>
-          {detail ? <>
-            <header><div><p className="eyebrow">OPPORTUNITY DETAIL</p><h2>{detail.base_asset} <span>{exchangeNames[detail.exchange]}</span></h2><a className="market-link" href={exchangeMarketUrl(detail, marketEnvironment)} target="_blank" rel="noopener noreferrer">打开交易所永续页面 ↗</a></div><button className="icon-button" onClick={closeOpportunity}>×</button></header>
-            <div className="range-tabs">{["24h", "7d", "30d"].map((value) => <button className={range === value ? "active" : ""} onClick={() => setRange(value)} key={value}>{value}</button>)}</div>
-            <Sparkline values={history.map((item) => Number(item.net_return ?? item.current_apr))} emptyText={marketEnvironment === "sandbox" ? "TestNet 历史趋势未持久化；表中 24h/7d 为当前费率回退估算" : undefined} />
-            <div className="detail-metrics">
-              <div><span>现货卖一</span><strong>{price(detail.spot_ask)}</strong></div>
-              <div><span>永续买一</span><strong>{price(detail.perp_bid)}</strong></div>
-              <div><span>现货卖一容量</span><strong>{topBookLoading ? "读取中…" : capacity(detail.spot_ask_notional)}</strong></div>
-              <div><span>永续买一容量</span><strong>{topBookLoading ? "读取中…" : capacity(detail.perp_bid_notional)}</strong></div>
-              <div><span>双腿可执行容量</span><strong>{topBookLoading ? "读取中…" : capacity(detail.top_book_notional)}</strong></div>
-              <div><span>下次结算</span><strong>{detail.next_funding_at ? new Date(detail.next_funding_at).toLocaleString("zh-CN") : "交易所未批量提供"}</strong></div>
-            </div>
-            <div className="formula"><span>30 天净收益估算</span><code>7d 日均资金费 × {settings?.holding_period_days ?? 30} 天 − 开平双边 Taker 费</code><p>不包含基差收敛、滑点、税费、借贷与保证金机会成本。</p></div>
-          </> : <div className="detail-placeholder"><div className="radar-icon" /><h3>选择一个机会</h3><p>查看价格、费用假设和历史趋势。</p></div>}
-        </aside>
-      </section>
-    </main>
-    <footer className="page-footer"><span>Basis Hawk · Paired execution & audit-first</span><span>收益估算不构成投资建议</span></footer>
-    </> : <OperationsPanel opportunities={liveItems} activeTab={activePage} />}
+    <div className="bh-main">
+      <header className="bh-topbar">
+        <div><span>{page.toUpperCase()}</span><b>/</b><strong>{current.label}</strong></div>
+        <div><span className="bh-live"><i /> LIVE</span><span>{username}</span></div>
+      </header>
+      {page === "opportunities" && <OpportunityPage onCreateTask={openTask} />}
+      {page === "tasks" && <TasksPage seed={seed} clearSeed={() => setSeed(null)} />}
+      {page === "strategies" && <StrategiesPage />}
+      {page === "positions" && <PositionsPage />}
+      {page === "funds" && <FundsPage />}
+      {page === "dashboard" && <DashboardPage />}
+      {page === "trades" && <TradesPage />}
+      {page === "accounts" && <AccountsPage />}
+      {page === "alerts" && <EmptyMonitor title="预警监控" copy="交易任务失败、敞口异常与账户阻断将在这里集中展示。" />}
+      {page === "adl" && <EmptyMonitor title="ADL 监控" copy="展示各账户永续仓位的 1–5 级自动减仓风险，5 为最高风险。" />}
+      {page === "email" && <EmptyMonitor title="邮件推送" copy="关键成交、人工复核与安全暂停使用 SMTP 通道投递。" />}
+      {page === "profile" && <EmptyMonitor title="账户设置" copy="管理员密码、TOTP 与会话安全设置。" />}
+      {page === "system" && <SystemPage />}
     </div>
-    {showSettings && settings && <SettingsPanel value={settings} onClose={() => setShowSettings(false)} onSave={async (value) => setSettings(await api.saveSettings(value))} />}
   </div>;
+}
+
+function PageIntro({ eyebrow, title, copy, actions }: {
+  eyebrow: string;
+  title: string;
+  copy: string;
+  actions?: React.ReactNode;
+}) {
+  return <header className="bh-page-intro">
+    <div><p>{eyebrow}</p><h1>{title}</h1><span>{copy}</span></div>
+    {actions && <div className="bh-page-actions">{actions}</div>}
+  </header>;
+}
+
+function OpportunityPage({ onCreateTask }: { onCreateTask: (item: V2Opportunity) => void }) {
+  const [type, setType] = useState<V2OpportunityType>("funding");
+  const [items, setItems] = useState<V2Opportunity[]>([]);
+  const [holdingDays, setHoldingDays] = useState(7);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => {
+    setLoading(true);
+    api.v2Opportunities(type, holdingDays, search)
+      .then((value) => setItems(value.items))
+      .catch((reason: Error) => setError(reason.message))
+      .finally(() => setLoading(false));
+  }, [type, holdingDays, search]);
+  useEffect(load, [load]);
+  const tabs: Array<[V2OpportunityType, string]> = [
+    ["funding", "资金费率套利"],
+    ["cross_funding", "跨所费率套利"],
+    ["basis", "基差交易"],
+  ];
+  return <main className="bh-page">
+    <PageIntro eyebrow="OPPORTUNITIES" title="套利机会" copy="实时跨所价差 + 资金费率套利，按预计收益排序。"
+      actions={<button className="bh-button" onClick={load}>刷新</button>} />
+    <section className="bh-toolbar">
+      <input aria-label="搜索币种" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索币种" />
+      <label>计入资金费 <input aria-label="持有天数" type="number" min="1" max="365" value={holdingDays} onChange={(event) => setHoldingDays(Number(event.target.value))} /> 天</label>
+      <span>{loading ? "更新中…" : `${items.length} 个候选`}</span>
+    </section>
+    <div className="bh-tabs">
+      {tabs.map(([value, label]) => <button key={value} className={type === value ? "active" : ""} onClick={() => setType(value)}>
+        {label}<em>{type === value ? items.length : "·"}</em>
+      </button>)}
+    </div>
+    {error && <div className="bh-error">{error}<button onClick={() => setError(null)}>×</button></div>}
+    <div className="bh-table-wrap">
+      <table className="bh-table">
+        <thead><tr><th>币种</th><th>推荐方向</th><th>入场价差</th><th>年化收益</th><th>{holdingDays} 天预计净收益</th><th>可执行额</th><th>费率来源</th><th /></tr></thead>
+        <tbody>
+          {items.map((item) => <tr key={item.id}>
+            <td><strong>{item.base_asset}</strong><small>{time(item.observed_at)}</small></td>
+            <td><div className="bh-legs">{item.legs.map((leg) => <span key={`${leg.exchange}-${leg.market_type}`}>
+              <b className={leg.side === "buy" ? "long" : "short"}>{leg.side === "buy" ? "多" : "空"}</b>
+              {exchangeNames[leg.exchange]} {leg.market_type === "spot" ? "现货" : "合约"}
+              <small>{number(leg.price, 8)}</small>
+            </span>)}</div></td>
+            <td className={Number(item.entry_spread) >= 0 ? "positive" : "negative"}>{pct(item.entry_spread, 3)}</td>
+            <td className="positive"><strong>{pct(item.annualized_return, 1)}</strong></td>
+            <td className={Number(item.projected_return) >= 0 ? "positive" : "negative"}><strong>{pct(item.projected_return, 3)}</strong></td>
+            <td>{number(item.executable_notional_usdt, 0)} USDT</td>
+            <td>{item.legs.map((leg) => leg.fee_source).join(" / ")}</td>
+            <td><button className="bh-button primary" onClick={() => onCreateTask(item)}>创建任务</button></td>
+          </tr>)}
+          {!loading && items.length === 0 && <tr><td colSpan={8} className="bh-empty">暂无满足条件的新鲜机会</td></tr>}
+        </tbody>
+      </table>
+    </div>
+    <p className="bh-footnote">预计收益已扣除开平仓往返 Taker 费；实际 Maker 成交会按账户实际费率结算。</p>
+  </main>;
+}
+
+type DraftLeg = {
+  exchange: Exchange;
+  account_id: string;
+  role: "anchor" | "hedge";
+  market_type: "spot" | "perpetual";
+  side: "buy" | "sell";
+  symbol: string;
+  quantity: string;
+  order_mode: "maker" | "protected_ioc" | "market";
+  book_level: number;
+  maximum_chases: number;
+  fallback_mode: "protected_ioc" | "market" | "fail";
+  margin_mode: "isolated" | "cross";
+  leverage: number;
+};
+
+const blankLeg = (role: "anchor" | "hedge"): DraftLeg => ({
+  exchange: "binance",
+  account_id: "",
+  role,
+  market_type: role === "anchor" ? "spot" : "perpetual",
+  side: role === "anchor" ? "buy" : "sell",
+  symbol: "BTCUSDT",
+  quantity: "0.001",
+  order_mode: role === "anchor" ? "maker" : "protected_ioc",
+  book_level: 3,
+  maximum_chases: 50,
+  fallback_mode: "protected_ioc",
+  margin_mode: "isolated",
+  leverage: 1,
+});
+
+function TasksPage({ seed, clearSeed }: { seed: V2Opportunity | null; clearSeed: () => void }) {
+  const [tasks, setTasks] = useState<ExecutionTask[]>([]);
+  const [accounts, setAccounts] = useState<V2Account[]>([]);
+  const [editing, setEditing] = useState(Boolean(seed));
+  const [name, setName] = useState(seed ? `${seed.base_asset} 跨所套利` : "");
+  const [base, setBase] = useState(seed?.base_asset ?? "BTC");
+  const [environment, setEnvironment] = useState<"paper" | Environment>("paper");
+  const [legs, setLegs] = useState<DraftLeg[]>(() => seed
+    ? seed.legs.map((item, index) => ({
+      ...blankLeg(index === 0 ? "anchor" : "hedge"),
+      exchange: item.exchange,
+      account_id: item.account_id ?? "",
+      role: index === 0 ? "anchor" : "hedge",
+      market_type: item.market_type,
+      side: item.side,
+      symbol: item.symbol,
+    }))
+    : [blankLeg("anchor"), blankLeg("hedge")]);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => Promise.all([api.v2ExecutionTasks(), api.v2Accounts()])
+    .then(([taskValue, accountValue]) => {
+      setTasks(taskValue.items);
+      setAccounts(accountValue.items);
+    })
+    .catch((reason: Error) => setError(reason.message)), []);
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (!seed) return;
+    setEditing(true);
+    setName(`${seed.base_asset} 跨所套利`);
+    setBase(seed.base_asset);
+    setLegs(seed.legs.map((item, index) => ({
+      ...blankLeg(index === 0 ? "anchor" : "hedge"),
+      exchange: item.exchange,
+      account_id: item.account_id ?? "",
+      role: index === 0 ? "anchor" : "hedge",
+      market_type: item.market_type,
+      side: item.side,
+      symbol: item.symbol,
+    })));
+    clearSeed();
+  }, [seed, clearSeed]);
+  const updateLeg = (index: number, value: Partial<DraftLeg>) =>
+    setLegs((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, ...value } : item));
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const task = await api.createV2ExecutionTask({
+        name,
+        display_symbol: `${base}/USDT`,
+        environment,
+        base_asset: base,
+        quantity_mode: "base",
+        create_strategy: true,
+        hedge_trigger: "immediate",
+        maximum_base_exposure: "0.000001",
+        maximum_notional_exposure_usdt: "1000000",
+        maximum_retries: 3,
+        legs: legs.map((leg) => ({
+          account_id: environment === "paper" ? null : leg.account_id,
+          exchange: leg.exchange,
+          role: leg.role,
+          market_type: leg.market_type,
+          side: leg.side,
+          base_asset: base,
+          symbol: leg.symbol,
+          target_quantity: leg.quantity,
+          order_mode: leg.order_mode,
+          maximum_slippage: "0.002",
+          maker_policy: leg.order_mode === "maker" ? {
+            book_level: leg.book_level,
+            maximum_chases: leg.maximum_chases,
+            fallback_mode: leg.fallback_mode,
+          } : null,
+          margin_mode: leg.market_type === "perpetual" ? leg.margin_mode : null,
+          leverage: leg.market_type === "perpetual" ? leg.leverage : null,
+          reduce_only: false,
+        })),
+      }, crypto.randomUUID());
+      setTasks((current) => [task.task, ...current]);
+      setEditing(false);
+    } catch (reason) {
+      setError((reason as Error).message);
+    }
+  };
+  const action = async (task: ExecutionTask, kind: "preflight" | "start" | "cancel") => {
+    try {
+      const value = kind === "preflight"
+        ? await api.preflightV2ExecutionTask(task.id)
+        : kind === "start"
+          ? await api.startV2ExecutionTask(task.id, task.version)
+          : await api.cancelV2ExecutionTask(task.id, task.version);
+      setTasks((current) => current.map((item) => item.id === task.id ? value.task : item));
+    } catch (reason) {
+      setError((reason as Error).message);
+    }
+  };
+  return <main className="bh-page">
+    <PageIntro eyebrow="EXECUTION" title={editing ? "新建自动下单任务" : "自动下单"} copy="任务驱动的 2–16 腿执行；每条腿独立选择交易所、账户、方向与成交方式。"
+      actions={<button className="bh-button primary" onClick={() => setEditing(!editing)}>{editing ? "返回列表" : "新建任务"}</button>} />
+    {error && <div className="bh-error">{error}<button onClick={() => setError(null)}>×</button></div>}
+    {editing ? <form onSubmit={(event) => void submit(event)} className="bh-builder">
+      <section className="bh-card">
+        <header><h2>基础配置</h2></header>
+        <div className="bh-form-grid">
+          <label>任务名称<input required value={name} onChange={(event) => setName(event.target.value)} placeholder="BTC 费率套利 Binance–OKX" /></label>
+          <label>基础币<input required value={base} onChange={(event) => setBase(event.target.value.toUpperCase())} /></label>
+          <label>环境<select value={environment} onChange={(event) => setEnvironment(event.target.value as "paper" | Environment)}><option value="paper">Paper</option><option value="sandbox">Sandbox</option><option value="live">Live</option></select></label>
+        </div>
+      </section>
+      {legs.map((leg, index) => <section className="bh-card bh-leg-card" key={index}>
+        <header><div><h2>{index === 0 ? "主腿配置" : `对冲腿 ${index}`}</h2><span>{leg.role === "anchor" ? "优先腿" : "对冲腿"}</span></div>{index > 1 && <button type="button" onClick={() => setLegs((current) => current.filter((_, i) => i !== index))}>移除</button>}</header>
+        <div className="bh-form-grid four">
+          <label>交易所<select value={leg.exchange} onChange={(event) => updateLeg(index, { exchange: event.target.value as Exchange, account_id: "" })}>{exchanges.map((item) => <option key={item} value={item}>{exchangeNames[item]}</option>)}</select></label>
+          <label>API Key<select disabled={environment === "paper"} value={leg.account_id} onChange={(event) => updateLeg(index, { account_id: event.target.value })}><option value="">{environment === "paper" ? "Paper 无需账户" : "选择账户"}</option>{accounts.filter((item) => item.exchange === leg.exchange && item.environment === environment).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+          <label>市场类型<select value={leg.market_type} onChange={(event) => updateLeg(index, { market_type: event.target.value as DraftLeg["market_type"] })}><option value="spot">现货</option><option value="perpetual">合约</option></select></label>
+          <label>方向<select value={leg.side} onChange={(event) => updateLeg(index, { side: event.target.value as DraftLeg["side"] })}><option value="buy">多 / 买</option><option value="sell">空 / 卖</option></select></label>
+          <label>交易对<input value={leg.symbol} onChange={(event) => updateLeg(index, { symbol: event.target.value.toUpperCase() })} /></label>
+          <label>总数量<input type="number" step="any" min="0" value={leg.quantity} onChange={(event) => updateLeg(index, { quantity: event.target.value })} /></label>
+          <label>下单方式<select value={leg.order_mode} onChange={(event) => updateLeg(index, { order_mode: event.target.value as DraftLeg["order_mode"] })}><option value="maker">Maker</option><option value="protected_ioc">保护 IOC</option><option value="market">Market</option></select></label>
+          {leg.market_type === "perpetual" && <><label>保证金模式<select value={leg.margin_mode} onChange={(event) => updateLeg(index, { margin_mode: event.target.value as DraftLeg["margin_mode"] })}><option value="isolated">逐仓</option><option value="cross">全仓</option></select></label><label>杠杆<input type="number" min="1" max="10" value={leg.leverage} onChange={(event) => updateLeg(index, { leverage: Number(event.target.value) })} /></label></>}
+          {leg.order_mode === "maker" && <><label>盘口档位<input type="number" min="1" max="50" value={leg.book_level} onChange={(event) => updateLeg(index, { book_level: Number(event.target.value) })} /><small>掉出前 N 档自动追价</small></label><label>最大追价次数<input type="number" min="0" max="50" value={leg.maximum_chases} onChange={(event) => updateLeg(index, { maximum_chases: Number(event.target.value) })} /></label><label>超限回退<select value={leg.fallback_mode} onChange={(event) => updateLeg(index, { fallback_mode: event.target.value as DraftLeg["fallback_mode"] })}><option value="protected_ioc">保护 IOC</option><option value="market">Market</option><option value="fail">停止任务</option></select></label></>}
+        </div>
+      </section>)}
+      <div className="bh-builder-actions"><button type="button" className="bh-button" disabled={legs.length >= 16} onClick={() => setLegs((current) => [...current, blankLeg("hedge")])}>＋ 添加对冲腿</button><button className="bh-button primary">保存任务</button></div>
+    </form> : <TaskTable tasks={tasks} action={action} />}
+  </main>;
+}
+
+function TaskTable({ tasks, action }: {
+  tasks: ExecutionTask[];
+  action: (task: ExecutionTask, kind: "preflight" | "start" | "cancel") => Promise<void>;
+}) {
+  return <div className="bh-table-wrap"><table className="bh-table"><thead><tr><th>任务</th><th>环境</th><th>腿</th><th>状态</th><th>更新时间</th><th /></tr></thead><tbody>
+    {tasks.map((task) => <tr key={task.id}><td><strong>{task.name}</strong><small>{task.display_symbol}</small></td><td>{task.environment.toUpperCase()}</td><td><div className="bh-leg-stack">{task.legs.map((leg) => <span key={leg.id}>{exchangeNames[leg.exchange]} · {leg.market_type === "spot" ? "现货" : "合约"} · {leg.side === "buy" ? "多" : "空"} · {leg.order_mode}</span>)}</div></td><td><span className={`bh-status ${task.status}`}>{task.status}</span></td><td>{time(task.updated_at)}</td><td><div className="bh-row-actions">{["draft", "preflight_ready"].includes(task.status) && <button className="bh-button" onClick={() => void action(task, "preflight")}>预检</button>}{task.status === "preflight_ready" && <button className="bh-button primary" onClick={() => void action(task, "start")}>确认启动</button>}{["draft", "preflight_ready", "queued"].includes(task.status) && <button className="bh-button danger" onClick={() => void action(task, "cancel")}>停止</button>}</div></td></tr>)}
+    {tasks.length === 0 && <tr><td className="bh-empty" colSpan={6}>还没有自动下单任务</td></tr>}
+  </tbody></table></div>;
+}
+
+function useStrategies(status = "") {
+  const [items, setItems] = useState<Strategy[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => api.v2Strategies(status).then((value) => setItems(value.items)).catch((reason: Error) => setError(reason.message)), [status]);
+  useEffect(() => { void load(); }, [load]);
+  return { items, error, load };
+}
+
+function StrategiesPage() {
+  const [status, setStatus] = useState("");
+  const { items, error, load } = useStrategies(status);
+  const total = items.reduce((sum, item) => sum + Number(item.net_pnl_usdt), 0);
+  const funding = items.reduce((sum, item) => sum + Number(item.funding_income_usdt), 0);
+  return <main className="bh-page"><PageIntro eyebrow="STRATEGIES" title="我的策略" copy="任务完成后生成组合，在这里查看持仓、累计盈亏与运行时长。" actions={<><select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">全部</option><option value="running">运行中</option><option value="ended">已结束</option><option value="manual_review">人工复核</option></select><button className="bh-button" onClick={() => void load()}>刷新</button></>} />
+    {error && <div className="bh-error">{error}</div>}
+    <div className="bh-metrics"><Metric label="运行中" value={items.filter((item) => item.status === "running").length} /><Metric label="累计净 PNL" value={`${total >= 0 ? "+" : ""}${number(total)} USDT`} tone={total >= 0 ? "green" : "red"} /><Metric label="累计资金费" value={`${funding >= 0 ? "+" : ""}${number(funding)} USDT`} tone="green" /></div>
+    <StrategyTable items={items} />
+  </main>;
+}
+
+function StrategyTable({ items }: { items: Strategy[] }) {
+  return <div className="bh-table-wrap"><table className="bh-table"><thead><tr><th>名称</th><th>交易腿</th><th>状态</th><th>净 PNL</th><th>资金费累计</th><th>手续费</th><th>创建时间</th></tr></thead><tbody>
+    {items.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small>{item.base_asset} · {item.environment.toUpperCase()}</small></td><td><div className="bh-leg-stack">{item.legs.map((leg) => <span key={leg.id}>{exchangeNames[leg.exchange]} {leg.market_type === "spot" ? "现货" : "合约"} {leg.side === "buy" ? "多" : "空"} · {number(leg.remaining_base_quantity, 8)}</span>)}</div></td><td><span className={`bh-status ${item.status}`}>{item.status}</span></td><td className={Number(item.net_pnl_usdt) >= 0 ? "positive" : "negative"}>{number(item.net_pnl_usdt)} USDT</td><td>{number(item.funding_income_usdt)} USDT</td><td>{number(item.fees_usdt)} USDT</td><td>{time(item.created_at)}</td></tr>)}
+    {items.length === 0 && <tr><td className="bh-empty" colSpan={7}>还没有策略</td></tr>}
+  </tbody></table></div>;
+}
+
+function PositionsPage() {
+  const { items, error } = useStrategies("running,closing,manual_review");
+  return <main className="bh-page"><PageIntro eyebrow="PORTFOLIO" title="持仓总览" copy="按策略聚合跨所现货与永续腿，数量统一换算为基础币。" />
+    {error && <div className="bh-error">{error}</div>}
+    <StrategyTable items={items} />
+  </main>;
+}
+
+function FundsPage() {
+  const { items } = useStrategies();
+  const realized = items.reduce((sum, item) => sum + Number(item.realized_pnl_usdt), 0);
+  const funding = items.reduce((sum, item) => sum + Number(item.funding_income_usdt), 0);
+  const fees = items.reduce((sum, item) => sum + Number(item.fees_usdt), 0);
+  return <main className="bh-page"><PageIntro eyebrow="TREASURY" title="资金统计" copy="按组合汇总已实现盈亏、资金费收入与手续费。" />
+    <div className="bh-metrics four"><Metric label="已实现盈亏" value={`${number(realized)} USDT`} tone={realized >= 0 ? "green" : "red"} /><Metric label="资金费累计" value={`${number(funding)} USDT`} tone="green" /><Metric label="手续费累计" value={`${number(fees)} USDT`} tone="red" /><Metric label="组合净收益" value={`${number(realized + funding - fees)} USDT`} tone={realized + funding - fees >= 0 ? "green" : "red"} /></div>
+    <div className="bh-chart-empty"><div className="bh-chart-bars"><i /><i /><i /><i /><i /><i /><i /></div><p>收益时间序列将在策略结算后显示</p></div>
+  </main>;
+}
+
+function DashboardPage() {
+  const { items } = useStrategies();
+  const running = items.filter((item) => item.status === "running").length;
+  const ended = items.filter((item) => item.status === "ended").length;
+  const net = items.reduce((sum, item) => sum + Number(item.net_pnl_usdt), 0);
+  const funding = items.reduce((sum, item) => sum + Number(item.funding_income_usdt), 0);
+  const fees = items.reduce((sum, item) => sum + Number(item.fees_usdt), 0);
+  return <main className="bh-page"><PageIntro eyebrow="DASHBOARD" title="总览看板" copy="跨所策略、资金费与执行任务的统一运营视图。" />
+    <div className="bh-metrics six"><Metric label="运行中策略" value={running} /><Metric label="已结束策略" value={ended} /><Metric label="总净收益" value={`${net >= 0 ? "+" : ""}${number(net)}`} tone={net >= 0 ? "green" : "red"} /><Metric label="资金费率累计" value={`+${number(funding)}`} tone="green" /><Metric label="手续费累计" value={`-${number(fees)}`} tone="red" /><Metric label="预警策略数" value={items.filter((item) => item.status === "manual_review").length} /></div>
+    <div className="bh-chart-empty large"><header><strong>资金费率 & 费率累计走势</strong><span>7 天　30 天　90 天　全部</span></header><div className="bh-chart-bars"><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /></div><p>暂无资金费率数据</p></div>
+  </main>;
+}
+
+function TradesPage() {
+  const [tasks, setTasks] = useState<ExecutionTask[]>([]);
+  const [selected, setSelected] = useState("");
+  const [activity, setActivity] = useState<ExecutionActivity | null>(null);
+  useEffect(() => { void api.v2ExecutionTasks().then((value) => setTasks(value.items)); }, []);
+  useEffect(() => {
+    if (!selected) { setActivity(null); return; }
+    void api.v2ExecutionTaskActivity(selected).then((value) => setActivity(value.activity));
+  }, [selected]);
+  const task = tasks.find((item) => item.id === selected);
+  return <main className="bh-page"><PageIntro eyebrow="TRADES" title="成交记录选择器" copy="先选择执行任务，再审阅对应的腿、订单尝试、Maker 追价与成交。" />
+    <section className="bh-card"><header><h2>1. 选择任务和腿</h2></header><div className="bh-selector"><select aria-label="选择任务" value={selected} onChange={(event) => setSelected(event.target.value)}><option value="">搜索或选择任务</option>{tasks.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.status}</option>)}</select><select aria-label="选择腿" disabled={!task}><option>全部腿</option>{task?.legs.map((leg) => <option key={leg.id}>{exchangeNames[leg.exchange]} · {leg.symbol} · {leg.side}</option>)}</select></div></section>
+    {activity && <div className="bh-metrics"><Metric label="执行轮次" value={activity.runs.length} /><Metric label="订单尝试" value={activity.orders.length} /><Metric label="成交记录" value={activity.fills.length} /></div>}
+  </main>;
+}
+
+function AccountsPage() {
+  const [items, setItems] = useState<V2Account[]>([]);
+  const [showForm, setShowForm] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => api.v2Accounts().then((value) => setItems(value.items)).catch((reason: Error) => setError(reason.message)), []);
+  useEffect(() => { void load(); }, [load]);
+  return <main className="bh-page"><PageIntro eyebrow="API KEYS" title="API 密钥" copy="同一交易所与环境可保存多个具名账户；密钥加密存储且永不回显。" actions={<button className="bh-button primary" onClick={() => setShowForm(!showForm)}>新增账户</button>} />
+    {error && <div className="bh-error">{error}</div>}
+    {showForm && <AccountForm onCreated={() => { setShowForm(false); void load(); }} onError={setError} />}
+    <div className="bh-account-grid">{items.map((item) => <article className="bh-account" key={item.id}><header><strong>{exchangeNames[item.exchange]}</strong><span>{item.environment.toUpperCase()}</span></header><h3>{item.label}</h3><code>{item.masked_api_key}</code><div><span>交易默认 {item.trading_default ? "✓" : "—"}</span><span>扫描默认 {item.scanner_default ? "✓" : "—"}</span><span>费率 {item.fees.source}</span></div></article>)}{items.length === 0 && <div className="bh-empty-card">尚未配置账户</div>}</div>
+  </main>;
+}
+
+function AccountForm({ onCreated, onError }: { onCreated: () => void; onError: (value: string) => void }) {
+  const [exchange, setExchange] = useState<Exchange>("binance");
+  const [environment, setEnvironment] = useState<Environment>("live");
+  const [label, setLabel] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [secret, setSecret] = useState("");
+  const [passphrase, setPassphrase] = useState("");
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      await api.createV2Account({
+        exchange, environment, label, api_key: apiKey, api_secret: secret,
+        passphrase: passphrase || null,
+      });
+      onCreated();
+    } catch (reason) {
+      onError((reason as Error).message);
+    }
+  };
+  return <form className="bh-card bh-account-form" onSubmit={(event) => void submit(event)}><div className="bh-form-grid four"><label>交易所<select value={exchange} onChange={(event) => setExchange(event.target.value as Exchange)}>{exchanges.map((item) => <option key={item}>{item}</option>)}</select></label><label>环境<select value={environment} onChange={(event) => setEnvironment(event.target.value as Environment)}><option value="live">Live</option><option value="sandbox">Sandbox</option></select></label><label>账户名称<input required value={label} onChange={(event) => setLabel(event.target.value)} /></label><label>API Key<input required value={apiKey} onChange={(event) => setApiKey(event.target.value)} /></label><label>Secret<input required type="password" value={secret} onChange={(event) => setSecret(event.target.value)} /></label>{["okx", "bitget"].includes(exchange) && <label>Passphrase<input required type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} /></label>}</div><button className="bh-button primary">加密保存</button></form>;
+}
+
+function EmptyMonitor({ title, copy }: { title: string; copy: string }) {
+  return <main className="bh-page"><PageIntro eyebrow="MONITORING" title={title} copy={copy} /><section className="bh-card bh-monitor-empty"><div>✓</div><h2>当前没有需要处理的记录</h2><p>后台 worker 会持续更新此页面。</p></section></main>;
+}
+
+function SystemPage() {
+  const [tab, setTab] = useState<OperationsTab>("system");
+  const tabs: Array<[OperationsTab, string]> = [["system", "执行状态"], ["accounts", "旧账户"], ["trades", "旧交易"], ["ledger", "旧账本"], ["transfers", "内部划转"], ["automation", "旧自动策略"], ["history", "审计通知"]];
+  return <div className="bh-system"><div className="bh-system-tabs">{tabs.map(([value, label]) => <button className={tab === value ? "active" : ""} key={value} onClick={() => setTab(value)}>{label}</button>)}</div><OperationsPanel activeTab={tab} opportunities={[]} /></div>;
+}
+
+function Metric({ label, value, tone }: { label: string; value: string | number; tone?: "green" | "red" }) {
+  return <article className={`bh-metric ${tone ?? ""}`}><span>{label}</span><strong>{value}</strong><small>实时账本汇总</small></article>;
 }
