@@ -172,6 +172,11 @@ button, input, select { font: inherit; }
 .top-actions { display: flex; align-items: center; gap: 18px; }
 .read-only { color: #456b67; font-size: 11px; text-transform: uppercase; }
 .read-only i { display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; }
+.environment-switch { display: flex; padding: 3px; background: #e8efee; border: 1px solid #d6e2df; border-radius: 999px; }
+.environment-switch button { display: flex; align-items: center; gap: 6px; padding: 4px 9px; color: #71808e; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; background: transparent; border: 0; border-radius: 999px; cursor: pointer; }
+.environment-switch button i { width: 6px; height: 6px; background: #9ba9b2; border-radius: 50%; }
+.environment-switch button.active { color: #fff; background: var(--accent); }
+.environment-switch button.active i { background: #bdf3e7; box-shadow: 0 0 6px rgba(189, 243, 231, 0.7); }
 
 .button {
   padding: 9px 14px;
@@ -237,6 +242,7 @@ button, input, select { font: inherit; }
   border-radius: 9px;
   box-shadow: 0 5px 18px rgba(28, 63, 58, 0.04);
 }
+.status-strip.sandbox { grid-template-columns: minmax(280px, 1fr); }
 .exchange-status { display: flex; align-items: flex-start; gap: 11px; padding: 12px 17px; border-right: 1px solid var(--line); }
 .exchange-status:last-child { border: 0; }
 .exchange-status > div { flex: 1; min-width: 0; }
@@ -297,8 +303,10 @@ td { padding: 12px; color: #2b4053; font-size: 11px; text-align: right; white-sp
 tbody tr { cursor: pointer; transition: background 0.15s; }
 tbody tr:hover { background: #f1f8f6; }
 tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
-.asset strong, .asset span { display: block; }
-.asset strong { color: #20384c; font-family: Inter, "PingFang SC", sans-serif; font-size: 13px; font-weight: 700; }
+.asset a, .asset span { display: block; }
+.asset a { color: #20384c; font-family: Inter, "PingFang SC", sans-serif; font-size: 13px; font-weight: 700; text-decoration: none; }
+.asset a:hover { color: var(--accent-dark); text-decoration: underline; }
+.asset a b { margin-left: 5px; color: var(--accent); font-size: 10px; }
 .asset span, .cell-note { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
 .positive { color: var(--accent-dark); }
 .negative { color: var(--red); }
@@ -312,6 +320,8 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
 
 .detail-card { min-height: 500px; }
 .detail-card h2 span { color: var(--muted); font-size: 12px; font-weight: 400; }
+.market-link { display: inline-block; margin-top: 5px; color: var(--accent-dark); font-size: 11px; text-decoration: none; }
+.market-link:hover { text-decoration: underline; }
 .icon-button { color: #7c8d98; font-size: 24px; background: transparent; border: 0; cursor: pointer; }
 .icon-button:hover { color: #30475a; }
 .range-tabs { display: flex; margin: 16px 20px 0; padding: 3px; background: #edf3f2; border-radius: 6px; }

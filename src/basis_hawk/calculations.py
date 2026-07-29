@@ -46,6 +46,71 @@ def projected_net_return(apr_7d: Decimal, fee: FeeRate, holding_days: int) -> De
     return funding_return - round_trip_fees
 
 
+def apply_current_funding_fallback(
+    opportunity: Opportunity,
+    *,
+    fee: FeeRate,
+    holding_days: int,
+) -> Opportunity:
+    """Fill missing history metrics from current funding for sandbox display/testing."""
+    fallback_apr = annualize_current(
+        opportunity.current_funding_rate,
+        opportunity.funding_interval_hours,
+    )
+    return opportunity.model_copy(
+        update={
+            "apr_24h": (
+                opportunity.apr_24h
+                if opportunity.apr_24h is not None
+                else fallback_apr
+            ),
+            "apr_7d": (
+                opportunity.apr_7d
+                if opportunity.apr_7d is not None
+                else fallback_apr
+            ),
+            "net_return": (
+                opportunity.net_return
+                if opportunity.net_return is not None
+                else projected_net_return(
+                    fallback_apr,
+                    fee,
+                    holding_days,
+                )
+            ),
+            "quality": Quality.HEALTHY,
+        }
+    )
+
+
+def build_sandbox_opportunity(
+    pair: InstrumentPair,
+    quote: MarketQuote,
+    current: FundingObservation,
+    fee: FeeRate,
+    *,
+    holding_days: int = 30,
+    now: datetime | None = None,
+) -> Opportunity:
+    """Build an opportunity without pretending current-rate fallback is settled history."""
+    opportunity = build_opportunity(
+        pair,
+        quote,
+        current,
+        [],
+        fee,
+        holding_days=holding_days,
+        now=now,
+    )
+    if opportunity.quality == Quality.STALE:
+        return opportunity
+    return apply_current_funding_fallback(
+        opportunity,
+        fee=fee,
+        holding_days=holding_days,
+    )
+
+
 def build_opportunity(
     pair: InstrumentPair,
     quote: MarketQuote,

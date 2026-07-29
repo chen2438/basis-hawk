@@ -12,9 +12,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 from basis_hawk.calculations import (
-    annualize_current,
+    apply_current_funding_fallback,
     build_opportunity,
-    projected_net_return,
+    build_sandbox_opportunity,
 )
 from basis_hawk.credentials import ExchangeEnvironment
 from basis_hawk.exchanges import ExchangeAdapter, GateAdapter
@@ -27,7 +27,6 @@ from basis_hawk.models import (
     FeeRate,
     FundingObservation,
     InstrumentPair,
-    MarketQuote,
     Opportunity,
     Quality,
 )
@@ -667,10 +666,10 @@ class AutomaticTradingService:
                     continue
                 try:
                     sandbox_opportunities.append(
-                        _gate_sandbox_fallback_opportunity(
+                        build_sandbox_opportunity(
                             pair=pair,
                             quote=quote,
-                            funding=funding,
+                            current=funding,
                             fee=sandbox_fee,
                             holding_days=sandbox_holding_days,
                             now=now,
@@ -783,7 +782,7 @@ class AutomaticTradingService:
                             )
                         ):
                             refreshed_item = (
-                                _gate_sandbox_apply_history_fallback(
+                                apply_current_funding_fallback(
                                     refreshed_item,
                                     fee=sandbox_fee,
                                     holding_days=sandbox_holding_days,
@@ -814,67 +813,6 @@ class AutomaticTradingService:
         ]
 
 
-def _gate_sandbox_fallback_opportunity(
-    *,
-    pair: InstrumentPair,
-    quote: MarketQuote,
-    funding: FundingObservation,
-    fee: FeeRate,
-    holding_days: int,
-    now: datetime,
-) -> Opportunity:
-    opportunity = build_opportunity(
-        pair,
-        quote,
-        funding,
-        [],
-        fee,
-        holding_days=holding_days,
-        now=now,
-    )
-    if opportunity.quality == Quality.STALE:
-        return opportunity
-    return _gate_sandbox_apply_history_fallback(
-        opportunity,
-        fee=fee,
-        holding_days=holding_days,
-    )
-
-
-def _gate_sandbox_apply_history_fallback(
-    opportunity: Opportunity,
-    *,
-    fee: FeeRate,
-    holding_days: int,
-) -> Opportunity:
-    fallback_apr = annualize_current(
-        opportunity.current_funding_rate,
-        opportunity.funding_interval_hours,
-    )
-    return opportunity.model_copy(
-        update={
-            "apr_24h": (
-                opportunity.apr_24h
-                if opportunity.apr_24h is not None
-                else fallback_apr
-            ),
-            "apr_7d": (
-                opportunity.apr_7d
-                if opportunity.apr_7d is not None
-                else fallback_apr
-            ),
-            "net_return": (
-                opportunity.net_return
-                if opportunity.net_return is not None
-                else projected_net_return(
-                    fallback_apr,
-                    fee,
-                    holding_days,
-                )
-            ),
-            "quality": Quality.HEALTHY,
-        }
-    )
 
 
 def _opening_portfolio_block(

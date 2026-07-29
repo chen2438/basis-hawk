@@ -108,15 +108,23 @@ export const api = {
       body: JSON.stringify({ username, password, totp_code: totpCode }),
     }),
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
-  opportunities: () => request<{ items: Opportunity[]; sequence: number }>("/api/opportunities?page_size=3000"),
-  statuses: () => request<{ items: ExchangeStatus[] }>("/api/exchanges/status"),
+  opportunities: (environment: Environment = "live") =>
+    request<{ items: Opportunity[]; sequence: number }>(
+      `/api/opportunities?page_size=3000&environment=${environment}`,
+    ),
+  statuses: (environment: Environment = "live") =>
+    request<{ items: ExchangeStatus[] }>(
+      `/api/exchanges/status?environment=${environment}`,
+    ),
   settings: () => request<Settings>("/api/settings"),
   saveSettings: (value: Settings) => request<Settings>("/api/settings", { method: "PUT", body: JSON.stringify(value) }),
-  history: (item: Opportunity, range: string) =>
-    request<{ items: Opportunity[] }>(`/api/opportunities/${item.exchange}/${item.base_asset}/history?range=${range}`),
-  topBook: (item: Opportunity) =>
+  history: (item: Opportunity, range: string, environment: Environment = "live") =>
+    request<{ items: Opportunity[] }>(
+      `/api/opportunities/${item.exchange}/${encodeURIComponent(item.base_asset)}/history?range=${range}&environment=${environment}`,
+    ),
+  topBook: (item: Opportunity, environment: Environment = "live") =>
     request<Opportunity>(
-      `/api/opportunities/${item.exchange}/${encodeURIComponent(item.base_asset)}/top-book`,
+      `/api/opportunities/${item.exchange}/${encodeURIComponent(item.base_asset)}/top-book?environment=${environment}`,
     ),
   execution: () => request<ExecutionStatus>("/api/system/execution"),
   auditHistory: () => request<{ items: AuditEvent[] }>("/api/operations/audit?limit=100"),

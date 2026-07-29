@@ -4,7 +4,7 @@ import { LoginPage } from "./LoginPage";
 import { OperationsPanel } from "./OperationsPanel";
 import type { OperationsTab } from "./OperationsPanel";
 import { SettingsPanel } from "./SettingsPanel";
-import type { Exchange, ExchangeStatus, Opportunity, Quality, Settings } from "./types";
+import type { Environment, Exchange, ExchangeStatus, Opportunity, Quality, Settings } from "./types";
 
 const exchangeNames: Record<Exchange, string> = { binance: "Binance", okx: "OKX", mexc: "MEXC", bybit: "Bybit", bitget: "Bitget", gate: "Gate" };
 const exchanges = Object.keys(exchangeNames) as Exchange[];
@@ -27,8 +27,26 @@ const capacity = (value: string) => Number(value) > 0
   ? `${Number(value).toLocaleString("zh-CN", { maximumFractionDigits: 4 })} USDT`
   : "—";
 
-function Sparkline({ values }: { values: number[] }) {
-  if (values.length < 2) return <div className="empty-chart">历史快照正在积累</div>;
+export function exchangeMarketUrl(item: Opportunity, environment: Environment): string {
+  const symbol = encodeURIComponent(item.perp_symbol);
+  switch (item.exchange) {
+    case "binance":
+      return `https://www.binance.com/en/futures/${symbol}`;
+    case "okx":
+      return `https://www.okx.com/trade-swap/${item.perp_symbol.toLowerCase()}`;
+    case "mexc":
+      return `https://www.mexc.com/futures/${symbol}`;
+    case "bybit":
+      return `https://www.bybit.com/trade/usdt/${symbol}`;
+    case "bitget":
+      return `https://www.bitget.com/futures/usdt/${symbol}`;
+    case "gate":
+      return `${environment === "sandbox" ? "https://testnet.gate.com" : "https://www.gate.com"}/futures/USDT/${symbol}`;
+  }
+}
+
+function Sparkline({ values, emptyText = "历史快照正在积累" }: { values: number[]; emptyText?: string }) {
+  if (values.length < 2) return <div className="empty-chart">{emptyText}</div>;
   const min = Math.min(...values), max = Math.max(...values), span = max - min || 1;
   const points = values.map((value, index) => `${(index / (values.length - 1)) * 100},${42 - ((value - min) / span) * 36}`).join(" ");
   return <svg className="sparkline" viewBox="0 0 100 48" preserveAspectRatio="none" aria-label="历史收益趋势"><polyline points={points} /></svg>;
@@ -51,8 +69,12 @@ export default function App() {
 }
 
 function Dashboard({ username, onLogout }: { username: string; onLogout: () => void }) {
-  const [items, setItems] = useState<Opportunity[]>([]);
-  const [statuses, setStatuses] = useState<ExchangeStatus[]>([]);
+  const [liveItems, setLiveItems] = useState<Opportunity[]>([]);
+  const [liveStatuses, setLiveStatuses] = useState<ExchangeStatus[]>([]);
+  const [sandboxItems, setSandboxItems] = useState<Opportunity[]>([]);
+  const [sandboxStatuses, setSandboxStatuses] = useState<ExchangeStatus[]>([]);
+  const [marketEnvironment, setMarketEnvironment] = useState<Environment>("live");
+  const [sandboxLoading, setSandboxLoading] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [selected, setSelected] = useState<Opportunity | null>(null);
   const [selectedTopBook, setSelectedTopBook] = useState<Opportunity | null>(null);
@@ -69,16 +91,16 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
   const topBookRequest = useRef(0);
 
   useEffect(() => {
-    Promise.all([api.opportunities(), api.statuses(), api.settings()])
-      .then(([opportunities, state, config]) => { setItems(opportunities.items); setStatuses(state.items); setSettings(config); })
+    Promise.all([api.opportunities("live"), api.statuses("live"), api.settings()])
+      .then(([opportunities, state, config]) => { setLiveItems(opportunities.items); setLiveStatuses(state.items); setSettings(config); })
       .catch((reason: Error) => setError(reason.message));
-    const timer = window.setInterval(() => api.statuses().then((value) => setStatuses(value.items)).catch(() => undefined), 5000);
+    const timer = window.setInterval(() => api.statuses("live").then((value) => setLiveStatuses(value.items)).catch(() => undefined), 5000);
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     let stopped = false;
     let socket: WebSocket | null = null;
     let reconnectTimer = 0;
-    const restore = () => api.opportunities().then((value) => {
-      setItems(value.items);
+    const restore = () => api.opportunities("live").then((value) => {
+      setLiveItems(value.items);
       lastSequence.current = value.sequence;
     }).catch((reason: Error) => setError(reason.message));
     const connect = () => {
@@ -86,13 +108,13 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
       socket.onmessage = (event) => {
         const message = JSON.parse(event.data) as { type: string; sequence: number; items: Opportunity[] };
         if (message.type === "snapshot") {
-          setItems(message.items);
+          setLiveItems(message.items);
           lastSequence.current = message.sequence;
         } else if (lastSequence.current !== null && message.sequence !== lastSequence.current + 1) {
           void restore();
         } else {
           lastSequence.current = message.sequence;
-          setItems((current) => {
+          setLiveItems((current) => {
             const merged = new Map(current.map((item) => [`${item.exchange}:${item.base_asset}`, item]));
             message.items.forEach((item) => merged.set(`${item.exchange}:${item.base_asset}`, item));
             return [...merged.values()];
@@ -116,9 +138,44 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
   }, []);
 
   useEffect(() => {
-    if (!selected) return;
-    api.history(selected, range).then((value) => setHistory(value.items)).catch((reason: Error) => setError(reason.message));
-  }, [selected, range]);
+    if (!selected || marketEnvironment === "sandbox") {
+      setHistory([]);
+      return;
+    }
+    api.history(selected, range, marketEnvironment).then((value) => setHistory(value.items)).catch((reason: Error) => setError(reason.message));
+  }, [selected, range, marketEnvironment]);
+
+  useEffect(() => {
+    if (activePage !== "market" || marketEnvironment !== "sandbox") return;
+    let stopped = false;
+    const load = async () => {
+      setSandboxLoading(true);
+      try {
+        const [opportunities, state] = await Promise.all([
+          api.opportunities("sandbox"),
+          api.statuses("sandbox"),
+        ]);
+        if (!stopped) {
+          setSandboxItems(opportunities.items);
+          setSandboxStatuses(state.items);
+        }
+      } catch (reason) {
+        if (!stopped) setError((reason as Error).message);
+      } finally {
+        if (!stopped) setSandboxLoading(false);
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [activePage, marketEnvironment]);
+
+  const items = marketEnvironment === "live" ? liveItems : sandboxItems;
+  const statuses = marketEnvironment === "live" ? liveStatuses : sandboxStatuses;
+  const marketExchanges: Exchange[] = marketEnvironment === "live" ? exchanges : ["gate"];
 
   const filtered = useMemo(() => items
     .filter((item) => exchange === "all" || item.exchange === exchange)
@@ -133,7 +190,7 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
     setSelected(item);
     setSelectedTopBook(null);
     setTopBookLoading(true);
-    api.topBook(item)
+    api.topBook(item, marketEnvironment)
       .then((value) => {
         if (topBookRequest.current === requestId) setSelectedTopBook(value);
       })
@@ -149,6 +206,13 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
     setSelected(null);
     setSelectedTopBook(null);
     setTopBookLoading(false);
+  };
+  const selectMarketEnvironment = (environment: Environment) => {
+    if (environment === marketEnvironment) return;
+    closeOpportunity();
+    setHistory([]);
+    setExchange("all");
+    setMarketEnvironment(environment);
   };
   const detail = selectedTopBook ?? selected;
   return <div className="dashboard-shell">
@@ -176,22 +240,32 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
     <div className="dashboard-main">
     <header className="topbar">
       <div className="breadcrumb"><span>Basis Hawk</span><b>/</b><strong>{activePage === "market" ? "市场总览" : operationNavigation.find((item) => item.key === activePage)?.label}</strong></div>
-      <div className="top-actions"><span className="read-only"><i /> LIVE</span><span className="top-time">{new Date().toLocaleDateString("zh-CN")}</span></div>
+      <div className="top-actions">
+        {activePage === "market" ? <div className="environment-switch" role="group" aria-label="市场环境">
+          {(["live", "sandbox"] as Environment[]).map((environment) => <button
+            key={environment}
+            className={marketEnvironment === environment ? "active" : ""}
+            aria-pressed={marketEnvironment === environment}
+            onClick={() => selectMarketEnvironment(environment)}
+          ><i />{environment.toUpperCase()}</button>)}
+        </div> : <span className="read-only"><i /> LIVE</span>}
+        <span className="top-time">{new Date().toLocaleDateString("zh-CN")}</span>
+      </div>
     </header>
 
     {activePage === "market" ? <>
     <main className="market-main">
       <section className="hero">
-        <div><p className="eyebrow">LIVE MARKET OVERVIEW</p><h1>资金费机会，一眼看清。</h1><p>同所现货多头 × USDT 永续空头。基差与资金费分开衡量，收益估算透明可核。</p></div>
+        <div><p className="eyebrow">{marketEnvironment.toUpperCase()} MARKET OVERVIEW</p><h1>资金费机会，一眼看清。</h1><p>{marketEnvironment === "live" ? "同所现货多头 × USDT 永续空头。基差与资金费分开衡量，收益估算透明可核。" : "Gate TestNet 独立标的与盘口。历史不足时仅用当前资金费估算，不代表正式网行情。"}</p></div>
         <div className="hero-grid">
-          <div className="metric"><span>有效机会</span><strong>{healthy.length}</strong><small>六所共同交易对</small></div>
+          <div className="metric"><span>有效机会</span><strong>{healthy.length}</strong><small>{marketEnvironment === "live" ? "六所共同交易对" : "Gate TestNet 共同交易对"}</small></div>
           <div className="metric accent"><span>最佳 30 天估算</span><strong>{percent(best?.net_return ?? null)}</strong><small>{best ? `${exchangeNames[best.exchange]} · ${best.base_asset}` : "等待历史预热"}</small></div>
-          <div className="metric"><span>扫描标的</span><strong>{items.length}</strong><small>5 秒价格刷新</small></div>
+          <div className="metric"><span>扫描标的</span><strong>{sandboxLoading && !items.length ? "…" : items.length}</strong><small>5 秒价格刷新</small></div>
         </div>
       </section>
 
-      <section className="status-strip">
-        {exchanges.map((name) => {
+      <section className={`status-strip ${marketEnvironment}`}>
+        {marketExchanges.map((name) => {
           const status = statuses.find((item) => item.exchange === name);
           const progress = Math.min(100, Math.max(0, status?.history_progress_percent ?? 0));
           const downloadRate = status?.history_download_rate_per_minute;
@@ -209,7 +283,9 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
             <div>
               <strong>{exchangeNames[name]}</strong>
               <small>{status ? `${status.instruments} 标的 · 行情 ${status.latency_ms ?? "—"}ms` : "正在连接"}</small>
-              {status && <>
+              {status && (marketEnvironment === "sandbox" ? <>
+                <small>TestNet 当前资金费回退估算 · 不使用正式网行情</small>
+              </> : <>
                 <small>预热 {progress.toFixed(1)}%（{status.history_ready}/{status.instruments}）· {downloadLabel}</small>
                 <span
                   className="history-progress"
@@ -219,7 +295,7 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
                   aria-valuemax={100}
                   aria-valuenow={progress}
                 ><i style={{ width: `${progress}%` }} /></span>
-              </>}
+              </>)}
             </div>
           </div>;
         })}
@@ -232,12 +308,18 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
           <header className="section-header"><div><p className="eyebrow">OPPORTUNITY RANKING</p><h2>机会排行榜</h2></div><span className="count">{filtered.length} 项</span></header>
           <div className="filters">
             <input className="search" placeholder="搜索币种，例如 BTC" value={search} onChange={(e) => setSearch(e.target.value)} />
-            <select value={exchange} onChange={(e) => setExchange(e.target.value as Exchange | "all")}><option value="all">全部交易所</option>{Object.entries(exchangeNames).map(([key, value]) => <option value={key} key={key}>{value}</option>)}</select>
+            <select value={exchange} onChange={(e) => setExchange(e.target.value as Exchange | "all")}><option value="all">{marketEnvironment === "live" ? "全部交易所" : "全部测试网交易所"}</option>{marketExchanges.map((key) => <option value={key} key={key}>{exchangeNames[key]}</option>)}</select>
             <select value={quality} onChange={(e) => setQuality(e.target.value as Quality | "all")}><option value="healthy">仅有效</option><option value="all">全部状态</option><option value="warming">预热中</option><option value="stale">已陈旧</option></select>
           </div>
           <div className="table-wrap"><table><thead><tr><th>标的</th><th>当前费率 / 周期</th><th>当前年化</th><th>24h 年化</th><th>7d 年化</th><th>30d 净收益</th><th>可执行基差</th><th>两腿成交额</th><th>状态</th></tr></thead>
             <tbody>{filtered.map((item) => <tr key={`${item.exchange}:${item.base_asset}`} className={selected?.exchange === item.exchange && selected.base_asset === item.base_asset ? "selected" : ""} onClick={() => selectOpportunity(item)}>
-              <td><div className="asset"><strong>{item.base_asset}</strong><span>{exchangeNames[item.exchange]}</span></div></td>
+              <td><div className="asset"><a
+                href={exchangeMarketUrl(item, marketEnvironment)}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label={`在 ${exchangeNames[item.exchange]} 打开 ${item.base_asset} 永续合约`}
+                onClick={(event) => event.stopPropagation()}
+              >{item.base_asset}<b aria-hidden="true">↗</b></a><span>{exchangeNames[item.exchange]}</span></div></td>
               <td><strong className={Number(item.current_funding_rate) >= 0 ? "positive" : "negative"}>{percent(item.current_funding_rate, 4)}</strong><small className="cell-note">每 {item.funding_interval_hours}h</small></td>
               <td>{percent(item.current_apr)}</td><td>{percent(item.apr_24h)}</td><td>{percent(item.apr_7d)}</td>
               <td><strong className={Number(item.net_return ?? 0) >= 0 ? "positive" : "negative"}>{percent(item.net_return)}</strong></td>
@@ -249,9 +331,9 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
 
         <aside className={`detail-card ${selected ? "open" : ""}`}>
           {detail ? <>
-            <header><div><p className="eyebrow">OPPORTUNITY DETAIL</p><h2>{detail.base_asset} <span>{exchangeNames[detail.exchange]}</span></h2></div><button className="icon-button" onClick={closeOpportunity}>×</button></header>
+            <header><div><p className="eyebrow">OPPORTUNITY DETAIL</p><h2>{detail.base_asset} <span>{exchangeNames[detail.exchange]}</span></h2><a className="market-link" href={exchangeMarketUrl(detail, marketEnvironment)} target="_blank" rel="noopener noreferrer">打开交易所永续页面 ↗</a></div><button className="icon-button" onClick={closeOpportunity}>×</button></header>
             <div className="range-tabs">{["24h", "7d", "30d"].map((value) => <button className={range === value ? "active" : ""} onClick={() => setRange(value)} key={value}>{value}</button>)}</div>
-            <Sparkline values={history.map((item) => Number(item.net_return ?? item.current_apr))} />
+            <Sparkline values={history.map((item) => Number(item.net_return ?? item.current_apr))} emptyText={marketEnvironment === "sandbox" ? "TestNet 历史趋势未持久化；表中 24h/7d 为当前费率回退估算" : undefined} />
             <div className="detail-metrics">
               <div><span>现货卖一</span><strong>{price(detail.spot_ask)}</strong></div>
               <div><span>永续买一</span><strong>{price(detail.perp_bid)}</strong></div>
@@ -266,7 +348,7 @@ function Dashboard({ username, onLogout }: { username: string; onLogout: () => v
       </section>
     </main>
     <footer className="page-footer"><span>Basis Hawk · Paired execution & audit-first</span><span>收益估算不构成投资建议</span></footer>
-    </> : <OperationsPanel opportunities={items} activeTab={activePage} />}
+    </> : <OperationsPanel opportunities={liveItems} activeTab={activePage} />}
     </div>
     {showSettings && settings && <SettingsPanel value={settings} onClose={() => setShowSettings(false)} onSave={async (value) => setSettings(await api.saveSettings(value))} />}
   </div>;

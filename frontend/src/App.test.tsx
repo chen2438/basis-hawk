@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import App from "./App";
+import App, { exchangeMarketUrl } from "./App";
 import { apiErrorMessage } from "./api";
 import {
   executionReason,
@@ -267,13 +267,103 @@ describe("Basis Hawk dashboard", () => {
 
     render(<App />);
     const user = userEvent.setup();
-    await user.click(await screen.findByText("龙虾"));
+    await user.click(await screen.findByRole("row", { name: /龙虾/ }));
     await waitFor(() => expect(screen.getByText("现货卖一容量")).toBeTruthy());
     expect(screen.getByText("46.6847 USDT")).toBeTruthy();
     expect(screen.getAllByText("2.0553 USDT").length).toBe(2);
     expect(fetch).toHaveBeenCalledWith(
-      "/api/opportunities/gate/%E9%BE%99%E8%99%BE/top-book",
+      "/api/opportunities/gate/%E9%BE%99%E8%99%BE/top-book?environment=live",
       expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
+  it("switches to the isolated Gate sandbox market and links to TestNet", async () => {
+    const sandboxOpportunity = {
+      exchange: "gate",
+      base_asset: "AI16Z",
+      spot_symbol: "AI16Z_USDT",
+      perp_symbol: "AI16Z_USDT",
+      observed_at: "2026-07-29T14:00:00Z",
+      spot_ask: "0.1",
+      perp_bid: "0.101",
+      executable_basis: "0.01",
+      top_book_notional: "20",
+      spot_ask_notional: "20",
+      perp_bid_notional: "30",
+      current_funding_rate: "0.0001",
+      funding_interval_hours: "8",
+      next_funding_at: null,
+      current_apr: "0.1095",
+      apr_24h: "0.1095",
+      apr_7d: "0.1095",
+      net_return: "0.005",
+      spot_quote_volume_24h: "1000000",
+      perp_quote_volume_24h: "1000000",
+      spot_taker_fee: "0.001",
+      perp_taker_fee: "0.00075",
+      quality: "healthy",
+    };
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      const value = url.includes("auth/session") ? { username: "admin" }
+        : url.includes("environment=sandbox") && url.includes("opportunities?")
+          ? { items: [sandboxOpportunity], sequence: 2 }
+          : url.includes("environment=sandbox") && url.includes("exchanges/status")
+            ? { items: [{
+              exchange: "gate",
+              state: "healthy",
+              last_quote_at: "2026-07-29T14:00:00Z",
+              latency_ms: 120,
+              error: null,
+              instruments: 1,
+              history_ready: 0,
+              history_progress_percent: 0,
+              history_download_rate_per_minute: null,
+              history_syncing: false,
+            }] }
+            : url.includes("opportunities?") ? { items: [], sequence: 1 }
+            : url.includes("exchanges/status") ? { items: [] }
+            : { universe_size: 500, minimum_quote_volume: "1000000", holding_period_days: 30, retention_days: 7, fee_checked_at: "2026-07-23", fees: {} };
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(value) });
+    }));
+
+    render(<App />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "SANDBOX" }));
+    const link = await screen.findByRole("link", {
+      name: "在 Gate 打开 AI16Z 永续合约",
+    });
+    expect(link.getAttribute("href")).toBe(
+      "https://testnet.gate.com/futures/USDT/AI16Z_USDT",
+    );
+    expect(screen.getByText("Gate TestNet 独立标的与盘口。历史不足时仅用当前资金费估算，不代表正式网行情。")).toBeTruthy();
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/opportunities?page_size=3000&environment=sandbox",
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
+  it("builds official perpetual-market links for every supported exchange", () => {
+    const item = {
+      exchange: "binance",
+      perp_symbol: "BTCUSDT",
+    } as Parameters<typeof exchangeMarketUrl>[0];
+    expect(exchangeMarketUrl(item, "live")).toBe(
+      "https://www.binance.com/en/futures/BTCUSDT",
+    );
+    expect(exchangeMarketUrl({ ...item, exchange: "okx", perp_symbol: "BTC-USDT-SWAP" }, "live")).toBe(
+      "https://www.okx.com/trade-swap/btc-usdt-swap",
+    );
+    expect(exchangeMarketUrl({ ...item, exchange: "mexc", perp_symbol: "BTC_USDT" }, "live")).toBe(
+      "https://www.mexc.com/futures/BTC_USDT",
+    );
+    expect(exchangeMarketUrl({ ...item, exchange: "bybit" }, "live")).toBe(
+      "https://www.bybit.com/trade/usdt/BTCUSDT",
+    );
+    expect(exchangeMarketUrl({ ...item, exchange: "bitget" }, "live")).toBe(
+      "https://www.bitget.com/futures/usdt/BTCUSDT",
+    );
+    expect(exchangeMarketUrl({ ...item, exchange: "gate", perp_symbol: "BTC_USDT" }, "live")).toBe(
+      "https://www.gate.com/futures/USDT/BTC_USDT",
     );
   });
 

@@ -42,7 +42,11 @@ from basis_hawk.crypto import SecretCipher
 from basis_hawk.exchanges import GateAdapter
 from basis_hawk.models import Exchange, Quality, ScannerSettings
 from basis_hawk.notifications import TelegramCommandService
-from basis_hawk.service import ScannerService, default_adapters
+from basis_hawk.service import (
+    GateSandboxMarketService,
+    ScannerService,
+    default_adapters,
+)
 from basis_hawk.sizing import OrderSizingError
 from basis_hawk.storage import (
     Database,
@@ -231,12 +235,17 @@ def create_app(
         ]
         | None
     ) = None,
+    gate_sandbox_market: GateSandboxMarketService | None = None,
 ) -> FastAPI:
     config = get_config()
     scanner = service or ScannerService(
         Database(config.database_url), default_adapters(config.http_timeout_seconds)
     )
     require_auth = config.auth_required if auth_required is None else auth_required
+    sandbox_market = gate_sandbox_market or GateSandboxMarketService(
+        scanner,
+        timeout=config.http_timeout_seconds,
+    )
     if account_client_factory is None:
         def default_account_client_factory(
             exchange: Exchange,
@@ -270,10 +279,12 @@ def create_app(
             await scanner.start()
         yield
         if manage_lifecycle:
+            await sandbox_market.close()
             await scanner.stop()
 
     app = FastAPI(title="Basis Hawk", version="0.1.0", lifespan=lifespan)
     app.state.scanner = scanner
+    app.state.gate_sandbox_market = sandbox_market
     app.state.auth_service = auth_service
     trade_ledger = TradeLedger(scanner.database)
     transfer_ledger = InternalTransferLedger(
@@ -541,10 +552,20 @@ def create_app(
         exchange: Exchange | None = None,
         base_asset: str | None = None,
         quality: Quality | None = None,
+        environment: ExchangeEnvironment = ExchangeEnvironment.LIVE,
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=50, ge=1, le=3000),
     ) -> dict[str, object]:
-        values = scanner.list_opportunities()
+        if environment == ExchangeEnvironment.SANDBOX:
+            try:
+                values = await sandbox_market.list_opportunities()
+            except (RuntimeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Gate TestNet market is unavailable",
+                ) from exc
+        else:
+            values = scanner.list_opportunities()
         if exchange:
             values = [item for item in values if item.exchange == exchange]
         if base_asset:
@@ -558,14 +579,35 @@ def create_app(
             "total": len(values),
             "page": page,
             "page_size": page_size,
-            "sequence": scanner.sequence,
+            "sequence": (
+                sandbox_market.sequence
+                if environment == ExchangeEnvironment.SANDBOX
+                else scanner.sequence
+            ),
         }
 
     @app.get("/api/opportunities/{exchange}/{base_asset}/history")
-    async def history(exchange: Exchange, base_asset: str, range: str = "24h") -> dict[str, object]:
+    async def history(
+        exchange: Exchange,
+        base_asset: str,
+        range: str = "24h",
+        environment: ExchangeEnvironment = ExchangeEnvironment.LIVE,
+    ) -> dict[str, object]:
         durations = {"24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30)}
         if range not in durations:
             raise HTTPException(status_code=422, detail="range must be 24h, 7d, or 30d")
+        if environment == ExchangeEnvironment.SANDBOX:
+            if exchange != Exchange.GATE:
+                raise HTTPException(
+                    status_code=404,
+                    detail="sandbox market is only available for Gate",
+                )
+            return {
+                "exchange": exchange,
+                "base_asset": base_asset.upper(),
+                "range": range,
+                "items": [],
+            }
         values = await scanner.database.snapshot_history(
             exchange.value,
             base_asset.upper(),
@@ -582,12 +624,20 @@ def create_app(
     async def opportunity_top_book(
         exchange: Exchange,
         base_asset: str,
+        environment: ExchangeEnvironment = ExchangeEnvironment.LIVE,
     ) -> dict[str, object]:
         try:
-            opportunity = await scanner.executable_opportunity(
-                exchange,
-                base_asset,
-            )
+            if environment == ExchangeEnvironment.SANDBOX:
+                opportunity = (
+                    await sandbox_market.executable_opportunity(base_asset)
+                    if exchange == Exchange.GATE
+                    else None
+                )
+            else:
+                opportunity = await scanner.executable_opportunity(
+                    exchange,
+                    base_asset,
+                )
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(
                 status_code=409,
@@ -601,7 +651,18 @@ def create_app(
         return opportunity.model_dump(mode="json")
 
     @app.get("/api/exchanges/status")
-    async def statuses() -> dict[str, object]:
+    async def statuses(
+        environment: ExchangeEnvironment = ExchangeEnvironment.LIVE,
+    ) -> dict[str, object]:
+        if environment == ExchangeEnvironment.SANDBOX:
+            try:
+                status = await sandbox_market.status()
+            except (RuntimeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Gate TestNet market is unavailable",
+                ) from exc
+            return {"items": [status.model_dump(mode="json")]}
         return {"items": [item.model_dump(mode="json") for item in scanner.statuses.values()]}
 
     @app.get("/api/system/execution")

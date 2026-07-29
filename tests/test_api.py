@@ -17,11 +17,13 @@ from basis_hawk.crypto import SecretCipher
 from basis_hawk.models import (
     Exchange,
     ExchangeStatus,
+    FundingObservation,
     InstrumentPair,
+    MarketQuote,
     Opportunity,
     Quality,
 )
-from basis_hawk.service import ScannerService
+from basis_hawk.service import GateSandboxMarketService, ScannerService
 from basis_hawk.storage import Database
 from basis_hawk.trading import PaperExecutionService, TradeLedger
 
@@ -250,6 +252,133 @@ async def test_rest_contract_and_settings() -> None:
         closed = await client.get("/api/trades/positions", params={"status": "closed"})
         assert closed.json()["items"][0]["id"] == position_id
         assert closed.json()["items"][0]["unrealized_pnl_usdt"] is None
+    await database.close()
+
+
+async def test_market_environment_switch_uses_gate_testnet_data_only() -> None:
+    database = Database("sqlite+aiosqlite:///:memory:")
+    service = ScannerService(database, {})
+    await service.initialize()
+    service.opportunities["binance:BTC"] = opportunity()
+    pair = InstrumentPair(
+        exchange=Exchange.GATE,
+        base_asset="AI16Z",
+        spot_symbol="AI16Z_USDT",
+        perp_symbol="AI16Z_USDT",
+        spot_price_increment=Decimal("0.0001"),
+        spot_quantity_increment=Decimal("0.1"),
+        perp_price_increment=Decimal("0.0001"),
+        perp_quantity_increment=Decimal("1"),
+        perp_contract_size=Decimal("1"),
+    )
+    quote = MarketQuote(
+        exchange=Exchange.GATE,
+        base_asset="AI16Z",
+        observed_at=datetime.now(UTC),
+        spot_bid=Decimal("0.099"),
+        spot_bid_qty=Decimal("100"),
+        spot_ask=Decimal("0.1"),
+        spot_ask_qty=Decimal("0"),
+        perp_bid=Decimal("0.101"),
+        perp_bid_qty=Decimal("100"),
+        perp_ask=Decimal("0.102"),
+        perp_ask_qty=Decimal("100"),
+        spot_quote_volume_24h=Decimal("2000000"),
+        perp_quote_volume_24h=Decimal("3000000"),
+    )
+
+    class FakeGateSandboxAdapter:
+        async def instruments(self) -> list[InstrumentPair]:
+            return [pair]
+
+        async def quotes(
+            self,
+            pairs: list[InstrumentPair],
+        ) -> list[MarketQuote]:
+            assert pairs == [pair]
+            return [quote]
+
+        async def current_funding(
+            self,
+            pairs: list[InstrumentPair],
+        ) -> list[FundingObservation]:
+            assert pairs == [pair]
+            return [
+                FundingObservation(
+                    exchange=Exchange.GATE,
+                    base_asset="AI16Z",
+                    rate=Decimal("0.0001"),
+                    funding_at=datetime.now(UTC),
+                    observed_at=datetime.now(UTC),
+                    interval_hours=Decimal("8"),
+                )
+            ]
+
+        async def executable_quote(
+            self,
+            selected_pair: InstrumentPair,
+            selected_quote: MarketQuote,
+        ) -> MarketQuote:
+            assert selected_pair == pair
+            assert selected_quote == quote
+            return selected_quote.model_copy(
+                update={"spot_ask_qty": Decimal("200")}
+            )
+
+        async def close(self) -> None:
+            pass
+
+    sandbox_market = GateSandboxMarketService(
+        service,
+        adapter=FakeGateSandboxAdapter(),  # type: ignore[arg-type]
+        cache_seconds=60,
+    )
+    app = create_app(
+        service,
+        manage_lifecycle=False,
+        auth_required=False,
+        gate_sandbox_market=sandbox_market,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        live = await client.get(
+            "/api/opportunities",
+            params={"environment": "live", "page_size": 3000},
+        )
+        assert [item["base_asset"] for item in live.json()["items"]] == ["BTC"]
+
+        sandbox = await client.get(
+            "/api/opportunities",
+            params={"environment": "sandbox", "page_size": 3000},
+        )
+        sandbox_item = sandbox.json()["items"][0]
+        assert sandbox_item["exchange"] == "gate"
+        assert sandbox_item["base_asset"] == "AI16Z"
+        assert sandbox_item["quality"] == "healthy"
+        assert sandbox_item["apr_24h"] == sandbox_item["current_apr"]
+        assert sandbox_item["apr_7d"] == sandbox_item["current_apr"]
+
+        status = await client.get(
+            "/api/exchanges/status",
+            params={"environment": "sandbox"},
+        )
+        assert status.json()["items"][0]["exchange"] == "gate"
+        assert status.json()["items"][0]["instruments"] == 1
+
+        top_book = await client.get(
+            "/api/opportunities/gate/AI16Z/top-book",
+            params={"environment": "sandbox"},
+        )
+        assert top_book.json()["spot_ask_notional"] == "20.0"
+        assert top_book.json()["top_book_notional"] == "10.100"
+
+        history = await client.get(
+            "/api/opportunities/gate/AI16Z/history",
+            params={"environment": "sandbox", "range": "7d"},
+        )
+        assert history.json()["items"] == []
     await database.close()
 
 

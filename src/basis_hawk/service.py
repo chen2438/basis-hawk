@@ -10,8 +10,10 @@ from time import monotonic
 from basis_hawk.calculations import (
     annualize_current,
     build_opportunity,
+    build_sandbox_opportunity,
     projected_net_return,
 )
+from basis_hawk.credentials import ExchangeEnvironment
 from basis_hawk.exchanges import (
     BinanceAdapter,
     BitgetAdapter,
@@ -21,6 +23,7 @@ from basis_hawk.exchanges import (
     MexcAdapter,
     OkxAdapter,
 )
+from basis_hawk.executable_quotes import opportunity_with_executable_quote
 from basis_hawk.models import (
     Exchange,
     ExchangeStatus,
@@ -49,6 +52,170 @@ def default_adapters(timeout: float = 10) -> dict[Exchange, ExchangeAdapter]:
         Exchange.BITGET: BitgetAdapter(timeout=timeout),
         Exchange.GATE: GateAdapter(timeout=timeout),
     }
+
+
+class GateSandboxMarketService:
+    """Short-lived, read-only Gate TestNet snapshot for the market page."""
+
+    def __init__(
+        self,
+        scanner: ScannerService,
+        *,
+        adapter: ExchangeAdapter | None = None,
+        cache_seconds: float = 5,
+        timeout: float = 10,
+    ) -> None:
+        self.scanner = scanner
+        self.adapter = adapter
+        self.cache_seconds = cache_seconds
+        self.timeout = timeout
+        self._lock = asyncio.Lock()
+        self._refreshed_monotonic = 0.0
+        self._pairs: dict[str, InstrumentPair] = {}
+        self._quotes: dict[str, MarketQuote] = {}
+        self._opportunities: dict[str, Opportunity] = {}
+        self._status = ExchangeStatus(exchange=Exchange.GATE)
+        self.sequence = 0
+
+    async def refresh(self) -> None:
+        async with self._lock:
+            if (
+                self._refreshed_monotonic
+                and monotonic() - self._refreshed_monotonic < self.cache_seconds
+            ):
+                return
+            started = monotonic()
+            try:
+                if self.adapter is None:
+                    self.adapter = GateAdapter(
+                        timeout=self.timeout,
+                        environment=ExchangeEnvironment.SANDBOX,
+                    )
+                all_pairs = await self.adapter.instruments()
+                all_quotes = await self.adapter.quotes(all_pairs)
+                quote_by_key = {
+                    f"{quote.exchange.value}:{quote.base_asset}": quote
+                    for quote in all_quotes
+                }
+                settings = self.scanner.settings
+                eligible = [
+                    pair
+                    for pair in all_pairs
+                    if pair.key in quote_by_key
+                    and min(
+                        quote_by_key[pair.key].spot_quote_volume_24h,
+                        quote_by_key[pair.key].perp_quote_volume_24h,
+                    )
+                    >= settings.minimum_quote_volume
+                ]
+                eligible.sort(
+                    key=lambda pair: (
+                        -min(
+                            quote_by_key[pair.key].spot_quote_volume_24h,
+                            quote_by_key[pair.key].perp_quote_volume_24h,
+                        ),
+                        pair.base_asset,
+                    )
+                )
+                selected = eligible[: settings.universe_size]
+                funding = await self.adapter.current_funding(selected)
+                funding_by_key = {
+                    f"{item.exchange.value}:{item.base_asset}": item
+                    for item in funding
+                }
+                now = datetime.now(UTC)
+                opportunities = {}
+                for pair in selected:
+                    current = funding_by_key.get(pair.key)
+                    if current is None:
+                        continue
+                    try:
+                        opportunities[pair.key] = build_sandbox_opportunity(
+                            pair,
+                            quote_by_key[pair.key],
+                            current,
+                            settings.fees[Exchange.GATE],
+                            holding_days=settings.holding_period_days,
+                            now=now,
+                        )
+                    except ValueError:
+                        continue
+                self._pairs = {pair.key: pair for pair in selected}
+                self._quotes = {
+                    pair.key: quote_by_key[pair.key]
+                    for pair in selected
+                    if pair.key in quote_by_key
+                }
+                self._opportunities = opportunities
+                self._refreshed_monotonic = monotonic()
+                self.sequence += 1
+                self._status = ExchangeStatus(
+                    exchange=Exchange.GATE,
+                    state="healthy",
+                    last_catalog_at=now,
+                    last_quote_at=max(
+                        (item.observed_at for item in opportunities.values()),
+                        default=now,
+                    ),
+                    last_funding_at=now,
+                    latency_ms=round((monotonic() - started) * 1000),
+                    instruments=len(opportunities),
+                )
+            except (RuntimeError, ValueError):
+                self._status = self._status.model_copy(
+                    update={
+                        "state": "degraded",
+                        "latency_ms": round((monotonic() - started) * 1000),
+                        "error": "Gate TestNet market unavailable",
+                    }
+                )
+                if not self._opportunities:
+                    raise
+                self._opportunities = {
+                    key: item.model_copy(update={"quality": Quality.STALE})
+                    for key, item in self._opportunities.items()
+                }
+
+    async def list_opportunities(self) -> list[Opportunity]:
+        await self.refresh()
+        return sorted(
+            self._opportunities.values(),
+            key=lambda item: (
+                item.quality != Quality.HEALTHY,
+                -(item.net_return if item.net_return is not None else item.current_apr),
+                item.base_asset,
+            ),
+        )
+
+    async def status(self) -> ExchangeStatus:
+        await self.refresh()
+        return self._status
+
+    async def executable_opportunity(
+        self,
+        base_asset: str,
+    ) -> Opportunity | None:
+        await self.refresh()
+        key = f"{Exchange.GATE.value}:{base_asset.strip().upper()}"
+        opportunity = self._opportunities.get(key)
+        pair = self._pairs.get(key)
+        quote = self._quotes.get(key)
+        if opportunity is None or pair is None or quote is None:
+            return None
+        if self.adapter is None:
+            raise RuntimeError("Gate TestNet market adapter is unavailable")
+        executable_quote = await self.adapter.executable_quote(pair, quote)
+        resolved = opportunity_with_executable_quote(
+            opportunity,
+            executable_quote,
+        )
+        self._quotes[key] = executable_quote
+        self._opportunities[key] = resolved
+        return resolved
+
+    async def close(self) -> None:
+        if self.adapter is not None:
+            await self.adapter.close()
 
 
 class ScannerService:
