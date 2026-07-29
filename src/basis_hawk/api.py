@@ -50,6 +50,7 @@ from basis_hawk.execution_tasks import (
 from basis_hawk.models import Exchange, Quality, ScannerSettings
 from basis_hawk.multi_leg import ExecutionTaskSpec
 from basis_hawk.notifications import TelegramCommandService
+from basis_hawk.opportunities import OpportunityService, OpportunityType
 from basis_hawk.portfolio import PortfolioService
 from basis_hawk.service import (
     SandboxMarketService,
@@ -340,6 +341,7 @@ def create_app(
         else None
     )
     portfolio_service = PortfolioService(scanner.database)
+    opportunity_service = OpportunityService(scanner.database)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -2404,6 +2406,63 @@ def create_app(
         if strategy is None:
             raise HTTPException(status_code=404, detail="strategy was not found")
         return {"strategy": strategy.model_dump(mode="json")}
+
+    @app.get("/api/v2/opportunities")
+    async def v2_opportunities(
+        opportunity_type: Annotated[
+            OpportunityType,
+            Query(alias="type"),
+        ] = OpportunityType.FUNDING,
+        exchanges: Annotated[str | None, Query()] = None,
+        search: Annotated[str | None, Query(max_length=40)] = None,
+        minimum_annualized_return: Annotated[
+            Decimal,
+            Query(ge=Decimal("-100"), le=Decimal("100")),
+        ] = Decimal("0"),
+        holding_days: Annotated[int, Query(ge=1, le=365)] = 7,
+        maximum_age_seconds: Annotated[int, Query(ge=5, le=300)] = 30,
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    ) -> dict[str, object]:
+        selected_exchanges = None
+        if exchanges is not None:
+            try:
+                selected_exchanges = {
+                    Exchange(item.strip()).value
+                    for item in exchanges.split(",")
+                    if item.strip()
+                }
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail="unsupported exchange filter",
+                ) from exc
+            if not selected_exchanges:
+                raise HTTPException(
+                    status_code=422,
+                    detail="exchange filter is empty",
+                )
+        items = await opportunity_service.list(
+            opportunity_type=opportunity_type,
+            exchanges=selected_exchanges,
+            search=search,
+            minimum_annualized_return=minimum_annualized_return,
+            holding_days=holding_days,
+            maximum_age_seconds=maximum_age_seconds,
+            limit=limit,
+        )
+        return {
+            "type": opportunity_type.value,
+            "holding_days": holding_days,
+            "observed_at": (
+                max(item.observed_at for item in items).isoformat()
+                if items
+                else None
+            ),
+            "items": [
+                item.model_dump(mode="json")
+                for item in items
+            ],
+        }
 
     @app.post("/api/v2/accounts", status_code=201)
     async def create_v2_account(

@@ -119,6 +119,18 @@ Demo 模式入口。
 - `GET /api/v2/strategies/{strategy_id}` 返回组合及 2–16 条有序策略腿，包含交易所、角色、账户、
   方向、入场/出场价、剩余基础币数量、手续费、资金费和净 PnL；响应不包含凭据或远端错误正文。
 
+三类机会统一由 `GET /api/v2/opportunities` 返回：
+
+- `type=funding` 生成“现货买入 + 永续卖出”候选，两腿可以来自不同交易所；
+- `type=cross_funding` 生成“高 funding 永续卖出 + 低 funding 永续买入”的跨所候选；
+- `type=basis` 使用与 funding 相同的可执行腿，但按入场基差、`holding_days` 内预计 funding 和
+  往返手续费后的预计收益排序。
+
+接口支持 `exchanges`、`search`、`minimum_annualized_return`、`holding_days`、
+`maximum_age_seconds` 和 `limit` 过滤。每条腿返回默认实盘交易 `account_id`、所用 Taker 费率和
+`actual/manual/default` 来源；账户费率只要某一市场缺失，就只对该市场回退行情内的默认费率。
+候选只组合 `healthy` 且未超过最大年龄的行情，响应同时提供稳定候选 ID、可执行名义额及共同观测时间。
+
 - `GET /api/system/execution`：读取 worker 的全局执行阻断状态，以及各账户最近一次启动对账状态、
   私有流就绪状态、远端结果完整性、挂单数和仓位数。真实订单预检失败时 `reason` 使用
   `live_order_preflight:{exchange}:{safe_code}`，前端翻译为带交易所和失败阶段的中文说明；该值不含
