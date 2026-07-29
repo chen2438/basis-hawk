@@ -13,6 +13,7 @@ import type {
   V2Opportunity,
   V2OpportunityType,
   Opportunity,
+  AdlPosition,
 } from "./types";
 
 type Page =
@@ -135,7 +136,7 @@ function Console({ username, onLogout }: { username: string; onLogout: () => voi
       {page === "trades" && <TradesPage />}
       {page === "accounts" && <AccountsPage />}
       {page === "alerts" && <EmptyMonitor title="预警监控" copy="交易任务失败、敞口异常与账户阻断将在这里集中展示。" />}
-      {page === "adl" && <EmptyMonitor title="ADL 监控" copy="展示各账户永续仓位的 1–5 级自动减仓风险，5 为最高风险。" />}
+      {page === "adl" && <AdlPage />}
       {page === "email" && <EmptyMonitor title="邮件推送" copy="关键成交、人工复核与安全暂停使用 SMTP 通道投递。" />}
       {page === "profile" && <EmptyMonitor title="账户设置" copy="管理员密码、TOTP 与会话安全设置。" />}
       {page === "system" && <SystemPage />}
@@ -498,6 +499,38 @@ function AccountForm({ onCreated, onError }: { onCreated: () => void; onError: (
 
 function EmptyMonitor({ title, copy }: { title: string; copy: string }) {
   return <main className="bh-page"><PageIntro eyebrow="MONITORING" title={title} copy={copy} /><section className="bh-card bh-monitor-empty"><div>✓</div><h2>当前没有需要处理的记录</h2><p>后台 worker 会持续更新此页面。</p></section></main>;
+}
+
+function AdlPage() {
+  const [items, setItems] = useState<AdlPosition[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    void api.v2Adl()
+      .then((value) => setItems(value.items))
+      .catch((reason: Error) => setError(reason.message));
+  }, []);
+  const refresh = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setItems((await api.refreshV2Adl()).items);
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <main className="bh-page">
+    <PageIntro eyebrow="RISK / ADL" title="ADL 监控" copy="实时监控永续仓位自动减仓队列，等级 5 为最高风险。"
+      actions={<button className="bh-button primary" disabled={busy} onClick={() => void refresh()}>{busy ? "刷新中…" : "刷新账户"}</button>} />
+    {error && <div className="bh-error">{error}</div>}
+    <div className="bh-metrics"><Metric label="监控账户" value={new Set(items.map((item) => item.account_id)).size} /><Metric label="高风险仓位" value={items.filter((item) => (item.risk_level ?? 0) >= 4).length} tone="red" /><Metric label="事件模式账户" value={items.filter((item) => item.event_only).length} /></div>
+    <div className="bh-table-wrap"><table className="bh-table"><thead><tr><th>交易所 / 账户</th><th>环境</th><th>合约</th><th>方向</th><th>ADL 风险</th><th>原生值</th><th>观测时间</th></tr></thead><tbody>
+      {items.map((item) => <tr key={`${item.account_id}-${item.symbol}-${item.position_side}`}><td><strong>{exchangeNames[item.exchange]}</strong><small>{item.account_label}</small></td><td>{item.environment.toUpperCase()}</td><td>{item.event_only ? "私有事件监听" : item.symbol}</td><td>{item.position_side}</td><td><div className="bh-adl-levels">{[1, 2, 3, 4, 5].map((level) => <i key={level} className={(item.risk_level ?? 0) >= level ? `active level-${level}` : ""} />)}<span>{item.event_only ? "EVENT" : item.risk_level ?? "—"}</span></div></td><td>{item.native_value ?? "—"}</td><td>{time(item.observed_at)}</td></tr>)}
+      {items.length === 0 && <tr><td className="bh-empty" colSpan={7}>暂无 ADL 快照；点击“刷新账户”读取实时风险等级</td></tr>}
+    </tbody></table></div>
+  </main>;
 }
 
 function SystemPage() {

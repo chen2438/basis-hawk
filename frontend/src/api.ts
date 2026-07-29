@@ -29,6 +29,7 @@ import type {
   V2Account,
   V2Opportunity,
   V2OpportunityType,
+  AdlPosition,
 } from "./types";
 
 function cookie(name: string): string | null {
@@ -175,6 +176,11 @@ export const api = {
     request<{ items: Strategy[] }>(
       `/api/v2/strategies${status ? `?status=${encodeURIComponent(status)}` : ""}`,
     ),
+  v2Adl: () => request<{ items: AdlPosition[] }>("/api/v2/adl"),
+  refreshV2Adl: () => request<{ items: AdlPosition[] }>("/api/v2/adl/refresh", {
+    method: "POST",
+    body: "{}",
+  }),
   opportunities: (environment: Environment = "live") =>
     request<{ items: Opportunity[]; sequence: number }>(
       `/api/opportunities?page_size=3000&environment=${environment}`,

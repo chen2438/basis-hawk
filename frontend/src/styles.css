@@ -833,6 +833,7 @@ tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 va
 .bh-account-form { padding-bottom: 18px; }.bh-account-form > button { margin-left: 18px; }
 .bh-empty-card { grid-column: 1 / -1; padding: 70px; color: #98a3ac; text-align: center; background: #fff; border: 1px dashed var(--bh-line-dark); border-radius: 8px; }
 .bh-monitor-empty { padding: 90px 20px; text-align: center; }.bh-monitor-empty > div { display: grid; width: 44px; height: 44px; margin: auto; color: #16876f; background: #eaf7f2; border-radius: 50%; place-items: center; }.bh-monitor-empty h2 { margin: 16px 0 6px; }.bh-monitor-empty p { color: #8a96a0; font-size: 11px; }
+.bh-adl-levels { display: flex; gap: 4px; align-items: center; }.bh-adl-levels i { width: 18px; height: 6px; background: #e6eaed; border-radius: 2px; }.bh-adl-levels i.active { background: #55ae91; }.bh-adl-levels i.active.level-3 { background: #d2a343; }.bh-adl-levels i.active.level-4, .bh-adl-levels i.active.level-5 { background: #ca5665; }.bh-adl-levels span { margin-left: 5px; color: #788590; font-size: 9px; }
 .bh-system-tabs { display: flex; gap: 7px; padding: 20px 28px 0; }.bh-system-tabs button { padding: 7px 10px; color: #64727d; background: #fff; border: 1px solid var(--bh-line); border-radius: 5px; cursor: pointer; }.bh-system-tabs button.active { color: #fff; background: #16876f; border-color: #16876f; }
 
 @media (max-width: 1200px) {

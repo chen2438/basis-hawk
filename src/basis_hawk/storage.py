@@ -2857,6 +2857,78 @@ class Database:
                 for strategy in strategies
             ]
 
+    async def save_adl_snapshot_batch(
+        self,
+        *,
+        account_id: str,
+        positions: list[dict[str, Any]],
+        event_only: bool,
+        observed_at: datetime,
+    ) -> None:
+        async with self.sessions() as session:
+            values = positions or (
+                [
+                    {
+                        "symbol": "*",
+                        "position_side": "net",
+                        "normalized_level": None,
+                        "native_value": None,
+                    }
+                ]
+                if event_only
+                else []
+            )
+            for item in values:
+                session.add(
+                    AdlSnapshotRow(
+                        id=str(uuid.uuid4()),
+                        account_id=account_id,
+                        symbol=str(item["symbol"]),
+                        position_side=str(item["position_side"]),
+                        normalized_level=item["normalized_level"],
+                        native_value=item["native_value"],
+                        event_only=event_only,
+                        observed_at=observed_at,
+                    )
+                )
+            await session.commit()
+
+    async def latest_adl_snapshots(
+        self,
+    ) -> list[tuple[AdlSnapshotRow, ExchangeCredentialRow]]:
+        async with self.sessions() as session:
+            rows = list(
+                await session.scalars(
+                    select(AdlSnapshotRow).order_by(
+                        AdlSnapshotRow.observed_at.desc(),
+                        AdlSnapshotRow.id.desc(),
+                    )
+                )
+            )
+            latest: dict[tuple[str, str, str], AdlSnapshotRow] = {}
+            for row in rows:
+                latest.setdefault(
+                    (row.account_id, row.symbol, row.position_side),
+                    row,
+                )
+            if not latest:
+                return []
+            accounts = list(
+                await session.scalars(
+                    select(ExchangeCredentialRow).where(
+                        ExchangeCredentialRow.id.in_(
+                            {item.account_id for item in latest.values()}
+                        )
+                    )
+                )
+            )
+            by_id = {item.id: item for item in accounts}
+            return [
+                (item, by_id[item.account_id])
+                for item in latest.values()
+                if item.account_id in by_id
+            ]
+
     async def mark_execution_order_submitted(
         self,
         *,

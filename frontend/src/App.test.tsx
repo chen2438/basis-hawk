@@ -71,6 +71,7 @@ function mockApi() {
     }
     if (path === "/api/v2/accounts") return response({ items: [] });
     if (path.startsWith("/api/v2/strategies")) return response({ items: [] });
+    if (path.startsWith("/api/v2/adl")) return response({ items: [] });
     if (path === "/api/auth/logout") return response(null, 204);
     return response({ items: [] });
   });
@@ -137,6 +138,16 @@ describe("Basis Hawk v2 console", () => {
       perp_symbol: "BTC_USDT",
     } as Opportunity;
     expect(exchangeMarketUrl(legacy, "sandbox")).toContain("testnet.gate.com");
+  });
+
+  it("renders the live ADL monitor", async () => {
+    render(<App />);
+    const user = userEvent.setup();
+    await screen.findByRole("heading", { name: "套利机会" });
+    await user.click(screen.getByRole("button", { name: "ADL 监控" }));
+    expect(await screen.findByRole("heading", { name: "ADL 监控" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "刷新账户" })).toBeTruthy();
+    expect(screen.getByText(/暂无 ADL 快照/)).toBeTruthy();
   });
 
   it("filters opportunity symbols", async () => {

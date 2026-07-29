@@ -131,6 +131,14 @@ Demo 模式入口。
 `actual/manual/default` 来源；账户费率只要某一市场缺失，就只对该市场回退行情内的默认费率。
 候选只组合 `healthy` 且未超过最大年龄的行情，响应同时提供稳定候选 ID、可执行名义额及共同观测时间。
 
+ADL 接口位于 `/api/v2/adl`：
+
+- `GET /api/v2/adl` 返回每个账户、symbol 和方向的最新持久化快照；
+- `POST /api/v2/adl/refresh` 解密每个具名账户并调用对应交易所只读 ADL 接口，保存后返回最新快照。
+
+等级统一为 1–5 且 5 为最高风险；响应同时保留脱敏原生值用于核对。MEXC 没有可轮询的实时等级，
+返回 `event_only=true` 和空等级，前端显示“私有事件监听”而不是虚构风险数字。
+
 - `GET /api/system/execution`：读取 worker 的全局执行阻断状态，以及各账户最近一次启动对账状态、
   私有流就绪状态、远端结果完整性、挂单数和仓位数。真实订单预检失败时 `reason` 使用
   `live_order_preflight:{exchange}:{safe_code}`，前端翻译为带交易所和失败阶段的中文说明；该值不含

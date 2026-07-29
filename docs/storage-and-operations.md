@@ -355,6 +355,11 @@ execution ready，已有敞口的 running/hedging 任务即使全局暂停仍可
 预计收益扣除两腿开平仓往返 Taker 费。默认实盘交易账户的 actual/manual 费率优先，单个费率字段为空
 时才回退该交易所行情使用的默认值；API 只投影账户 ID 和费率来源，不解密或返回密钥。
 
+`adl_snapshots` 按刷新批次追加，不覆盖历史。最新读模型以
+`(account_id, symbol, position_side)` 去重并关联账户标签、交易所和环境；无持仓的 MEXC
+event-only 批次使用 `symbol=*` 的能力记录，`normalized_level` 保持 NULL。刷新只调用只读私有接口，
+客户端在成功或失败后都关闭，API 错误不包含交易所响应正文。
+
 `exchange_credentials` 取消“交易所+环境唯一”，改为“交易所+环境+标签唯一”，并用部分唯一索引分别
 保证每组最多一个默认交易账户和默认扫描账户；既有凭据迁移为两种默认账户。能力矩阵和账户费率以
 脱敏 JSON 持久化，密文、nonce 和关联数据规则不变。`/api/v2/accounts` 可通过稳定账户 ID 管理多行；

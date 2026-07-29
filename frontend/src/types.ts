@@ -538,3 +538,16 @@ export interface Strategy {
   updated_at: string;
   legs: StrategyLeg[];
 }
+
+export interface AdlPosition {
+  account_id: string;
+  account_label: string;
+  exchange: Exchange;
+  environment: Environment;
+  symbol: string;
+  position_side: "long" | "short" | "net";
+  risk_level: number | null;
+  native_value: string | null;
+  event_only: boolean;
+  observed_at: string;
+}

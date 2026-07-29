@@ -29,6 +29,7 @@ from basis_hawk.accounts import (
     UnsupportedEnvironmentError,
     create_account_client,
 )
+from basis_hawk.adl import AdlMonitorService
 from basis_hawk.auth import AuthenticationError, AuthService, LoginAttemptLimiter
 from basis_hawk.automation import AutoStrategyConfig
 from basis_hawk.backup import BackupError, backup_status, delete_backup, delete_backups
@@ -342,6 +343,15 @@ def create_app(
     )
     portfolio_service = PortfolioService(scanner.database)
     opportunity_service = OpportunityService(scanner.database)
+    adl_monitor_service = (
+        AdlMonitorService(
+            scanner.database,
+            credential_service,
+            resolved_account_client_factory,
+        )
+        if credential_service is not None
+        else None
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -2462,6 +2472,47 @@ def create_app(
                 item.model_dump(mode="json")
                 for item in items
             ],
+        }
+
+    @app.get("/api/v2/adl")
+    async def v2_adl_positions() -> dict[str, object]:
+        if adl_monitor_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        return {
+            "items": [
+                item.model_dump(mode="json")
+                for item in await adl_monitor_service.list()
+            ]
+        }
+
+    @app.post("/api/v2/adl/refresh")
+    async def refresh_v2_adl_positions() -> dict[str, object]:
+        if adl_monitor_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="credential encryption is unavailable",
+            )
+        try:
+            items = await adl_monitor_service.refresh()
+        except (
+            ArithmeticError,
+            KeyError,
+            PrivateRequestError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="ADL account refresh failed",
+            ) from exc
+        return {
+            "items": [
+                item.model_dump(mode="json")
+                for item in items
+            ]
         }
 
     @app.post("/api/v2/accounts", status_code=201)
