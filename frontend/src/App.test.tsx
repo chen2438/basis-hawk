@@ -7,6 +7,7 @@ import {
   executionReason,
   OperationsPanel,
   PositionsView,
+  reconciliationReason,
   tradeFailureReason,
 } from "./OperationsPanel";
 
@@ -219,6 +220,9 @@ describe("Basis Hawk dashboard", () => {
     } as Parameters<typeof tradeFailureReason>[0])).toBe(
       "永续保证金模式或杠杆配置失败",
     );
+    expect(reconciliationReason(
+      "reconciliation_failed:ledger:remote_order_quantity_mismatch",
+    )).toBe("账本对账失败：远端订单数量与本地订单腿不一致");
   });
 
   it("loads and shows each opening-leg top-book capacity", async () => {

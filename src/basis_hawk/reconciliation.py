@@ -11,6 +11,7 @@ from basis_hawk.accounts import (
     PerpMarginMode,
     PositionMode,
     PrivateAccountClient,
+    PrivateRequestError,
     RemoteOrder,
     RemotePosition,
     create_account_client,
@@ -42,6 +43,41 @@ class ReconciliationResult(BaseModel):
 
 class WorkerLockUnavailable(RuntimeError):
     pass
+
+
+_SAFE_RECONCILIATION_ERRORS = {
+    "remote order quantity does not match the local order leg": (
+        "remote_order_quantity_mismatch"
+    ),
+    "remote fill changed after it was persisted": "remote_fill_changed",
+    "remote fills exceed the local order quantity": (
+        "remote_fills_exceed_local_quantity"
+    ),
+    "live compensation quantity is incomplete": (
+        "compensation_quantity_incomplete"
+    ),
+    "live compensation leaves unsafe residual exposure": (
+        "compensation_residual_unsafe"
+    ),
+}
+
+
+def _safe_reconciliation_error(exc: Exception) -> str:
+    if isinstance(exc, PrivateRequestError):
+        detail = (
+            exc.remote_code
+            or (
+                f"http_{exc.status_code}"
+                if exc.status_code is not None
+                else "transport"
+            )
+        )
+        return f"reconciliation_failed:private_request:{detail}"
+    if isinstance(exc, ValueError):
+        detail = _SAFE_RECONCILIATION_ERRORS.get(str(exc))
+        if detail is not None:
+            return f"reconciliation_failed:ledger:{detail}"
+    return "reconciliation_failed:internal:unclassified"
 
 
 class ReconciliationService:
@@ -372,14 +408,14 @@ class ReconciliationService:
                     private_stream_ready=private_stream_ready,
                 )
                 blocked += int(not account_ready)
-            except Exception:
+            except Exception as exc:
                 # Credential material, signed URLs, and exchange response bodies
                 # must never be persisted as reconciliation reasons.
                 await self.database.record_account_reconciliation(
                     exchange=summary.exchange.value,
                     environment=summary.environment.value,
                     status="error",
-                    reason="private account reconciliation failed",
+                    reason=_safe_reconciliation_error(exc),
                 )
                 failed += 1
             finally:

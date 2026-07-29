@@ -30,6 +30,7 @@ from basis_hawk.executable_quotes import (
     opportunity_with_executable_quote,
 )
 from basis_hawk.models import Exchange, InstrumentPair, Opportunity
+from basis_hawk.sizing import compensation_quantity
 from basis_hawk.storage import Database, OrderLegRow, TradeIntentRow
 from basis_hawk.trading import protective_limit_price
 
@@ -471,6 +472,19 @@ class LiveCompensationService:
             if compensation.market == "spot"
             else pair.perp_price_increment
         )
+        quantity_increment = (
+            pair.spot_quantity_increment
+            if compensation.market == "spot"
+            else pair.perp_quantity_increment
+        )
+        executable_quantity = compensation_quantity(
+            requested_quantity=compensation.quantity,
+            quantity_increment=quantity_increment,
+            side=compensation.side,
+        )
+        tolerance_base = (
+            quantity_increment * compensation.base_multiplier
+        )
         maximum_slippage = await self._maximum_slippage(
             environment=intent.environment
         )
@@ -480,9 +494,7 @@ class LiveCompensationService:
             side=compensation.side,
             price_increment=price_increment,
         )
-        base_quantity = (
-            compensation.quantity * compensation.base_multiplier
-        )
+        base_quantity = executable_quantity * compensation.base_multiplier
         capacity = (
             opportunity.close_top_book_notional
             if (
@@ -522,6 +534,8 @@ class LiveCompensationService:
             prepared = await self.database.prepare_live_compensation(
                 intent_id=intent.id,
                 limit_price=limit_price,
+                quantity=executable_quantity,
+                tolerance_base=tolerance_base,
             )
             if prepared is None or not prepared[2]:
                 return False, 0

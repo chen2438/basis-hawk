@@ -5,6 +5,7 @@ import pytest
 from basis_hawk.models import Exchange, InstrumentPair
 from basis_hawk.sizing import (
     OrderSizingError,
+    compensation_quantity,
     minimum_paired_order_notional,
     protective_limit_price,
     size_paired_order,
@@ -144,3 +145,16 @@ def test_protective_prices_stay_inside_the_slippage_boundary() -> None:
     assert buy <= Decimal("100.1")
     assert sell == Decimal("99.90")
     assert sell >= Decimal("99.9")
+
+
+def test_compensation_quantity_leaves_only_spot_side_dust() -> None:
+    assert compensation_quantity(
+        requested_quantity=Decimal("4.651"),
+        quantity_increment=Decimal("1"),
+        side="buy",
+    ) == Decimal("5")
+    assert compensation_quantity(
+        requested_quantity=Decimal("4.651"),
+        quantity_increment=Decimal("1"),
+        side="sell",
+    ) == Decimal("4")

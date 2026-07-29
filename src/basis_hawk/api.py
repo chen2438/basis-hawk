@@ -2203,7 +2203,7 @@ def create_app(
         try:
             while True:
                 await websocket.send_json(await queue.get())
-        except WebSocketDisconnect:
+        except (RuntimeError, WebSocketDisconnect):
             pass
         finally:
             scanner.unsubscribe(queue)

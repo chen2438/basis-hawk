@@ -56,6 +56,47 @@ def protective_limit_price(
     return result
 
 
+def compensation_quantity(
+    *,
+    requested_quantity: Decimal,
+    quantity_increment: Decimal,
+    side: str,
+) -> Decimal:
+    """Return a tradable protection size that leaves only spot-side dust.
+
+    Buying back an excess leg rounds up; selling an excess leg rounds down.
+    This keeps the remaining perpetual exposure no greater than the remaining
+    spot inventory after either an opening or closing compensation.
+    """
+    if requested_quantity <= 0 or quantity_increment <= 0:
+        raise OrderSizingError(
+            "compensation quantity and increment must be positive"
+        )
+    # SQLite exposes NUMERIC exchange metadata through binary floats in tests.
+    # The shortest decimal round-trip restores the exchange-declared grid
+    # (for example 0.001 instead of 0.00100000000000000002).
+    quantity_increment = Decimal(str(float(quantity_increment)))
+    if side == "buy":
+        rounding = ROUND_CEILING
+    elif side == "sell":
+        rounding = ROUND_FLOOR
+    else:
+        raise OrderSizingError("compensation side must be buy or sell")
+    ratio = requested_quantity / quantity_increment
+    nearest = ratio.to_integral_value()
+    if abs(ratio - nearest) <= Decimal("1e-9"):
+        ratio = nearest
+    increments = ratio.to_integral_value(rounding=rounding)
+    result = (increments * quantity_increment).quantize(
+        quantity_increment.normalize()
+    )
+    if result <= 0:
+        raise OrderSizingError(
+            "compensation quantity is below the exchange increment"
+        )
+    return result
+
+
 def size_paired_order(
     pair: InstrumentPair,
     *,

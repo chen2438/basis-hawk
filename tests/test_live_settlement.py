@@ -275,7 +275,7 @@ async def test_live_open_uses_net_spot_quantity_after_base_asset_fee() -> None:
                 side="buy",
                 quantity=Decimal("20"),
                 price=Decimal("0.049"),
-                fee_amount=Decimal("0.01"),
+                fee_amount=Decimal("0.015"),
                 fee_asset="ORDER",
                 liquidity="taker",
                 occurred_at=now,
@@ -313,8 +313,14 @@ async def test_live_open_uses_net_spot_quantity_after_base_asset_fee() -> None:
         item for item in stored[1] if item.leg == "perp_compensation"
     )
     assert compensation.side == "buy"
-    assert compensation.quantity == Decimal("0.001")
+    assert compensation.quantity == Decimal("0.0015")
     assert compensation.base_multiplier == Decimal("10")
+    async with database.sessions() as session:
+        row = await session.get(type(compensation), compensation.id)
+        assert row is not None
+        row.quantity = Decimal("0.002")
+        row.compensation_tolerance_base = Decimal("0.01")
+        await session.commit()
     await database.persist_remote_fills(
         order_leg_id=compensation.id,
         fills=[
@@ -325,7 +331,7 @@ async def test_live_open_uses_net_spot_quantity_after_base_asset_fee() -> None:
                 market="perp",
                 symbol="ORDER-USDT-SWAP",
                 side="buy",
-                quantity=Decimal("0.001"),
+                quantity=Decimal("0.002"),
                 price=Decimal("0.052"),
                 fee_amount=Decimal("0.0001"),
                 fee_asset="USDT",
@@ -339,18 +345,18 @@ async def test_live_open_uses_net_spot_quantity_after_base_asset_fee() -> None:
 
     assert settled is not None and settled[1] is not None
     assert settled[0].status == "hedged"
-    assert settled[1].quantity == Decimal("19.99")
-    assert settled[1].initial_quantity == Decimal("19.99")
+    assert settled[1].quantity == Decimal("19.98")
+    assert settled[1].initial_quantity == Decimal("19.98")
     assert settled[1].opening_fees_usdt.quantize(
         Decimal("0.00001")
-    ) == Decimal("0.00260")
+    ) == Decimal("0.00286")
     exposures = await database.paired_perp_exposures(
         exchange="okx",
         environment="live",
     )
     assert len(exposures) == 1
     assert exposures[0][0] == "ORDER-USDT-SWAP"
-    assert exposures[0][1].quantize(Decimal("0.001")) == Decimal("1.999")
+    assert exposures[0][1].quantize(Decimal("0.001")) == Decimal("1.998")
     assert exposures[0][2] == 2
     control = await database.execution_control()
     assert control is not None and control.state == "paused"

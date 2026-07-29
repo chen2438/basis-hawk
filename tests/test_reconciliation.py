@@ -352,7 +352,9 @@ async def test_reconciliation_failure_is_persisted_without_exception_details() -
     assert result.accounts_failed == 1
     states = await database.reconciliation_states()
     assert states[0].status == "error"
-    assert states[0].reason == "private account reconciliation failed"
+    assert states[0].reason == (
+        "reconciliation_failed:private_request:transport"
+    )
     assert "sensitive" not in states[0].reason
     assert client.closed is True
     await database.close()

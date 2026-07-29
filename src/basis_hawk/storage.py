@@ -720,6 +720,14 @@ class OrderLegRow(Base):
         Numeric(38, 18),
         default=Decimal("1"),
     )
+    compensation_target_base_quantity: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    compensation_tolerance_base: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        default=Decimal("0"),
+    )
     limit_price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     filled_quantity: Mapped[Decimal] = mapped_column(
         Numeric(38, 18),
@@ -737,6 +745,10 @@ class OrderLegRow(Base):
         CheckConstraint(
             "base_multiplier > 0",
             name="ck_order_leg_base_multiplier_positive",
+        ),
+        CheckConstraint(
+            "compensation_tolerance_base >= 0",
+            name="ck_order_leg_compensation_tolerance_non_negative",
         ),
     )
 
@@ -958,6 +970,8 @@ def _live_compensation_leg(
         status="created",
         quantity=excess_base / excess_leg.base_multiplier,
         base_multiplier=excess_leg.base_multiplier,
+        compensation_target_base_quantity=excess_base,
+        compensation_tolerance_base=Decimal("0"),
         limit_price=excess_leg.limit_price,
         filled_quantity=Decimal("0"),
         reduce_only=reduce_only,
@@ -981,6 +995,58 @@ def _compensation_pnl(
     return (
         primary.average_price - compensation.average_price
     ) * base_quantity
+
+
+def _compensated_base_quantities(
+    *,
+    action: str,
+    spot_base: Decimal,
+    perp_base: Decimal,
+    excess_leg: OrderLegRow,
+    compensation: OrderLegRow,
+) -> tuple[Decimal, Decimal]:
+    target = compensation.compensation_target_base_quantity
+    tolerance = compensation.compensation_tolerance_base
+    if (
+        target is None
+        or target <= 0
+        or tolerance < 0
+        or not _numeric_equal(target, abs(spot_base - perp_base))
+        or not _numeric_equal(
+            compensation.filled_quantity,
+            compensation.quantity,
+        )
+    ):
+        raise ValueError("live compensation quantity is incomplete")
+    compensated_base = (
+        compensation.filled_quantity * compensation.base_multiplier
+    )
+    adjusted_spot = spot_base
+    adjusted_perp = perp_base
+    if excess_leg.market == "spot":
+        adjusted_spot -= compensated_base
+    elif excess_leg.market == "perp":
+        adjusted_perp -= compensated_base
+    else:
+        raise ValueError("live compensation market is invalid")
+    if adjusted_spot < 0 or adjusted_perp < 0:
+        raise ValueError("live compensation exceeds the primary fill")
+    dust = (
+        adjusted_spot - adjusted_perp
+        if action == "open"
+        else adjusted_perp - adjusted_spot
+    )
+    if dust < 0 or (
+        tolerance == 0
+        and not _numeric_equal(dust, Decimal("0"))
+    ) or (
+        tolerance > 0
+        and dust >= tolerance
+    ):
+        raise ValueError(
+            "live compensation leaves unsafe residual exposure"
+        )
+    return adjusted_spot, adjusted_perp
 
 
 class Database:
@@ -2385,9 +2451,17 @@ class Database:
         *,
         intent_id: str,
         limit_price: Decimal,
+        quantity: Decimal,
+        tolerance_base: Decimal,
     ) -> tuple[TradeIntentRow, OrderLegRow, bool] | None:
         if limit_price <= 0:
             raise ValueError("live compensation limit price must be positive")
+        if quantity <= 0:
+            raise ValueError("live compensation quantity must be positive")
+        if tolerance_base <= 0:
+            raise ValueError(
+                "live compensation tolerance must be positive"
+            )
         async with self.sessions() as session:
             intent = await session.scalar(
                 select(TradeIntentRow)
@@ -2418,6 +2492,8 @@ class Database:
             control = await session.get(ExecutionControlRow, 1)
             if control is None or control.state != "paused":
                 return intent, compensation, False
+            compensation.quantity = quantity
+            compensation.compensation_tolerance_base = tolerance_base
             compensation.limit_price = limit_price
             compensation.status = "submitted"
             now = datetime.now(UTC)
@@ -2755,15 +2831,8 @@ class Database:
                     not in {"filled", "canceled", "failed"}
                 ):
                     return intent, None, False
-                compensated_base = (
-                    compensation.filled_quantity
-                    * compensation.base_multiplier
-                    if compensation is not None
-                    else Decimal("0")
-                )
                 if (
                     compensation is None
-                    or not _numeric_equal(compensated_base, excess_base)
                     or compensation.average_price is None
                 ):
                     intent.status = "manual_review"
@@ -2780,6 +2849,16 @@ class Database:
                         )
                     )
                     try:
+                        _, adjusted_perp_base = (
+                            _compensated_base_quantities(
+                                action="open",
+                                spot_base=spot_base,
+                                perp_base=perp_base,
+                                excess_leg=excess_leg,
+                                compensation=compensation,
+                            )
+                        )
+                        common_base = adjusted_perp_base
                         fees = _live_fees_usdt(
                             fill_rows,
                             intent.base_asset,
@@ -2787,7 +2866,10 @@ class Database:
                         compensation_profit = _compensation_pnl(
                             primary=excess_leg,
                             compensation=compensation,
-                            base_quantity=excess_base,
+                            base_quantity=(
+                                compensation.filled_quantity
+                                * compensation.base_multiplier
+                            ),
                         )
                     except ValueError:
                         intent.status = "manual_review"
@@ -2997,16 +3079,8 @@ class Database:
                     not in {"filled", "canceled", "failed"}
                 ):
                     return intent, position, False
-                compensated_base = (
-                    compensation.filled_quantity
-                    * compensation.base_multiplier
-                    if compensation is not None
-                    else Decimal("0")
-                )
                 if (
-                    common_base > position.quantity
-                    or compensation is None
-                    or not _numeric_equal(compensated_base, excess_base)
+                    compensation is None
                     or compensation.average_price is None
                     or (
                         common_base > 0
@@ -3030,6 +3104,20 @@ class Database:
                         )
                     )
                     try:
+                        _, adjusted_perp_base = (
+                            _compensated_base_quantities(
+                                action="close",
+                                spot_base=spot_base,
+                                perp_base=perp_base,
+                                excess_leg=excess_leg,
+                                compensation=compensation,
+                            )
+                        )
+                        common_base = adjusted_perp_base
+                        if common_base > position.quantity:
+                            raise ValueError(
+                                "live close compensation exceeds position"
+                            )
                         closing_fees = _live_fees_usdt(
                             fill_rows,
                             intent.base_asset,
@@ -3037,7 +3125,10 @@ class Database:
                         compensation_profit = _compensation_pnl(
                             primary=excess_leg,
                             compensation=compensation,
-                            base_quantity=excess_base,
+                            base_quantity=(
+                                compensation.filled_quantity
+                                * compensation.base_multiplier
+                            ),
                         )
                     except ValueError:
                         intent.status = "manual_review"
@@ -3059,24 +3150,49 @@ class Database:
                                 )
                             )
                         )
-                        common_gross_pnl = (
-                            Decimal("0")
-                            if common_base == 0
-                            else (
-                                (
+                        if compensation.compensation_tolerance_base == 0:
+                            common_gross_pnl = (
+                                Decimal("0")
+                                if common_base == 0
+                                else (
+                                    (
+                                        primary["spot"].average_price
+                                        - position.spot_entry_price
+                                    )
+                                    + (
+                                        position.perp_entry_price
+                                        - primary["perp"].average_price
+                                    )
+                                )
+                                * common_base
+                            )
+                            gross_pnl = (
+                                common_gross_pnl + compensation_profit
+                            )
+                        else:
+                            spot_gross_pnl = (
+                                Decimal("0")
+                                if spot_base == 0
+                                else (
                                     primary["spot"].average_price
                                     - position.spot_entry_price
                                 )
-                                + (
+                                * spot_base
+                            )
+                            perp_gross_pnl = (
+                                Decimal("0")
+                                if perp_base == 0
+                                else (
                                     position.perp_entry_price
                                     - primary["perp"].average_price
                                 )
+                                * perp_base
                             )
-                            * common_base
-                        )
-                        gross_pnl = (
-                            common_gross_pnl + compensation_profit
-                        )
+                            gross_pnl = (
+                                spot_gross_pnl
+                                + perp_gross_pnl
+                                + compensation_profit
+                            )
                         net_pnl = (
                             gross_pnl
                             - opening_fee_allocation

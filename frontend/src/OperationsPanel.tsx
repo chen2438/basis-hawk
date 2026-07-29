@@ -74,6 +74,28 @@ const executionReasonNames: Record<string, string> = {
   "startup account reconciliation is running": "正在执行账户、订单、成交和仓位安全对账",
   "administrator requested a fresh safety reconciliation": "管理员已请求重新进行安全对账",
   "software update requested": "软件更新已请求，交易保持暂停",
+  "startup reconciliation is incomplete; order, fill, and position matching is required before execution":
+    "至少一个账户的订单、成交或仓位尚未通过安全对账，交易保持阻断",
+};
+const reconciliationFailureReasons: Record<string, string> = {
+  remote_order_quantity_mismatch: "远端订单数量与本地订单腿不一致",
+  remote_fill_changed: "交易所返回的历史成交与已保存记录不一致",
+  remote_fills_exceed_local_quantity: "远端累计成交超过本地订单数量",
+  compensation_quantity_incomplete: "保护性补偿单没有完整成交",
+  compensation_residual_unsafe: "保护性补偿后仍存在超过交易步长的敞口",
+};
+export const reconciliationReason = (reason: string) => {
+  if (reason === "account reconciliation passed") return "账户安全对账已通过";
+  const match = /^reconciliation_failed:([^:]+):([^:]+)$/.exec(reason);
+  if (!match) return reason;
+  if (match[1] === "ledger") {
+    return `账本对账失败：${reconciliationFailureReasons[match[2]]
+      ?? `未知账本错误代码 ${match[2]}`}`;
+  }
+  if (match[1] === "private_request") {
+    return `交易所私有接口请求失败（安全代码：${match[2]}）`;
+  }
+  return "账户对账发生未分类内部错误，请查看更新后的安全错误代码";
 };
 const tradeFailureReasons: Record<string, string> = {
   market_data_expired: "行情数据过期，订单未提交",
@@ -458,7 +480,7 @@ function SystemView({
     <div className="ops-grid">
       {execution.accounts.map((item) => <article className="ops-card" key={`${item.exchange}:${item.environment}`}>
         <header><strong>{exchangeNames[item.exchange]}</strong><span className={`status-pill ${item.status}`}>{item.status}</span></header>
-        <p>{item.environment.toUpperCase()} · {item.reason}</p>
+        <p>{item.environment.toUpperCase()} · {reconciliationReason(item.reason)}</p>
         <dl>
           <div><dt>私有流</dt><dd>{item.private_stream_ready ? "正常" : "未就绪"}</dd></div>
           <div><dt>远端订单</dt><dd>{item.open_order_count}</dd></div>
