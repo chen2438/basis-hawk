@@ -16,6 +16,7 @@ import type {
   FillHistoryItem,
   FundingIncome,
   NotificationHistoryItem,
+  NotificationSettings,
   Opportunity,
   OrderHistoryItem,
   PairedPosition,
@@ -201,8 +202,19 @@ export const api = {
     ),
   execution: () => request<ExecutionStatus>("/api/system/execution"),
   auditHistory: () => request<{ items: AuditEvent[] }>("/api/operations/audit?limit=100"),
-  notificationHistory: () =>
-    request<{ items: NotificationHistoryItem[] }>("/api/operations/notifications?limit=100"),
+  notificationHistory: (options?: {
+    channel?: "telegram" | "email";
+    status?: "pending" | "sending" | "retry" | "sent" | "dead";
+  }) => {
+    const params = new URLSearchParams({ limit: "100" });
+    if (options?.channel) params.set("channel", options.channel);
+    if (options?.status) params.set("status", options.status);
+    return request<{ items: NotificationHistoryItem[] }>(
+      `/api/operations/notifications?${params.toString()}`,
+    );
+  },
+  notificationSettings: () =>
+    request<NotificationSettings>("/api/v2/notifications/settings"),
   backupStatus: () => request<BackupStatus>("/api/operations/backup"),
   updateStatus: () => request<UpdateStatus>("/api/operations/update"),
   checkForUpdates: () =>

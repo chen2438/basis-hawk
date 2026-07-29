@@ -315,6 +315,20 @@ export interface NotificationHistoryItem {
   sent_at: string | null;
 }
 
+export interface NotificationSettings {
+  email: {
+    configured: boolean;
+    security: "starttls" | "smtps";
+    port: number;
+    authentication_configured: boolean;
+    sender_configured: boolean;
+    recipient_configured: boolean;
+  };
+  telegram: {
+    configured: boolean;
+  };
+}
+
 export interface BackupStatus {
   directory_available: boolean;
   archive_count: number;

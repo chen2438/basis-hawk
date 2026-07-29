@@ -95,6 +95,8 @@ async def test_notification_test_and_backup_status_are_operator_safe(
     monkeypatch.setenv("BASIS_HAWK_TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setenv("BASIS_HAWK_TELEGRAM_CHAT_ID", "123")
     monkeypatch.setenv("BASIS_HAWK_SMTP_HOST", "smtp.example.test")
+    monkeypatch.setenv("BASIS_HAWK_SMTP_USERNAME", "smtp-user")
+    monkeypatch.setenv("BASIS_HAWK_SMTP_PASSWORD", "smtp-password")
     monkeypatch.setenv("BASIS_HAWK_SMTP_FROM", "hawk@example.test")
     monkeypatch.setenv("BASIS_HAWK_SMTP_TO", "admin@example.test")
     get_config.cache_clear()
@@ -147,6 +149,21 @@ async def test_notification_test_and_backup_status_are_operator_safe(
             assert {item["status"] for item in queued.json()["items"]} == {
                 "pending"
             }
+            settings = await client.get("/api/v2/notifications/settings")
+            assert settings.status_code == 200
+            assert settings.json() == {
+                "email": {
+                    "configured": True,
+                    "security": "starttls",
+                    "port": 587,
+                    "authentication_configured": True,
+                    "sender_configured": True,
+                    "recipient_configured": True,
+                },
+                "telegram": {"configured": True},
+            }
+            assert "smtp-user" not in settings.text
+            assert "smtp-password" not in settings.text
             history = await client.get("/api/operations/notifications")
             assert {
                 item["event_type"] for item in history.json()["items"]

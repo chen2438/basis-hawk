@@ -120,6 +120,16 @@ Demo 模式入口。
 - `GET /api/v2/strategies/{strategy_id}` 返回组合及 2–16 条有序策略腿，包含交易所、角色、账户、
   方向、入场/出场价、剩余基础币数量、手续费、资金费和净 PnL；响应不包含凭据或远端错误正文。
 
+通知控制面继续复用持久化 outbox，并增加只读能力摘要：
+
+- `GET /api/operations/notifications` 可按通道和投递状态筛选，返回严重级别、事件、主题、尝试次数、
+  脱敏错误码与时间，不返回正文或去重键；
+- `GET /api/v2/notifications/settings` 只返回邮件/Telegram 是否配置、SMTP 安全模式、端口以及认证、
+  发件人与收件人字段是否完整，不返回 Host、地址、用户名、密码、Token 或 Chat ID；
+- `POST /api/operations/notifications/test` 仍要求显式确认，并只把测试事件写入 outbox，由 worker
+  异步投递。预警页读取 warning/critical 记录，邮件页限定 email 通道并展示待投递、重试、送达和
+  dead-letter 状态。
+
 三类机会统一由 `GET /api/v2/opportunities` 返回：
 
 - `type=funding` 生成“现货买入 + 永续卖出”候选，两腿可以来自不同交易所；

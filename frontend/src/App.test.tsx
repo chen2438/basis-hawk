@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { exchangeMarketUrl } from "./App";
-import type { Opportunity, V2Opportunity } from "./types";
+import type { NotificationHistoryItem, Opportunity, V2Opportunity } from "./types";
 
 const opportunity: V2Opportunity = {
   id: "candidate-1",
@@ -47,6 +47,21 @@ const opportunity: V2Opportunity = {
   ],
 };
 
+const notification: NotificationHistoryItem = {
+  id: "notification-1",
+  event_type: "execution.manual_review",
+  severity: "critical",
+  channel: "email",
+  subject: "Execution requires manual review",
+  status: "retry",
+  attempts: 2,
+  next_attempt_at: "2026-07-29T12:05:00Z",
+  last_error_code: "smtp_timeout",
+  created_at: "2026-07-29T12:00:00Z",
+  updated_at: "2026-07-29T12:01:00Z",
+  sent_at: null,
+};
+
 function response(value: unknown, status = 200) {
   return Promise.resolve(new Response(
     status === 204 ? null : JSON.stringify(value),
@@ -72,6 +87,28 @@ function mockApi() {
     if (path === "/api/v2/accounts") return response({ items: [] });
     if (path.startsWith("/api/v2/strategies")) return response({ items: [] });
     if (path.startsWith("/api/v2/adl")) return response({ items: [] });
+    if (path === "/api/v2/notifications/settings") {
+      return response({
+        email: {
+          configured: true,
+          security: "starttls",
+          port: 587,
+          authentication_configured: true,
+          sender_configured: true,
+          recipient_configured: true,
+        },
+        telegram: { configured: false },
+      });
+    }
+    if (path.startsWith("/api/operations/notifications?")) {
+      return response({ items: [notification] });
+    }
+    if (path === "/api/operations/notifications/test") {
+      return response({
+        request_id: "request-1",
+        items: [{ id: "notification-2", channel: "email", status: "pending" }],
+      });
+    }
     if (path === "/api/auth/logout") return response(null, 204);
     return response({ items: [] });
   });
@@ -148,6 +185,23 @@ describe("Basis Hawk v2 console", () => {
     expect(await screen.findByRole("heading", { name: "ADL 监控" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "刷新账户" })).toBeTruthy();
     expect(screen.getByText(/暂无 ADL 快照/)).toBeTruthy();
+  });
+
+  it("renders alert history and sends an email delivery test", async () => {
+    render(<App />);
+    const user = userEvent.setup();
+    await screen.findByRole("heading", { name: "套利机会" });
+    await user.click(screen.getByRole("button", { name: "预警监控" }));
+    expect(await screen.findByText("Execution requires manual review")).toBeTruthy();
+    expect(screen.getByText("smtp_timeout")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "邮件推送" }));
+    expect((await screen.findAllByText("已配置")).length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("button", { name: "发送测试邮件" }));
+    expect(await screen.findByText("测试邮件已进入投递队列")).toBeTruthy();
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "/api/operations/notifications/test",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 
   it("filters opportunity symbols", async () => {

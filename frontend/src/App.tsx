@@ -14,6 +14,8 @@ import type {
   V2OpportunityType,
   Opportunity,
   AdlPosition,
+  NotificationHistoryItem,
+  NotificationSettings,
 } from "./types";
 
 type Page =
@@ -135,9 +137,9 @@ function Console({ username, onLogout }: { username: string; onLogout: () => voi
       {page === "dashboard" && <DashboardPage />}
       {page === "trades" && <TradesPage />}
       {page === "accounts" && <AccountsPage />}
-      {page === "alerts" && <EmptyMonitor title="预警监控" copy="交易任务失败、敞口异常与账户阻断将在这里集中展示。" />}
+      {page === "alerts" && <AlertsPage />}
       {page === "adl" && <AdlPage />}
-      {page === "email" && <EmptyMonitor title="邮件推送" copy="关键成交、人工复核与安全暂停使用 SMTP 通道投递。" />}
+      {page === "email" && <EmailPage />}
       {page === "profile" && <EmptyMonitor title="账户设置" copy="管理员密码、TOTP 与会话安全设置。" />}
       {page === "system" && <SystemPage />}
     </div>
@@ -499,6 +501,134 @@ function AccountForm({ onCreated, onError }: { onCreated: () => void; onError: (
 
 function EmptyMonitor({ title, copy }: { title: string; copy: string }) {
   return <main className="bh-page"><PageIntro eyebrow="MONITORING" title={title} copy={copy} /><section className="bh-card bh-monitor-empty"><div>✓</div><h2>当前没有需要处理的记录</h2><p>后台 worker 会持续更新此页面。</p></section></main>;
+}
+
+const notificationStatusNames: Record<NotificationHistoryItem["status"], string> = {
+  pending: "待投递",
+  sending: "投递中",
+  retry: "等待重试",
+  sent: "已送达",
+  dead: "已停止",
+};
+
+function AlertsPage() {
+  const [items, setItems] = useState<NotificationHistoryItem[]>([]);
+  const [severity, setSeverity] = useState<"all" | "warning" | "critical">("all");
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => {
+    setError(null);
+    void api.notificationHistory()
+      .then((value) => setItems(value.items.filter((item) => item.severity !== "info")))
+      .catch((reason: Error) => setError(reason.message));
+  }, []);
+  useEffect(load, [load]);
+  const visible = items.filter((item) => severity === "all" || item.severity === severity);
+  const unresolved = items.filter((item) => item.status !== "sent").length;
+  return <main className="bh-page">
+    <PageIntro
+      eyebrow="MONITORING"
+      title="预警监控"
+      copy="集中查看交易失败、人工复核、安全暂停和通知投递状态。"
+      actions={<button className="bh-button" onClick={load}>刷新</button>}
+    />
+    {error && <div className="bh-error">{error}</div>}
+    <div className="bh-metrics four">
+      <Metric label="未处理" value={unresolved} tone={unresolved ? "red" : undefined} />
+      <Metric label="严重" value={items.filter((item) => item.severity === "critical").length} tone="red" />
+      <Metric label="警告" value={items.filter((item) => item.severity === "warning").length} />
+      <Metric label="投递失败" value={items.filter((item) => item.status === "dead").length} tone="red" />
+    </div>
+    <div className="bh-tabs">
+      {([
+        ["all", "全部"],
+        ["critical", "严重"],
+        ["warning", "警告"],
+      ] as const).map(([value, label]) => <button
+        key={value}
+        className={severity === value ? "active" : ""}
+        onClick={() => setSeverity(value)}
+      >{label}<em>{value === "all" ? items.length : items.filter((item) => item.severity === value).length}</em></button>)}
+    </div>
+    <div className="bh-table-wrap"><table className="bh-table"><thead><tr>
+      <th>级别</th><th>事件</th><th>摘要</th><th>通道</th><th>投递状态</th><th>尝试</th><th>发生时间</th>
+    </tr></thead><tbody>
+      {visible.map((item) => <tr key={item.id}>
+        <td><span className={`bh-alert-level ${item.severity}`}>{item.severity === "critical" ? "严重" : "警告"}</span></td>
+        <td><strong>{item.event_type}</strong><small>{item.id.slice(0, 8)}</small></td>
+        <td>{item.subject}</td>
+        <td>{item.channel === "email" ? "邮件" : "Telegram"}</td>
+        <td><span className={`bh-status ${item.status}`}>{notificationStatusNames[item.status]}</span>{item.last_error_code && <small>{item.last_error_code}</small>}</td>
+        <td>{item.attempts}</td>
+        <td>{time(item.created_at)}</td>
+      </tr>)}
+      {visible.length === 0 && <tr><td className="bh-empty" colSpan={7}>当前没有匹配的预警记录</td></tr>}
+    </tbody></table></div>
+  </main>;
+}
+
+function EmailPage() {
+  const [items, setItems] = useState<NotificationHistoryItem[]>([]);
+  const [settings, setSettings] = useState<NotificationSettings | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => {
+    setError(null);
+    void Promise.all([
+      api.notificationSettings(),
+      api.notificationHistory({ channel: "email" }),
+    ])
+      .then(([configuration, history]) => {
+        setSettings(configuration);
+        setItems(history.items);
+      })
+      .catch((reason: Error) => setError(reason.message));
+  }, []);
+  useEffect(load, [load]);
+  const testEmail = async () => {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      await api.testNotifications(["email"]);
+      setMessage("测试邮件已进入投递队列");
+      load();
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <main className="bh-page">
+    <PageIntro
+      eyebrow="DELIVERY"
+      title="邮件推送"
+      copy="关键成交、人工复核与安全暂停通过 SMTP 异步投递。"
+      actions={<><button className="bh-button" onClick={load}>刷新</button><button className="bh-button primary" disabled={busy || !settings?.email.configured} onClick={() => void testEmail()}>{busy ? "提交中…" : "发送测试邮件"}</button></>}
+    />
+    {error && <div className="bh-error">{error}</div>}
+    {message && <div className="bh-success">{message}</div>}
+    <section className="bh-notification-config">
+      <article className="bh-card"><header><h2>SMTP 通道</h2><span className={`bh-channel-state ${settings?.email.configured ? "ready" : ""}`}>{settings?.email.configured ? "已配置" : "未配置"}</span></header>
+        <dl><div><dt>传输安全</dt><dd>{settings?.email.security?.toUpperCase() || "—"}</dd></div><div><dt>端口</dt><dd>{settings?.email.port || "—"}</dd></div><div><dt>身份认证</dt><dd>{settings?.email.authentication_configured ? "已配置" : "未配置"}</dd></div><div><dt>发件人与收件人</dt><dd>{settings?.email.sender_configured && settings?.email.recipient_configured ? "已配置" : "未完整配置"}</dd></div></dl>
+        {!settings?.email.configured && <p>请在服务器环境中配置 SMTP Host、发件人与收件人；密码不会通过 API 返回。</p>}
+      </article>
+      <article className="bh-card"><header><h2>投递概况</h2></header><dl><div><dt>累计记录</dt><dd>{items.length}</dd></div><div><dt>已送达</dt><dd>{items.filter((item) => item.status === "sent").length}</dd></div><div><dt>等待重试</dt><dd>{items.filter((item) => item.status === "retry").length}</dd></div><div><dt>已停止</dt><dd>{items.filter((item) => item.status === "dead").length}</dd></div></dl></article>
+    </section>
+    <div className="bh-table-wrap"><table className="bh-table"><thead><tr>
+      <th>主题</th><th>事件</th><th>级别</th><th>状态</th><th>尝试</th><th>最近更新</th>
+    </tr></thead><tbody>
+      {items.map((item) => <tr key={item.id}>
+        <td><strong>{item.subject}</strong><small>{item.id.slice(0, 8)}</small></td>
+        <td>{item.event_type}</td>
+        <td><span className={`bh-alert-level ${item.severity}`}>{item.severity === "critical" ? "严重" : item.severity === "warning" ? "警告" : "信息"}</span></td>
+        <td><span className={`bh-status ${item.status}`}>{notificationStatusNames[item.status]}</span>{item.last_error_code && <small>{item.last_error_code}</small>}</td>
+        <td>{item.attempts}</td>
+        <td>{time(item.updated_at)}</td>
+      </tr>)}
+      {items.length === 0 && <tr><td className="bh-empty" colSpan={6}>暂无邮件投递记录</td></tr>}
+    </tbody></table></div>
+  </main>;
 }
 
 function AdlPage() {

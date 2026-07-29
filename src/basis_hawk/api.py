@@ -884,6 +884,31 @@ def create_app(
             "offset": offset,
         }
 
+    @app.get("/api/v2/notifications/settings")
+    async def v2_notification_settings() -> dict[str, object]:
+        return {
+            "email": {
+                "configured": bool(
+                    config.smtp_host
+                    and config.smtp_from
+                    and config.smtp_to
+                ),
+                "security": config.smtp_security,
+                "port": config.smtp_port,
+                "authentication_configured": bool(
+                    config.smtp_username and config.smtp_password
+                ),
+                "sender_configured": bool(config.smtp_from),
+                "recipient_configured": bool(config.smtp_to),
+            },
+            "telegram": {
+                "configured": bool(
+                    config.telegram_bot_token
+                    and config.telegram_chat_id
+                ),
+            },
+        }
+
     @app.post("/api/operations/notifications/test")
     async def test_notifications(
         payload: NotificationTestRequest,
