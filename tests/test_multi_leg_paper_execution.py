@@ -12,6 +12,7 @@ from basis_hawk.multi_leg_execution import (
     MultiLegPaperExecutionService,
     PaperExecutionQuote,
 )
+from basis_hawk.portfolio import PortfolioService
 from basis_hawk.storage import (
     ArbitrageStrategyRow,
     Database,
@@ -163,4 +164,34 @@ async def test_paper_executor_persists_three_leg_strategy_atomically() -> None:
             select(func.count(ExecutionFillRow.id))
         ) == 3
     assert (await executor.run_once()).examined == 0
+
+    activity = await tasks.activity(task.id)
+    assert len(activity.runs) == 1
+    assert activity.runs[0].status == "completed"
+    assert len(activity.orders) == 3
+    assert {item.task_leg_id for item in activity.orders} == {
+        leg.id for leg in completed.legs
+    }
+    assert len(activity.fills) == 3
+    assert sorted(item.liquidity for item in activity.fills) == [
+        "maker",
+        "taker",
+        "taker",
+    ]
+
+    portfolio = PortfolioService(database)
+    strategies = await portfolio.list(statuses={"running"})
+    assert len(strategies) == 1
+    strategy_view = strategies[0]
+    assert strategy_view.net_pnl_usdt == -strategy_view.fees_usdt
+    assert [
+        (leg.exchange, leg.role, leg.market_type, leg.side)
+        for leg in strategy_view.legs
+    ] == [
+        ("binance", "anchor", "spot", "buy"),
+        ("okx", "hedge", "perpetual", "sell"),
+        ("bybit", "hedge", "perpetual", "sell"),
+    ]
+    assert await portfolio.get(strategy_view.id) == strategy_view
+    assert await portfolio.list(statuses={"ended"}) == []
     await database.close()

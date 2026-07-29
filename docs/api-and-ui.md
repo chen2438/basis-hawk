@@ -103,12 +103,21 @@ Demo 模式入口。
   并同时与腿交易所和任务环境匹配；
 - `GET /api/v2/execution-tasks` 和 `GET /api/v2/execution-tasks/{task_id}` 返回任务、乐观锁版本、
   有序腿和脱敏预检摘要；
+- `GET /api/v2/execution-tasks/{task_id}/activity` 返回该任务的全部 run、订单尝试、Maker
+  追价父子关系和逐笔成交，用于执行详情与重启恢复审计；
 - `POST /api/v2/execution-tasks/{task_id}/preflight` 逐个账户读取余额快照与完整订单/仓位状态，永续
   账户还必须能确定持仓模式。结果有效 60 秒，响应和审计均不包含 Key、Secret 或交易所原始错误；
 - `POST /api/v2/execution-tasks/{task_id}/start` 要求 `confirmed=true` 和最新 `expected_version`。
   真实/沙盒任务还要求全局执行状态为 ready；校验和 `preflight_ready → queued` 在同一锁定事务完成；
 - `POST /api/v2/execution-tasks/{task_id}/cancel` 只允许取消 draft、preflight_ready 或 queued，
   不允许把已运行任务直接标记结束，以免跳过敞口补偿。
+
+组合读接口位于 `/api/v2/strategies`：
+
+- `GET /api/v2/strategies` 返回按开仓时间倒序的组合，可用逗号分隔的 `status` 过滤
+  `running/closing/ended/manual_review`；
+- `GET /api/v2/strategies/{strategy_id}` 返回组合及 2–16 条有序策略腿，包含交易所、角色、账户、
+  方向、入场/出场价、剩余基础币数量、手续费、资金费和净 PnL；响应不包含凭据或远端错误正文。
 
 - `GET /api/system/execution`：读取 worker 的全局执行阻断状态，以及各账户最近一次启动对账状态、
   私有流就绪状态、远端结果完整性、挂单数和仓位数。真实订单预检失败时 `reason` 使用

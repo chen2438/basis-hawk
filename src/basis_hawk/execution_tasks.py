@@ -93,6 +93,59 @@ class ExecutionTaskView(DecimalPayload):
     legs: list[ExecutionTaskLegView]
 
 
+class ExecutionRunView(DecimalPayload):
+    id: str
+    run_number: int
+    status: str
+    worker_id: str | None
+    failure_code: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ExecutionOrderView(DecimalPayload):
+    id: str
+    run_id: str
+    task_leg_id: str
+    parent_order_id: str | None
+    attempt_number: int
+    chase_number: int
+    client_order_id: str
+    exchange_order_id: str | None
+    order_mode: str
+    status: str
+    quantity: Decimal
+    base_multiplier: Decimal
+    limit_price: Decimal | None
+    filled_quantity: Decimal
+    average_price: Decimal | None
+    failure_code: str | None
+    submitted_at: datetime | None
+    terminal_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ExecutionFillView(DecimalPayload):
+    id: str
+    execution_order_id: str
+    exchange_trade_id: str
+    quantity: Decimal
+    price: Decimal
+    fee_amount: Decimal
+    fee_asset: str
+    liquidity: str
+    occurred_at: datetime
+
+
+class ExecutionTaskActivityView(DecimalPayload):
+    runs: list[ExecutionRunView]
+    orders: list[ExecutionOrderView]
+    fills: list[ExecutionFillView]
+
+
 AccountClientFactory = Callable[
     [Exchange, ExchangeSecrets, ExchangeEnvironment],
     PrivateAccountClient,
@@ -218,6 +271,68 @@ class ExecutionTaskService:
             _view(row, legs)
             for row, legs in await self.database.execution_tasks(limit=limit)
         ]
+
+    async def activity(self, task_id: str) -> ExecutionTaskActivityView:
+        if await self.database.execution_task(task_id) is None:
+            raise KeyError(task_id)
+        runs, orders, fills = await self.database.execution_task_activity(
+            task_id
+        )
+        return ExecutionTaskActivityView(
+            runs=[
+                ExecutionRunView(
+                    id=item.id,
+                    run_number=item.run_number,
+                    status=item.status,
+                    worker_id=item.worker_id,
+                    failure_code=item.failure_code,
+                    started_at=item.started_at,
+                    finished_at=item.finished_at,
+                    created_at=item.created_at,
+                    updated_at=item.updated_at,
+                )
+                for item in runs
+            ],
+            orders=[
+                ExecutionOrderView(
+                    id=item.id,
+                    run_id=item.run_id,
+                    task_leg_id=item.task_leg_id,
+                    parent_order_id=item.parent_order_id,
+                    attempt_number=item.attempt_number,
+                    chase_number=item.chase_number,
+                    client_order_id=item.client_order_id,
+                    exchange_order_id=item.exchange_order_id,
+                    order_mode=item.order_mode,
+                    status=item.status,
+                    quantity=item.quantity,
+                    base_multiplier=item.base_multiplier,
+                    limit_price=item.limit_price,
+                    filled_quantity=item.filled_quantity,
+                    average_price=item.average_price,
+                    failure_code=item.failure_code,
+                    submitted_at=item.submitted_at,
+                    terminal_at=item.terminal_at,
+                    created_at=item.created_at,
+                    updated_at=item.updated_at,
+                )
+                for item in orders
+            ],
+            fills=[
+                ExecutionFillView(
+                    id=item.id,
+                    execution_order_id=item.execution_order_id,
+                    exchange_trade_id=item.exchange_trade_id,
+                    quantity=item.quantity,
+                    price=item.price,
+                    fee_amount=item.fee_amount,
+                    fee_asset=item.fee_asset,
+                    liquidity=item.liquidity,
+                    occurred_at=item.occurred_at,
+                )
+                for item in fills
+            ],
+        )
 
     async def preflight(
         self,

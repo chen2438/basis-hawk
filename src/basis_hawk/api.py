@@ -50,6 +50,7 @@ from basis_hawk.execution_tasks import (
 from basis_hawk.models import Exchange, Quality, ScannerSettings
 from basis_hawk.multi_leg import ExecutionTaskSpec
 from basis_hawk.notifications import TelegramCommandService
+from basis_hawk.portfolio import PortfolioService
 from basis_hawk.service import (
     SandboxMarketService,
     ScannerService,
@@ -338,6 +339,7 @@ def create_app(
         if credential_service is not None
         else None
     )
+    portfolio_service = PortfolioService(scanner.database)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -2242,6 +2244,24 @@ def create_app(
             raise HTTPException(status_code=404, detail="execution task was not found")
         return {"task": task.model_dump(mode="json")}
 
+    @app.get("/api/v2/execution-tasks/{task_id}/activity")
+    async def v2_execution_task_activity(
+        task_id: UUID,
+    ) -> dict[str, object]:
+        if execution_task_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="execution task encryption context is unavailable",
+            )
+        try:
+            activity = await execution_task_service.activity(str(task_id))
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="execution task was not found",
+            ) from exc
+        return {"activity": activity.model_dump(mode="json")}
+
     @app.post("/api/v2/execution-tasks/{task_id}/preflight")
     async def preflight_v2_execution_task(
         task_id: UUID,
@@ -2348,6 +2368,42 @@ def create_app(
                 for item in await credential_service.list()
             ]
         }
+
+    @app.get("/api/v2/strategies")
+    async def v2_strategies(
+        status: Annotated[str | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    ) -> dict[str, object]:
+        statuses = None
+        if status is not None:
+            statuses = {
+                item.strip()
+                for item in status.split(",")
+                if item.strip()
+            }
+            if not statuses or not statuses.issubset(
+                {"running", "closing", "ended", "manual_review"}
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="unsupported strategy status filter",
+                )
+        return {
+            "items": [
+                item.model_dump(mode="json")
+                for item in await portfolio_service.list(
+                    statuses=statuses,
+                    limit=limit,
+                )
+            ]
+        }
+
+    @app.get("/api/v2/strategies/{strategy_id}")
+    async def v2_strategy(strategy_id: UUID) -> dict[str, object]:
+        strategy = await portfolio_service.get(str(strategy_id))
+        if strategy is None:
+            raise HTTPException(status_code=404, detail="strategy was not found")
+        return {"strategy": strategy.model_dump(mode="json")}
 
     @app.post("/api/v2/accounts", status_code=201)
     async def create_v2_account(

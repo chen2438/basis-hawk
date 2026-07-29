@@ -2699,6 +2699,164 @@ class Database:
                 )
             )
 
+    async def execution_task_activity(
+        self,
+        task_id: str,
+    ) -> tuple[
+        list[ExecutionRunRow],
+        list[ExecutionOrderRow],
+        list[ExecutionFillRow],
+    ]:
+        async with self.sessions() as session:
+            runs = list(
+                await session.scalars(
+                    select(ExecutionRunRow)
+                    .where(ExecutionRunRow.task_id == task_id)
+                    .order_by(ExecutionRunRow.run_number)
+                )
+            )
+            orders = (
+                list(
+                    await session.scalars(
+                        select(ExecutionOrderRow)
+                        .where(
+                            ExecutionOrderRow.run_id.in_(
+                                [item.id for item in runs]
+                            )
+                        )
+                        .order_by(
+                            ExecutionOrderRow.created_at,
+                            ExecutionOrderRow.attempt_number,
+                            ExecutionOrderRow.chase_number,
+                        )
+                    )
+                )
+                if runs
+                else []
+            )
+            fills = (
+                list(
+                    await session.scalars(
+                        select(ExecutionFillRow)
+                        .where(
+                            ExecutionFillRow.execution_order_id.in_(
+                                [item.id for item in orders]
+                            )
+                        )
+                        .order_by(ExecutionFillRow.occurred_at)
+                    )
+                )
+                if orders
+                else []
+            )
+            return runs, orders, fills
+
+    async def arbitrage_strategy(
+        self,
+        strategy_id: str,
+    ) -> tuple[
+        ArbitrageStrategyRow,
+        list[StrategyLegRow],
+        dict[str, ExecutionTaskLegRow],
+    ] | None:
+        async with self.sessions() as session:
+            strategy = await session.get(ArbitrageStrategyRow, strategy_id)
+            if strategy is None:
+                return None
+            legs = list(
+                await session.scalars(
+                    select(StrategyLegRow)
+                    .where(StrategyLegRow.strategy_id == strategy_id)
+                    .order_by(StrategyLegRow.ordinal)
+                )
+            )
+            opening_legs = (
+                list(
+                    await session.scalars(
+                        select(ExecutionTaskLegRow).where(
+                            ExecutionTaskLegRow.id.in_(
+                                [item.opening_task_leg_id for item in legs]
+                            )
+                        )
+                    )
+                )
+                if legs
+                else []
+            )
+            return (
+                strategy,
+                legs,
+                {item.id: item for item in opening_legs},
+            )
+
+    async def arbitrage_strategy_rows(
+        self,
+        *,
+        statuses: set[str] | None = None,
+        limit: int = 100,
+    ) -> list[
+        tuple[
+            ArbitrageStrategyRow,
+            list[StrategyLegRow],
+            dict[str, ExecutionTaskLegRow],
+        ]
+    ]:
+        async with self.sessions() as session:
+            statement = select(ArbitrageStrategyRow)
+            if statuses is not None:
+                statement = statement.where(
+                    ArbitrageStrategyRow.status.in_(statuses)
+                )
+            strategies = list(
+                await session.scalars(
+                    statement.order_by(
+                        ArbitrageStrategyRow.opened_at.desc()
+                    ).limit(limit)
+                )
+            )
+            if not strategies:
+                return []
+            legs = list(
+                await session.scalars(
+                    select(StrategyLegRow)
+                    .where(
+                        StrategyLegRow.strategy_id.in_(
+                            [item.id for item in strategies]
+                        )
+                    )
+                    .order_by(
+                        StrategyLegRow.strategy_id,
+                        StrategyLegRow.ordinal,
+                    )
+                )
+            )
+            opening_leg_ids = [item.opening_task_leg_id for item in legs]
+            opening_legs = (
+                list(
+                    await session.scalars(
+                        select(ExecutionTaskLegRow).where(
+                            ExecutionTaskLegRow.id.in_(opening_leg_ids)
+                        )
+                    )
+                )
+                if opening_leg_ids
+                else []
+            )
+            by_strategy: dict[str, list[StrategyLegRow]] = {
+                item.id: [] for item in strategies
+            }
+            for leg in legs:
+                by_strategy[leg.strategy_id].append(leg)
+            opening_by_id = {item.id: item for item in opening_legs}
+            return [
+                (
+                    strategy,
+                    by_strategy[strategy.id],
+                    opening_by_id,
+                )
+                for strategy in strategies
+            ]
+
     async def mark_execution_order_submitted(
         self,
         *,

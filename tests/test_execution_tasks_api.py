@@ -142,6 +142,28 @@ async def test_paper_task_api_is_idempotent_and_requires_fresh_version() -> None
         assert listing.status_code == 200
         assert listing.json()["items"][0]["id"] == task_id
 
+        activity = await client.get(
+            f"/api/v2/execution-tasks/{task_id}/activity"
+        )
+        assert activity.status_code == 200
+        assert activity.json()["activity"] == {
+            "runs": [],
+            "orders": [],
+            "fills": [],
+        }
+        missing_activity = await client.get(
+            f"/api/v2/execution-tasks/{uuid4()}/activity"
+        )
+        assert missing_activity.status_code == 404
+
+        strategies = await client.get("/api/v2/strategies?status=running")
+        assert strategies.status_code == 200
+        assert strategies.json() == {"items": []}
+        invalid_status = await client.get(
+            "/api/v2/strategies?status=not-a-status"
+        )
+        assert invalid_status.status_code == 422
+
         cancelable = await client.post(
             "/api/v2/execution-tasks",
             headers={"Idempotency-Key": str(uuid4())},

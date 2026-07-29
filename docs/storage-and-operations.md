@@ -345,6 +345,11 @@ execution ready，已有敞口的 running/hedging 任务即使全局暂停仍可
 远端成交按“本地订单+交易所 trade ID”幂等，数量不得倒退或超过订单。任务失败前重新读当前 run 的
 累计成交；非零敞口把 task/run 标为 manual_review，零成交才标 failed，二者均只保存固定失败码。
 
+任务活动读模型按 task 一次读取其 run，再限定到这些 run 的订单和成交，空集合不会生成无界
+`IN` 查询。组合读模型批量读取策略腿及其不可变开仓任务腿，用开仓腿补足交易所和角色；净 PnL
+统一为 `realized_pnl_usdt + funding_income_usdt - fees_usdt`。两个读模型都只投影账本字段，
+不解密账户凭据，也不保存或返回交易所原始响应。
+
 `exchange_credentials` 取消“交易所+环境唯一”，改为“交易所+环境+标签唯一”，并用部分唯一索引分别
 保证每组最多一个默认交易账户和默认扫描账户；既有凭据迁移为两种默认账户。能力矩阵和账户费率以
 脱敏 JSON 持久化，密文、nonce 和关联数据规则不变。`/api/v2/accounts` 可通过稳定账户 ID 管理多行；
