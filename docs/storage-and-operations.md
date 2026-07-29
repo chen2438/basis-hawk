@@ -2,6 +2,11 @@
 
 生产数据库固定使用 PostgreSQL，URL 由 `BASIS_HAWK_DATABASE_URL` 指定。Alembic 是生产 schema
 的唯一迁移入口；应用只为 SQLite 测试数据库自动建表，禁止在 PostgreSQL 启动时隐式 `create_all`。
+`20260729_0034` 开始建立通用多腿 v2 schema。迁移在任何 DDL 前检查旧 `paired_positions`、
+`order_legs` 和 `trade_intents`：只要存在非零/未关闭仓位、活动或未知订单、仍可执行或人工复核意图，
+整次迁移立即失败。管理员必须先平掉全部仓位、撤销全部挂单并终结旧意图，不能依靠迁移替代交易所
+平仓。通过检查后，旧意图、腿、成交、已关闭仓位和 PnL 复制到新历史表；旧表在 v2 首次切换后的
+一个备份周期内保持只读，后续再用独立迁移删除。
 `instruments` 表持久化六所现货/永续价格和数量步长、最小数量/名义额及永续合约乘数；旧目录记录迁移
 后以 0 表示未知，并在下一次公共目录刷新时更新。任一真实下单规划看到未知规则都必须阻断。
 Binance、OKX、Bybit、Bitget Classic V2/UTA V3、Gate 及 MEXC 永续配置只接受 1–10 倍杠杆。Binance
@@ -303,6 +308,25 @@ MEXC LIVE 现货先用 API Key 创建 60 分钟 listenKey，再分别确认
 推导。IOC 在部分成交后撤销时，订单腿保留 `canceled` 终态及真实累计成交量，成交汇总不会把它重新改成
 活动的 `partially_filled`。未找到、查询窗口受限或结果不完整时保持阻断，绝不据此重发订单。每个账户同时保存
 `order_reconciliation_complete` 和本轮 `recovered_order_count`。
+
+### 通用多腿 v2 表
+
+`execution_tasks` 保存任务级环境、基础资产、数量模式、对冲触发、基础币/USDT 双敞口上限、重试上限、
+预检票据和乐观锁版本；`execution_task_legs` 保存有序的主腿/对冲腿、账户、现货/永续、方向、目标及
+单次数量、Maker/Taker 模式、滑点、追价策略、保证金模式和杠杆。Pydantic 输入层要求同一任务只有
+一个主腿、所有腿使用同一基础资产和 USDT 计价/结算、非纸面腿必须绑定账户，并拒绝目标净 Delta
+超过任务基础币上限。
+
+`execution_runs`、`execution_orders` 和 `execution_fills` 分别保存每轮执行、每次追价/重试产生的
+真实委托以及交易所成交。客户端订单 ID 全局唯一；同一腿的尝试号和追价号唯一；未确认旧单终态前
+不得创建下一条追价订单。`arbitrage_strategies`、`strategy_legs` 和 `strategy_pnl_events` 保存任务
+完成后的组合、逐腿剩余数量与不可变已实现 PnL。`funding_income` 增加可空的账户和策略腿关联，
+`adl_snapshots` 保存各所原生值及归一化 1–5 级风险。
+
+`exchange_credentials` 取消“交易所+环境唯一”，改为“交易所+环境+标签唯一”，并用部分唯一索引分别
+保证每组最多一个默认交易账户和默认扫描账户；既有凭据迁移为两种默认账户。能力矩阵和账户费率以
+脱敏 JSON 持久化，密文、nonce 和关联数据规则不变。在多账户服务接管前，现有 API 只访问迁移后的
+默认行，禁止手工插入第二账户。
 
 `trade_intents` 在执行前保存幂等键、请求指纹、市场时间、配置哈希、金融数量、状态与乐观锁版本；
 终态失败还保存受数据库约束的预定义 `failure_code`，当前区分行情过期、双腿零成交、单腿补偿归零和

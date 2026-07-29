@@ -168,6 +168,44 @@ def main() -> int:
                     'binance', 'BTC',
                     '2026-07-29T00:59:00Z', '{}'
                 );
+            INSERT INTO trade_intents (
+                id, paired_position_id, idempotency_key, request_fingerprint,
+                exchange, environment, base_asset, action, emergency, status,
+                failure_code, leverage, requested_notional, base_quantity,
+                spot_fee_rate, perp_fee_rate, market_observed_at,
+                config_version, version, created_at, updated_at
+            ) VALUES (
+                '10000000-0000-0000-0000-000000000001',
+                NULL,
+                '10000000-0000-0000-0000-000000000002',
+                repeat('a', 64),
+                'binance', 'paper', 'BTC', 'open', false, 'failed',
+                'market_data_expired', 1, 100, 0.001, 0.001, 0.0005,
+                '2026-07-29T00:00:00Z', repeat('b', 64), 1,
+                '2026-07-29T00:00:00Z', '2026-07-29T00:00:01Z'
+            );
+            INSERT INTO order_legs (
+                id, trade_intent_id, leg, market, symbol, side,
+                client_order_id, exchange_order_id, status, failure_code,
+                quantity, base_multiplier, limit_price, filled_quantity,
+                average_price, reduce_only, created_at, updated_at
+            ) VALUES
+                (
+                    '20000000-0000-0000-0000-000000000001',
+                    '10000000-0000-0000-0000-000000000001',
+                    'spot', 'spot', 'BTCUSDT', 'buy',
+                    'acceptance-legacy-spot', NULL, 'failed', NULL,
+                    0.001, 1, 100000, 0, NULL, false,
+                    '2026-07-29T00:00:00Z', '2026-07-29T00:00:01Z'
+                ),
+                (
+                    '20000000-0000-0000-0000-000000000002',
+                    '10000000-0000-0000-0000-000000000001',
+                    'perp', 'perp', 'BTCUSDT', 'sell',
+                    'acceptance-legacy-perp', NULL, 'failed', NULL,
+                    0.001, 1, 100000, 0, NULL, false,
+                    '2026-07-29T00:00:00Z', '2026-07-29T00:00:01Z'
+                );
             """,
         )
         docker(
@@ -212,7 +250,7 @@ def main() -> int:
             "SELECT version_num FROM alembic_version;",
             capture=True,
         ).stdout.strip()
-        if revision != "20260729_0033":
+        if revision != "20260729_0034":
             raise RuntimeError(f"unexpected Alembic revision: {revision}")
         migrated_cache = docker(
             "exec",
@@ -232,13 +270,17 @@ def main() -> int:
                     FROM latest_opportunities
                     WHERE exchange = 'binance'
                 ),
-                (SELECT count(*) FROM opportunity_snapshots);
+                (SELECT count(*) FROM opportunity_snapshots),
+                (SELECT count(*) FROM execution_tasks),
+                (SELECT count(*) FROM execution_task_legs),
+                (SELECT count(*) FROM execution_orders);
             """,
             capture=True,
         ).stdout.strip()
-        if migrated_cache != "1|2|1":
+        if migrated_cache != "1|2|1|1|2|2":
             raise RuntimeError(
-                f"unexpected bounded-cache migration result: {migrated_cache}"
+                "unexpected bounded-cache or v2 history migration result: "
+                f"{migrated_cache}"
             )
         docker(
             "exec",

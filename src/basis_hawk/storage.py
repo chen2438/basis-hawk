@@ -220,9 +220,36 @@ class ExchangeCredentialRow(Base):
     ciphertext: Mapped[str] = mapped_column(Text)
     nonce: Mapped[str] = mapped_column(String(80))
     key_version: Mapped[int] = mapped_column(Integer, default=1)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    scanner_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    capabilities_payload: Mapped[str] = mapped_column(Text, default="{}")
+    fee_payload: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    __table_args__ = (UniqueConstraint("exchange", "environment", name="uq_exchange_credential"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "exchange",
+            "environment",
+            "label",
+            name="uq_exchange_credential_label",
+        ),
+        Index(
+            "uq_exchange_credential_default",
+            "exchange",
+            "environment",
+            unique=True,
+            postgresql_where=text("is_default"),
+            sqlite_where=text("is_default = 1"),
+        ),
+        Index(
+            "uq_exchange_credential_scanner_default",
+            "exchange",
+            "environment",
+            unique=True,
+            postgresql_where=text("scanner_default"),
+            sqlite_where=text("scanner_default = 1"),
+        ),
+    )
 
 
 class AuditEventRow(Base):
@@ -863,6 +890,16 @@ class PnlRealizationRow(Base):
 class FundingIncomeRow(Base):
     __tablename__ = "funding_income"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("exchange_credentials.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=True,
+    )
+    strategy_leg_id: Mapped[str | None] = mapped_column(
+        ForeignKey("strategy_legs.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
     exchange_record_id: Mapped[str] = mapped_column(String(120))
     exchange: Mapped[str] = mapped_column(String(20))
     environment: Mapped[str] = mapped_column(String(20))
@@ -896,6 +933,460 @@ class FundingIncomeRow(Base):
             "exchange",
             "environment",
             "occurred_at",
+        ),
+    )
+
+
+class ExecutionTaskRow(Base):
+    __tablename__ = "execution_tasks"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(36), unique=True)
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(160))
+    display_symbol: Mapped[str] = mapped_column(String(100))
+    environment: Mapped[str] = mapped_column(String(20), index=True)
+    base_asset: Mapped[str] = mapped_column(String(40), index=True)
+    quantity_mode: Mapped[str] = mapped_column(String(20))
+    source_opportunity_id: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+    create_strategy: Mapped[bool] = mapped_column(Boolean, default=True)
+    hedge_trigger: Mapped[str] = mapped_column(String(30))
+    hedge_threshold: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    maximum_base_exposure: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    maximum_notional_exposure_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    maximum_retries: Mapped[int] = mapped_column(Integer, default=3)
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    preflight_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preflight_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_by: Mapped[str] = mapped_column(String(100))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        CheckConstraint(
+            "environment IN ('paper', 'sandbox', 'live')",
+            name="ck_execution_task_environment",
+        ),
+        CheckConstraint(
+            "quantity_mode IN ('base', 'usdt')",
+            name="ck_execution_task_quantity_mode",
+        ),
+        CheckConstraint(
+            "hedge_trigger IN ('realtime', 'cumulative_percent')",
+            name="ck_execution_task_hedge_trigger",
+        ),
+        CheckConstraint(
+            "(hedge_trigger = 'realtime' AND hedge_threshold IS NULL) OR "
+            "(hedge_trigger = 'cumulative_percent' AND "
+            "hedge_threshold > 0 AND hedge_threshold <= 1)",
+            name="ck_execution_task_hedge_threshold",
+        ),
+        CheckConstraint(
+            "maximum_base_exposure > 0",
+            name="ck_execution_task_base_exposure_positive",
+        ),
+        CheckConstraint(
+            "maximum_notional_exposure_usdt > 0",
+            name="ck_execution_task_notional_exposure_positive",
+        ),
+        CheckConstraint(
+            "maximum_retries >= 0 AND maximum_retries <= 20",
+            name="ck_execution_task_retries_range",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_execution_task_version_positive",
+        ),
+    )
+
+
+class ExecutionTaskLegRow(Base):
+    __tablename__ = "execution_task_legs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        index=True,
+    )
+    account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("exchange_credentials.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String(20))
+    market_type: Mapped[str] = mapped_column(String(20))
+    side: Mapped[str] = mapped_column(String(10))
+    base_asset: Mapped[str] = mapped_column(String(40))
+    quote_asset: Mapped[str] = mapped_column(String(20), default="USDT")
+    symbol: Mapped[str] = mapped_column(String(100))
+    target_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    resolved_base_quantity: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    signed_base_ratio: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    per_order_quantity: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        default=Decimal("0"),
+    )
+    order_mode: Mapped[str] = mapped_column(String(30))
+    maximum_slippage: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    maker_book_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    maker_maximum_chases: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    maker_fallback_mode: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+    )
+    margin_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    leverage: Mapped[int] = mapped_column(Integer, default=1)
+    reduce_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint(
+            "task_id",
+            "ordinal",
+            name="uq_execution_task_leg_ordinal",
+        ),
+        CheckConstraint(
+            "ordinal >= 0 AND ordinal < 64",
+            name="ck_execution_task_leg_ordinal_range",
+        ),
+        CheckConstraint(
+            "role IN ('anchor', 'hedge')",
+            name="ck_execution_task_leg_role",
+        ),
+        CheckConstraint(
+            "market_type IN ('spot', 'perpetual')",
+            name="ck_execution_task_leg_market",
+        ),
+        CheckConstraint(
+            "side IN ('buy', 'sell')",
+            name="ck_execution_task_leg_side",
+        ),
+        CheckConstraint(
+            "quote_asset = 'USDT'",
+            name="ck_execution_task_leg_usdt_only",
+        ),
+        CheckConstraint(
+            "target_quantity > 0",
+            name="ck_execution_task_leg_target_positive",
+        ),
+        CheckConstraint(
+            "per_order_quantity >= 0 AND per_order_quantity <= target_quantity",
+            name="ck_execution_task_leg_child_quantity",
+        ),
+        CheckConstraint(
+            "order_mode IN ('maker', 'protected_ioc', 'market')",
+            name="ck_execution_task_leg_order_mode",
+        ),
+        CheckConstraint(
+            "maximum_slippage > 0 AND maximum_slippage <= 0.25",
+            name="ck_execution_task_leg_slippage",
+        ),
+        CheckConstraint(
+            "(order_mode = 'maker' AND maker_book_level BETWEEN 1 AND 20 "
+            "AND maker_maximum_chases BETWEEN 0 AND 200) OR "
+            "(order_mode <> 'maker' AND maker_book_level IS NULL "
+            "AND maker_maximum_chases IS NULL AND maker_fallback_mode IS NULL)",
+            name="ck_execution_task_leg_maker_policy",
+        ),
+        CheckConstraint(
+            "maker_fallback_mode IS NULL OR "
+            "maker_fallback_mode IN ('protected_ioc', 'market')",
+            name="ck_execution_task_leg_maker_fallback",
+        ),
+        CheckConstraint(
+            "(market_type = 'spot' AND margin_mode IS NULL AND leverage = 1 "
+            "AND reduce_only = false) OR "
+            "(market_type = 'perpetual' AND "
+            "margin_mode IN ('isolated', 'cross') AND leverage BETWEEN 1 AND 10)",
+            name="ck_execution_task_leg_margin",
+        ),
+    )
+
+
+class ExecutionRunRow(Base):
+    __tablename__ = "execution_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_tasks.id", ondelete="CASCADE"),
+        index=True,
+    )
+    run_number: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    worker_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("task_id", "run_number", name="uq_execution_run_number"),
+        CheckConstraint(
+            "run_number >= 1",
+            name="ck_execution_run_number_positive",
+        ),
+    )
+
+
+class ExecutionOrderRow(Base):
+    __tablename__ = "execution_orders"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_runs.id", ondelete="CASCADE"),
+        index=True,
+    )
+    task_leg_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_task_legs.id", ondelete="CASCADE"),
+        index=True,
+    )
+    parent_order_id: Mapped[str | None] = mapped_column(
+        ForeignKey("execution_orders.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    chase_number: Mapped[int] = mapped_column(Integer, default=0)
+    client_order_id: Mapped[str] = mapped_column(String(100), unique=True)
+    exchange_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    order_mode: Mapped[str] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    base_multiplier: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        default=Decimal("1"),
+    )
+    limit_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    filled_quantity: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        default=Decimal("0"),
+    )
+    average_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    terminal_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint(
+            "task_leg_id",
+            "attempt_number",
+            "chase_number",
+            name="uq_execution_order_attempt_chase",
+        ),
+        CheckConstraint(
+            "attempt_number >= 1 AND chase_number >= 0",
+            name="ck_execution_order_attempt",
+        ),
+        CheckConstraint(
+            "quantity > 0 AND base_multiplier > 0",
+            name="ck_execution_order_quantity",
+        ),
+        CheckConstraint(
+            "filled_quantity >= 0 AND filled_quantity <= quantity",
+            name="ck_execution_order_filled_quantity",
+        ),
+    )
+
+
+class ExecutionFillRow(Base):
+    __tablename__ = "execution_fills"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    execution_order_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_orders.id", ondelete="CASCADE"),
+        index=True,
+    )
+    exchange_trade_id: Mapped[str] = mapped_column(String(120))
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    fee_amount: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    fee_asset: Mapped[str] = mapped_column(String(40))
+    liquidity: Mapped[str] = mapped_column(String(20))
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_order_id",
+            "exchange_trade_id",
+            name="uq_execution_fill_remote_trade",
+        ),
+        CheckConstraint(
+            "quantity > 0 AND price > 0",
+            name="ck_execution_fill_quantity_price",
+        ),
+    )
+
+
+class ArbitrageStrategyRow(Base):
+    __tablename__ = "arbitrage_strategies"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    environment: Mapped[str] = mapped_column(String(20), index=True)
+    base_asset: Mapped[str] = mapped_column(String(40), index=True)
+    opening_task_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_tasks.id", ondelete="RESTRICT"),
+        unique=True,
+    )
+    closing_task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("execution_tasks.id", ondelete="RESTRICT"),
+        unique=True,
+        nullable=True,
+    )
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    realized_pnl_usdt: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        default=Decimal("0"),
+    )
+    funding_income_usdt: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        default=Decimal("0"),
+    )
+    fees_usdt: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        default=Decimal("0"),
+    )
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class StrategyLegRow(Base):
+    __tablename__ = "strategy_legs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    strategy_id: Mapped[str] = mapped_column(
+        ForeignKey("arbitrage_strategies.id", ondelete="CASCADE"),
+        index=True,
+    )
+    opening_task_leg_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_task_legs.id", ondelete="RESTRICT"),
+    )
+    account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("exchange_credentials.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    market_type: Mapped[str] = mapped_column(String(20))
+    side: Mapped[str] = mapped_column(String(10))
+    symbol: Mapped[str] = mapped_column(String(100))
+    initial_base_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    remaining_base_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    exit_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18),
+        nullable=True,
+    )
+    fees_usdt: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        default=Decimal("0"),
+    )
+    realized_pnl_usdt: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        default=Decimal("0"),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("strategy_id", "ordinal", name="uq_strategy_leg_ordinal"),
+        CheckConstraint(
+            "initial_base_quantity > 0 AND remaining_base_quantity >= 0 "
+            "AND remaining_base_quantity <= initial_base_quantity",
+            name="ck_strategy_leg_quantity",
+        ),
+    )
+
+
+class StrategyPnlEventRow(Base):
+    __tablename__ = "strategy_pnl_events"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    strategy_id: Mapped[str] = mapped_column(
+        ForeignKey("arbitrage_strategies.id", ondelete="CASCADE"),
+        index=True,
+    )
+    closing_task_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_tasks.id", ondelete="RESTRICT"),
+        unique=True,
+    )
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    gross_pnl_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    opening_fee_allocated_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    closing_fees_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    net_pnl_usdt: Mapped[Decimal] = mapped_column(Numeric(38, 18))
+    realized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "quantity >= 0 AND opening_fee_allocated_usdt >= 0 "
+            "AND closing_fees_usdt >= 0",
+            name="ck_strategy_pnl_event_nonnegative",
+        ),
+    )
+
+
+class AdlSnapshotRow(Base):
+    __tablename__ = "adl_snapshots"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    account_id: Mapped[str] = mapped_column(
+        ForeignKey("exchange_credentials.id", ondelete="CASCADE"),
+        index=True,
+    )
+    symbol: Mapped[str] = mapped_column(String(100))
+    position_side: Mapped[str] = mapped_column(String(20))
+    normalized_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    native_value: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    event_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+    __table_args__ = (
+        Index(
+            "ix_adl_snapshot_account_symbol",
+            "account_id",
+            "symbol",
+            "observed_at",
+        ),
+        CheckConstraint(
+            "normalized_level IS NULL OR "
+            "(normalized_level >= 1 AND normalized_level <= 5)",
+            name="ck_adl_snapshot_level",
         ),
     )
 
