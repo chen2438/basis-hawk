@@ -26,6 +26,10 @@ from basis_hawk.multi_leg import (
     ExecutionEnvironment,
     ExecutionTaskSpec,
 )
+from basis_hawk.order_books import (
+    OrderBookUnavailable,
+    RestOrderBookProvider,
+)
 from basis_hawk.storage import (
     Database,
     ExecutionTaskLegRow,
@@ -161,10 +165,12 @@ class ExecutionTaskService:
         database: Database,
         credentials: CredentialService,
         account_client_factory: AccountClientFactory,
+        order_books: RestOrderBookProvider | None = None,
     ) -> None:
         self.database = database
         self.credentials = credentials
         self.account_client_factory = account_client_factory
+        self.order_books = order_books or RestOrderBookProvider()
 
     async def create(
         self,
@@ -505,10 +511,41 @@ class ExecutionTaskService:
                     ),
                 }
             )
+        maker_books: list[dict[str, object]] = []
+        for leg in legs:
+            if leg.order_mode != "maker":
+                continue
+            level = leg.maker_book_level or 1
+            try:
+                book = await self.order_books.fetch(
+                    exchange=Exchange(leg.exchange),
+                    environment=ExchangeEnvironment(row.environment),
+                    market="spot" if leg.market_type == "spot" else "perp",
+                    symbol=leg.symbol,
+                    level=level,
+                )
+                price = book.maker_price(side=leg.side, level=level)
+            except (OrderBookUnavailable, ValueError) as exc:
+                raise ExecutionTaskValidationError(
+                    f"{leg.exchange} {leg.symbol} maker depth is unavailable"
+                ) from exc
+            maker_books.append(
+                {
+                    "task_leg_id": leg.id,
+                    "exchange": leg.exchange,
+                    "market": leg.market_type,
+                    "symbol": leg.symbol,
+                    "side": leg.side,
+                    "level": level,
+                    "price": format(price, "f"),
+                    "observed_at": book.observed_at.isoformat(),
+                }
+            )
         return {
             "checked_at": datetime.now(UTC).isoformat(),
             "paper": False,
             "accounts": account_payloads,
+            "maker_books": maker_books,
         }
 
 

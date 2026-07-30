@@ -116,7 +116,8 @@ Demo 模式入口。
   追价父子关系和逐笔成交；每条订单同时返回实际 `side`、`reduce_only` 与
   `primary/compensation` 用途，用于区分原始腿和失败后的反向保护，并支持重启恢复审计；
 - `POST /api/v2/execution-tasks/{task_id}/preflight` 逐个账户读取余额快照与完整订单/仓位状态，永续
-  账户还必须能确定持仓模式。结果有效 60 秒，响应和审计均不包含 Key、Secret 或交易所原始错误；
+  账户还必须能确定持仓模式，并逐腿验证 Maker 真实第 N 档深度。结果有效 60 秒，仅保存档位价格、
+  方向和观测时间等脱敏摘要，响应和审计均不包含 Key、Secret 或交易所原始错误；
 - `POST /api/v2/execution-tasks/{task_id}/start` 要求 `confirmed=true` 和最新 `expected_version`。
   真实/沙盒任务还要求全局执行状态为 ready；校验和 `preflight_ready → queued` 在同一锁定事务完成；
 - `POST /api/v2/execution-tasks/{task_id}/cancel` 只允许取消 draft、preflight_ready 或 queued，

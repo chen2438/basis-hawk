@@ -35,6 +35,7 @@ from basis_hawk.multi_leg_live_execution import (
     ResolvedLegMarket,
     _maker_is_outside_book_level,
 )
+from basis_hawk.order_books import OrderBookSnapshot
 from basis_hawk.storage import Database, ExecutionOrderRow
 
 
@@ -81,6 +82,28 @@ def _live_spec(account_id: str) -> ExecutionTaskSpec:
             ],
         }
     )
+
+
+class FakeOrderBooks:
+    async def fetch(
+        self,
+        *,
+        exchange,
+        environment,
+        market,
+        symbol,
+        level,
+    ) -> OrderBookSnapshot:
+        assert exchange == Exchange.BINANCE
+        assert environment == ExchangeEnvironment.LIVE
+        assert market in {"spot", "perp"}
+        assert symbol == "BTCUSDT"
+        assert level == 3
+        return OrderBookSnapshot(
+            bids=(Decimal("50000"), Decimal("49999"), Decimal("49998")),
+            asks=(Decimal("50001"), Decimal("50002"), Decimal("50003")),
+            observed_at=datetime.now(UTC),
+        )
 
 
 async def test_spot_sell_is_blocked_when_owned_inventory_is_insufficient() -> None:
@@ -301,13 +324,20 @@ async def test_live_executor_confirms_cancel_before_maker_chase_and_hedges() -> 
         assert environment == ExchangeEnvironment.LIVE
         return FakeClient()
 
-    tasks = ExecutionTaskService(database, credentials, client_factory)
+    tasks = ExecutionTaskService(
+        database,
+        credentials,
+        client_factory,
+        order_books=FakeOrderBooks(),
+    )
     task, _ = await tasks.create(
         spec=_live_spec(account.id),
         idempotency_key=uuid4(),
         actor="admin",
     )
     ready = await tasks.preflight(task_id=task.id, actor="admin")
+    assert ready.preflight is not None
+    assert ready.preflight["maker_books"][0]["price"] == "49998"
     await tasks.start(
         task_id=task.id,
         expected_version=ready.version,
