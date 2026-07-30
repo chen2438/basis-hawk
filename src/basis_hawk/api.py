@@ -52,6 +52,7 @@ from basis_hawk.models import Exchange, Quality, ScannerSettings
 from basis_hawk.multi_leg import ExecutionTaskSpec
 from basis_hawk.notifications import TelegramCommandService
 from basis_hawk.opportunities import OpportunityService, OpportunityType
+from basis_hawk.order_books import RestOrderBookProvider
 from basis_hawk.portfolio import PortfolioService
 from basis_hawk.service import (
     SandboxMarketService,
@@ -308,6 +309,7 @@ def create_app(
         | None
     ) = None,
     sandbox_market_service: SandboxMarketService | None = None,
+    order_book_provider: RestOrderBookProvider | None = None,
 ) -> FastAPI:
     config = get_config()
     scanner = service or ScannerService(
@@ -349,6 +351,7 @@ def create_app(
             scanner.database,
             credential_service,
             resolved_account_client_factory,
+            order_books=order_book_provider,
         )
         if credential_service is not None
         else None

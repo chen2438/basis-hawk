@@ -18,6 +18,7 @@ from basis_hawk.credentials import (
 )
 from basis_hawk.crypto import SecretCipher
 from basis_hawk.models import Exchange
+from basis_hawk.order_books import OrderBookSnapshot
 from basis_hawk.service import ScannerService
 from basis_hawk.storage import Database
 
@@ -239,12 +240,34 @@ async def test_live_task_preflight_is_account_scoped_and_sanitized() -> None:
         assert environment == ExchangeEnvironment.LIVE
         return FakeAccountClient()
 
+    class FakeOrderBooks:
+        async def fetch(
+            self,
+            *,
+            exchange,
+            environment,
+            market,
+            symbol,
+            level,
+        ) -> OrderBookSnapshot:
+            assert exchange == Exchange.BINANCE
+            assert environment == ExchangeEnvironment.LIVE
+            assert market == "spot"
+            assert symbol == "BTCUSDT"
+            assert level == 3
+            return OrderBookSnapshot(
+                bids=(Decimal("100"), Decimal("99"), Decimal("98")),
+                asks=(Decimal("101"), Decimal("102"), Decimal("103")),
+                observed_at=datetime.now(UTC),
+            )
+
     app = create_app(
         scanner,
         manage_lifecycle=False,
         auth_required=False,
         credential_service=credentials,
         account_client_factory=account_factory,
+        order_book_provider=FakeOrderBooks(),
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -289,6 +312,7 @@ async def test_live_task_preflight_is_account_scoped_and_sanitized() -> None:
         payload = preflight.json()["task"]["preflight"]
         assert payload["accounts"][0]["account_id"] == account.id
         assert payload["accounts"][0]["position_mode"] == "one_way"
+        assert payload["maker_books"][0]["price"] == "98"
         assert "private-api-key" not in preflight.text
         assert "private-api-secret" not in preflight.text
 
