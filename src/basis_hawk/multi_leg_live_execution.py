@@ -23,6 +23,10 @@ from basis_hawk.credentials import (
     ExchangeSecrets,
 )
 from basis_hawk.models import Exchange, Quality
+from basis_hawk.order_books import (
+    OrderBookUnavailable,
+    RestOrderBookProvider,
+)
 from basis_hawk.storage import (
     Database,
     ExecutionOrderRow,
@@ -74,6 +78,7 @@ class LiveQuoteProvider(Protocol):
         *,
         base_quantity: Decimal,
         mode: str,
+        environment: str,
         side: str | None = None,
     ) -> LiveOrderQuote: ...
 
@@ -93,9 +98,11 @@ class LatestOpportunityLiveQuoteProvider:
         database: Database,
         *,
         maximum_age: timedelta = timedelta(seconds=15),
+        order_books: RestOrderBookProvider | None = None,
     ) -> None:
         self.database = database
         self.maximum_age = maximum_age
+        self.order_books = order_books or RestOrderBookProvider()
 
     async def resolve_leg(
         self,
@@ -159,9 +166,14 @@ class LatestOpportunityLiveQuoteProvider:
         *,
         base_quantity: Decimal,
         mode: str,
+        environment: str,
         side: str | None = None,
     ) -> LiveOrderQuote:
-        opportunity, pair = await self._market(leg)
+        if mode == "maker":
+            opportunity = None
+            pair = await self._rules(leg)
+        else:
+            opportunity, pair = await self._market(leg)
         multiplier = (
             Decimal("1") if leg.market_type == "spot" else pair.perp_contract_size
         )
@@ -181,36 +193,46 @@ class LatestOpportunityLiveQuoteProvider:
             if leg.market_type == "spot"
             else pair.perp_price_increment
         )
-        bid = (
-            opportunity.spot_bid if leg.market_type == "spot" else opportunity.perp_bid
-        )
-        ask = (
-            opportunity.spot_ask if leg.market_type == "spot" else opportunity.perp_ask
-        )
         order_side = side or leg.side
         if mode == "market":
             limit_price = None
+            observed_at = opportunity.observed_at
         elif mode == "maker":
             level = leg.maker_book_level or 1
-            limit_price = (
-                bid - price_increment * (level - 1)
-                if order_side == "buy"
-                else ask + price_increment * (level - 1)
+            book = await self.order_books.fetch(
+                exchange=Exchange(leg.exchange),
+                environment=ExchangeEnvironment(environment),
+                market="spot" if leg.market_type == "spot" else "perp",
+                symbol=leg.symbol,
+                level=level,
             )
+            limit_price = book.maker_price(side=order_side, level=level)
+            observed_at = book.observed_at
         else:
+            bid = (
+                opportunity.spot_bid
+                if leg.market_type == "spot"
+                else opportunity.perp_bid
+            )
+            ask = (
+                opportunity.spot_ask
+                if leg.market_type == "spot"
+                else opportunity.perp_ask
+            )
             limit_price = protective_limit_price(
                 reference_price=ask if order_side == "buy" else bid,
                 maximum_slippage=leg.maximum_slippage,
                 side=order_side,
                 price_increment=price_increment,
             )
+            observed_at = opportunity.observed_at
         if limit_price is not None and limit_price <= 0:
             raise ValueError("resolved order price must be positive")
         return LiveOrderQuote(
             native_quantity=native_quantity,
             base_multiplier=multiplier,
             limit_price=limit_price,
-            observed_at=opportunity.observed_at,
+            observed_at=observed_at,
         )
 
     async def _market(self, leg: ExecutionTaskLegRow):
@@ -234,6 +256,10 @@ class LatestOpportunityLiveQuoteProvider:
             or now - observed_at > self.maximum_age
         ):
             raise ValueError("live quote is stale")
+        pair = await self._rules(leg)
+        return opportunity, pair
+
+    async def _rules(self, leg: ExecutionTaskLegRow):
         pairs = await self.database.instrument_pairs(exchanges={leg.exchange})
         pair = next(
             (
@@ -250,7 +276,7 @@ class LatestOpportunityLiveQuoteProvider:
         )
         if leg.symbol != expected_symbol:
             raise ValueError("task-leg symbol does not match instrument rules")
-        return opportunity, pair
+        return pair
 
 
 AccountClientFactory = Callable[
@@ -540,6 +566,7 @@ class MultiLegLiveExecutionService:
             leg,
             base_quantity=chunk,
             mode=mode,
+            environment=task.environment,
         )
         token = uuid.uuid4().hex
         client_order_id = _client_order_id(Exchange(leg.exchange), token)
@@ -598,6 +625,7 @@ class MultiLegLiveExecutionService:
                 leg,
                 base_quantity=remaining,
                 mode="protected_ioc",
+                environment=task.environment,
                 side=side,
             )
             token = uuid.uuid4().hex
@@ -769,6 +797,24 @@ class MultiLegLiveExecutionService:
                 and observed.status in {"acknowledged", "partially_filled"}
                 and order.status != "cancel_pending"
             ):
+                try:
+                    latest_quote = await self.quote_provider.quote_order(
+                        leg,
+                        base_quantity=(
+                            observed.quantity - observed.filled_quantity
+                        )
+                        * observed.base_multiplier,
+                        mode="maker",
+                        environment=task.environment,
+                    )
+                except OrderBookUnavailable:
+                    return
+                if not _maker_is_outside_book_level(
+                    side=observed.side,
+                    order_price=observed.limit_price,
+                    book_level_price=latest_quote.limit_price,
+                ):
+                    return
                 await client.cancel_order(
                     market="spot" if leg.market_type == "spot" else "perp",
                     symbol=leg.symbol,
@@ -854,6 +900,21 @@ def _target(leg: ExecutionTaskLegRow) -> Decimal:
     if leg.resolved_base_quantity is None:
         raise ValueError("task-leg base quantity is unresolved")
     return leg.resolved_base_quantity
+
+
+def _maker_is_outside_book_level(
+    *,
+    side: str,
+    order_price: Decimal | None,
+    book_level_price: Decimal | None,
+) -> bool:
+    if order_price is None or book_level_price is None:
+        raise ValueError("maker price comparison requires two limit prices")
+    return (
+        order_price < book_level_price
+        if side == "buy"
+        else order_price > book_level_price
+    )
 
 
 def _position_side(

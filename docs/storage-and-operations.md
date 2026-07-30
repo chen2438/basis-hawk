@@ -350,6 +350,9 @@ completed；报价或规则失败则用固定 `paper_quote_unavailable` 终结 r
 锁定事务看到全局 execution ready，已有敞口的活动任务即使全局暂停仍可继续查单和补偿。每条腿同时最多
 一个 created/submitted/acknowledged/partially_filled/cancel_pending/unknown 订单。追价子订单必须
 引用同 run、同腿且已终态的 parent，并复用 attempt、递增 chase；普通重试递增 attempt、chase 归零。
+Maker 订单的限价来自对应环境公开订单簿的真实第 N 档；worker 只有确认旧价格已落后于该档位才进入
+cancel_pending，深度读取失败时不改变远端订单或本地状态。这样盘口故障不会把仍有效的挂单误判成
+需要撤销，也不会在旧单终态确认前并存第二张追价单。
 远端成交按“本地订单+交易所 trade ID”幂等，数量不得倒退或超过订单。任务失败前重新读当前 run 的
 累计成交；未决或 unknown 订单直接把 task/run 标为 manual_review 并暂停。只有全部订单终态且存在
 已成交主腿时才原子暂停全局执行并进入 compensating，按每条腿的累计主成交减累计补偿成交创建相反

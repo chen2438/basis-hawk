@@ -33,6 +33,7 @@ from basis_hawk.multi_leg_live_execution import (
     LiveOrderQuote,
     MultiLegLiveExecutionService,
     ResolvedLegMarket,
+    _maker_is_outside_book_level,
 )
 from basis_hawk.storage import Database, ExecutionOrderRow
 
@@ -312,6 +313,8 @@ async def test_live_executor_confirms_cancel_before_maker_chase_and_hedges() -> 
         expected_version=ready.version,
         actor="admin",
     )
+    maker_quote_count = 0
+
     class Quotes:
         async def resolve_leg(self, leg, quantity_mode):
             return ResolvedLegMarket(
@@ -321,11 +324,29 @@ async def test_live_executor_confirms_cancel_before_maker_chase_and_hedges() -> 
                 observed_at=datetime.now(UTC),
             )
 
-        async def quote_order(self, leg, *, base_quantity, mode):
+        async def quote_order(
+            self,
+            leg,
+            *,
+            base_quantity,
+            mode,
+            environment,
+            side=None,
+        ):
+            nonlocal maker_quote_count
+            assert environment == "live"
+            if mode == "maker":
+                maker_quote_count += 1
             return LiveOrderQuote(
                 native_quantity=base_quantity,
                 base_multiplier=Decimal("1"),
-                limit_price=(None if mode == "market" else Decimal("50000")),
+                limit_price=(
+                    None
+                    if mode == "market"
+                    else Decimal("50001")
+                    if mode == "maker" and maker_quote_count > 1
+                    else Decimal("50000")
+                ),
                 observed_at=datetime.now(UTC),
             )
 
@@ -544,9 +565,11 @@ async def test_live_executor_compensates_filled_leg_after_hedge_failure() -> Non
             *,
             base_quantity,
             mode,
+            environment,
             side=None,
         ):
             nonlocal hedge_quote_failed
+            assert environment == "live"
             if leg.role == "hedge" and side is None:
                 hedge_quote_failed = True
                 raise ValueError("simulated hedge quote failure")
@@ -587,3 +610,26 @@ async def test_live_executor_compensates_filled_leg_after_hedge_failure() -> Non
     assert control is not None
     assert control.state == "paused"
     await database.close()
+
+
+def test_maker_chase_only_when_price_falls_outside_configured_level() -> None:
+    assert _maker_is_outside_book_level(
+        side="buy",
+        order_price=Decimal("99"),
+        book_level_price=Decimal("100"),
+    )
+    assert not _maker_is_outside_book_level(
+        side="buy",
+        order_price=Decimal("101"),
+        book_level_price=Decimal("100"),
+    )
+    assert _maker_is_outside_book_level(
+        side="sell",
+        order_price=Decimal("101"),
+        book_level_price=Decimal("100"),
+    )
+    assert not _maker_is_outside_book_level(
+        side="sell",
+        order_price=Decimal("99"),
+        book_level_price=Decimal("100"),
+    )
