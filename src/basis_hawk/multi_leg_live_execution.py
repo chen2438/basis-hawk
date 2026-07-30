@@ -846,17 +846,45 @@ class MultiLegLiveExecutionService:
             if snapshot.position_mode == PositionMode.UNKNOWN:
                 raise ValueError("live execution position mode is unknown")
             requested_margin = PerpMarginMode(leg.margin_mode or "isolated")
-            if snapshot.perp_margin_mode != requested_margin:
+            exchange = Exchange(leg.exchange)
+            symbol_scoped_binance_cross = (
+                exchange == Exchange.BINANCE
+                and requested_margin == PerpMarginMode.CROSS
+            )
+            if (
+                snapshot.perp_margin_mode != requested_margin
+                and not symbol_scoped_binance_cross
+            ):
                 raise ValueError("live execution margin mode changed after preflight")
-            if requested_margin == PerpMarginMode.ISOLATED:
-                await client.configure_perp(
+            if (
+                requested_margin == PerpMarginMode.CROSS
+                and exchange not in {Exchange.BINANCE, Exchange.GATE}
+            ):
+                raise ValueError(
+                    f"{exchange.value} cross-margin leverage confirmation "
+                    "is not implemented"
+                )
+            if symbol_scoped_binance_cross:
+                configuration = await client.configure_perp(
+                    symbol=leg.symbol,
+                    leverage=leg.leverage,
+                    position_mode=snapshot.position_mode,
+                    margin_mode=requested_margin,
+                )
+            else:
+                configuration = await client.configure_perp(
                     symbol=leg.symbol,
                     leverage=leg.leverage,
                     position_mode=snapshot.position_mode,
                 )
-            else:
+            if (
+                configuration.isolated
+                != (requested_margin == PerpMarginMode.ISOLATED)
+                or configuration.leverage != leg.leverage
+                or configuration.position_mode != snapshot.position_mode
+            ):
                 raise ValueError(
-                    "cross-margin leverage confirmation is not implemented"
+                    "live execution perpetual configuration was not confirmed"
                 )
         else:
             requested_margin = PerpMarginMode.ISOLATED

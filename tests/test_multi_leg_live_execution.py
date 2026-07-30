@@ -160,6 +160,85 @@ async def test_spot_sell_is_blocked_when_owned_inventory_is_insufficient() -> No
     await database.close()
 
 
+async def test_binance_cross_margin_is_configured_and_passed_to_order() -> None:
+    submitted: list[tuple[str, str | None]] = []
+
+    class FakeDatabase:
+        async def mark_execution_order_submitted(
+            self,
+            *,
+            order_id,
+            exchange_order_id,
+        ) -> None:
+            submitted.append((order_id, exchange_order_id))
+
+    class FakeClient:
+        async def snapshot(self) -> AccountSnapshot:
+            return AccountSnapshot(
+                exchange=Exchange.BINANCE,
+                environment=ExchangeEnvironment.LIVE,
+                observed_at=datetime.now(UTC),
+                spot_usdt_available=Decimal("1000"),
+                perp_usdt_available=Decimal("1000"),
+                perp_usdt_equity=Decimal("1000"),
+                shared_balance=False,
+                account_mode="spot+perp",
+                position_mode=PositionMode.ONE_WAY,
+                trade_permission=True,
+            )
+
+        async def configure_perp(
+            self,
+            *,
+            symbol,
+            leverage,
+            position_mode,
+            margin_mode,
+        ) -> PerpConfiguration:
+            assert margin_mode == PerpMarginMode.CROSS
+            return PerpConfiguration(
+                symbol=symbol,
+                leverage=leverage,
+                isolated=False,
+                position_mode=position_mode,
+            )
+
+        async def place_order(self, order) -> OrderSubmission:
+            assert order.margin_mode == PerpMarginMode.CROSS
+            return OrderSubmission(
+                market=order.market,
+                symbol=order.symbol,
+                client_order_id=order.client_order_id,
+                exchange_order_id="remote-cross",
+            )
+
+    executor = MultiLegLiveExecutionService(
+        FakeDatabase(),
+        SimpleNamespace(),
+        account_client_factory=lambda exchange, secrets, environment: FakeClient(),
+    )
+    leg = SimpleNamespace(
+        exchange="binance",
+        market_type="perpetual",
+        margin_mode="cross",
+        leverage=4,
+        symbol="BTCUSDT",
+    )
+    order = SimpleNamespace(
+        id="order-cross",
+        side="sell",
+        quantity=Decimal("0.01"),
+        order_mode="protected_ioc",
+        limit_price=Decimal("50000"),
+        client_order_id="cross-client-id",
+        reduce_only=False,
+    )
+
+    await executor._submit_order(FakeClient(), SimpleNamespace(), leg, order)
+
+    assert submitted == [("order-cross", "remote-cross")]
+
+
 async def test_live_executor_confirms_cancel_before_maker_chase_and_hedges() -> None:
     database = Database("sqlite+aiosqlite:///:memory:")
     await database.initialize()

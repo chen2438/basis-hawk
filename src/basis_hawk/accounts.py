@@ -607,6 +607,7 @@ class PrivateAccountClient(ABC):
         symbol: str,
         leverage: int,
         position_mode: PositionMode,
+        margin_mode: PerpMarginMode = PerpMarginMode.ISOLATED,
     ) -> PerpConfiguration:
         raise UnsupportedTradingError(
             f"{self.exchange.value} perpetual configuration is not implemented"
@@ -1112,20 +1113,38 @@ class BinanceAccountClient(PrivateAccountClient):
         symbol: str,
         leverage: int,
         position_mode: PositionMode,
+        margin_mode: PerpMarginMode = PerpMarginMode.ISOLATED,
     ) -> PerpConfiguration:
         if leverage < 1 or leverage > 10:
             raise ValueError("leverage must be between 1 and 10")
         if position_mode == PositionMode.UNKNOWN:
             raise ValueError("position mode must be known before configuration")
-        orders, positions = await _gather(
+        orders, positions, configurations = await _gather(
             self._get(self.perp, "/fapi/v1/openOrders", symbol=symbol),
             self._get(self.perp, "/fapi/v3/positionRisk", symbol=symbol),
+            self._get(self.perp, "/fapi/v1/symbolConfig", symbol=symbol),
         )
-        isolated = bool(positions) and all(
-            str(item.get("marginType") or "").lower() == "isolated"
-            for item in positions
+        target_margin_type = (
+            "ISOLATED"
+            if margin_mode == PerpMarginMode.ISOLATED
+            else "CROSSED"
         )
-        if not isolated:
+        configuration = next(
+            (
+                item
+                for item in configurations
+                if str(item.get("symbol") or "") == symbol
+            ),
+            None,
+        )
+        if configuration is None:
+            raise PrivateRequestError(
+                "Binance symbol margin configuration was not returned"
+            )
+        configured_margin_type = str(
+            configuration.get("marginType") or ""
+        ).upper()
+        if configured_margin_type != target_margin_type:
             has_position = any(
                 Decimal(str(item.get("positionAmt") or "0")) != 0 for item in positions
             )
@@ -1138,11 +1157,11 @@ class BinanceAccountClient(PrivateAccountClient):
                 "POST",
                 "/fapi/v1/marginType",
                 symbol=symbol,
-                marginType="ISOLATED",
+                marginType=target_margin_type,
             )
             if int(result.get("code") or 0) != 200:
                 raise PrivateRequestError(
-                    "Binance isolated margin configuration failed"
+                    "Binance margin configuration failed"
                 )
         result = await self._signed_request(
             self.perp,
@@ -1155,10 +1174,32 @@ class BinanceAccountClient(PrivateAccountClient):
             raise PrivateRequestError(
                 "Binance leverage configuration was not confirmed"
             )
+        confirmed = await self._get(
+            self.perp,
+            "/fapi/v1/symbolConfig",
+            symbol=symbol,
+        )
+        confirmed_configuration = next(
+            (
+                item
+                for item in confirmed
+                if str(item.get("symbol") or "") == symbol
+            ),
+            None,
+        )
+        if (
+            confirmed_configuration is None
+            or str(confirmed_configuration.get("marginType") or "").upper()
+            != target_margin_type
+            or int(confirmed_configuration.get("leverage") or 0) != leverage
+        ):
+            raise PrivateRequestError(
+                "Binance margin and leverage configuration was not confirmed"
+            )
         return PerpConfiguration(
             symbol=symbol,
             leverage=leverage,
-            isolated=True,
+            isolated=margin_mode == PerpMarginMode.ISOLATED,
             position_mode=position_mode,
         )
 

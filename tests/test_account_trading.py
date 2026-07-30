@@ -16,6 +16,7 @@ from basis_hawk.accounts import (
     LimitIocOrder,
     MexcAccountClient,
     OkxAccountClient,
+    PerpMarginMode,
     PositionMode,
     PrivateRequestError,
     _hmac_base64,
@@ -191,8 +192,11 @@ async def test_binance_one_way_open_and_cancel_use_signed_parameters() -> None:
 
 async def test_binance_configures_isolated_margin_and_bounded_leverage() -> None:
     requests: list[tuple[str, str, dict[str, str]]] = []
+    configured_margin = "CROSSED"
+    configured_leverage = 20
 
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal configured_margin, configured_leverage
         params = (
             {
                 key: values[0]
@@ -215,13 +219,26 @@ async def test_binance_configures_isolated_margin_and_bounded_leverage() -> None
                     }
                 ],
             )
+        if request.url.path.endswith("/symbolConfig"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "symbol": "ORDERUSDT",
+                        "marginType": configured_margin,
+                        "leverage": configured_leverage,
+                    }
+                ],
+            )
         if request.url.path.endswith("/marginType"):
+            configured_margin = params["marginType"]
             return httpx.Response(200, json={"code": 200, "msg": "success"})
+        configured_leverage = int(params["leverage"])
         return httpx.Response(
             200,
             json={
                 "symbol": "ORDERUSDT",
-                "leverage": int(params["leverage"]),
+                "leverage": configured_leverage,
                 "maxNotionalValue": "100000",
             },
         )
@@ -253,17 +270,101 @@ async def test_binance_configures_isolated_margin_and_bounded_leverage() -> None
     assert [item[1] for item in requests] == [
         "/fapi/v1/openOrders",
         "/fapi/v3/positionRisk",
+        "/fapi/v1/symbolConfig",
         "/fapi/v1/marginType",
         "/fapi/v1/leverage",
+        "/fapi/v1/symbolConfig",
     ]
-    assert requests[2][2]["marginType"] == "ISOLATED"
-    assert "signature" in requests[2][2]
+    assert requests[3][2]["marginType"] == "ISOLATED"
+    assert "signature" in requests[3][2]
     with pytest.raises(ValueError, match="between 1 and 10"):
         await client.configure_perp(
             symbol="ORDERUSDT",
             leverage=11,
             position_mode=PositionMode.ONE_WAY,
         )
+    await spot_http.aclose()
+    await perp_http.aclose()
+
+
+async def test_binance_configures_cross_margin_and_confirms_leverage() -> None:
+    requests: list[tuple[str, str, dict[str, str]]] = []
+    configured_margin = "ISOLATED"
+    configured_leverage = 20
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal configured_margin, configured_leverage
+        params = (
+            {
+                key: values[0]
+                for key, values in parse_qs(request.content.decode()).items()
+            }
+            if request.method == "POST"
+            else dict(request.url.params)
+        )
+        requests.append((request.method, request.url.path, params))
+        if request.url.path.endswith("/openOrders"):
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/positionRisk"):
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/symbolConfig"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "symbol": "ORDERUSDT",
+                        "marginType": configured_margin,
+                        "leverage": configured_leverage,
+                    }
+                ],
+            )
+        if request.url.path.endswith("/marginType"):
+            configured_margin = params["marginType"]
+            return httpx.Response(200, json={"code": 200, "msg": "success"})
+        configured_leverage = int(params["leverage"])
+        return httpx.Response(
+            200,
+            json={
+                "symbol": "ORDERUSDT",
+                "leverage": configured_leverage,
+                "maxNotionalValue": "100000",
+            },
+        )
+
+    spot_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://spot.test",
+    )
+    perp_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://perp.test",
+    )
+    client = BinanceAccountClient(
+        SECRETS,
+        ExchangeEnvironment.LIVE,
+        clock_ms=lambda: 1785088000000,
+        spot_client=spot_http,
+        perp_client=perp_http,
+    )
+
+    result = await client.configure_perp(
+        symbol="ORDERUSDT",
+        leverage=4,
+        position_mode=PositionMode.ONE_WAY,
+        margin_mode=PerpMarginMode.CROSS,
+    )
+
+    assert result.isolated is False
+    assert result.leverage == 4
+    assert [item[1] for item in requests] == [
+        "/fapi/v1/openOrders",
+        "/fapi/v3/positionRisk",
+        "/fapi/v1/symbolConfig",
+        "/fapi/v1/marginType",
+        "/fapi/v1/leverage",
+        "/fapi/v1/symbolConfig",
+    ]
+    assert requests[3][2]["marginType"] == "CROSSED"
     await spot_http.aclose()
     await perp_http.aclose()
 
