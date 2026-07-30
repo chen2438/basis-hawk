@@ -571,8 +571,10 @@ async def test_okx_one_way_close_and_cancel_use_ack_receipts() -> None:
 
 async def test_okx_configures_isolated_bounded_leverage_without_exposure() -> None:
     requests: list[tuple[str, str, dict[str, object]]] = []
+    configured_leverage = "1"
 
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal configured_leverage
         raw = (
             json.loads(request.content.decode())
             if request.method == "POST"
@@ -582,7 +584,16 @@ async def test_okx_configures_isolated_bounded_leverage_without_exposure() -> No
         if request.url.path.endswith("/leverage-info"):
             return httpx.Response(
                 200,
-                json={"code": "0", "data": [{"posSide": "short", "lever": "1"}]},
+                json={
+                    "code": "0",
+                    "data": [
+                        {
+                            "posSide": "short",
+                            "lever": configured_leverage,
+                            "mgnMode": "isolated",
+                        }
+                    ],
+                },
             )
         if request.url.path.endswith("/orders-pending"):
             return httpx.Response(200, json={"code": "0", "data": []})
@@ -591,6 +602,7 @@ async def test_okx_configures_isolated_bounded_leverage_without_exposure() -> No
                 200,
                 json={"code": "0", "data": [{"pos": "0"}]},
             )
+        configured_leverage = str(raw["lever"])
         return httpx.Response(
             200,
             json={
@@ -637,6 +649,80 @@ async def test_okx_configures_isolated_bounded_leverage_without_exposure() -> No
             leverage=11,
             position_mode=PositionMode.HEDGE,
         )
+    await http.aclose()
+
+
+async def test_okx_configures_cross_leverage_without_position_side() -> None:
+    requests: list[tuple[str, str, dict[str, object]]] = []
+    configured_leverage = "1"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal configured_leverage
+        raw = (
+            json.loads(request.content.decode())
+            if request.method == "POST"
+            else dict(request.url.params)
+        )
+        requests.append((request.method, request.url.path, raw))
+        if request.url.path.endswith("/leverage-info"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": "0",
+                    "data": [
+                        {
+                            "posSide": "short",
+                            "lever": configured_leverage,
+                            "mgnMode": "cross",
+                        }
+                    ],
+                },
+            )
+        if request.url.path.endswith("/orders-pending"):
+            return httpx.Response(200, json={"code": "0", "data": []})
+        if request.url.path.endswith("/positions"):
+            return httpx.Response(200, json={"code": "0", "data": []})
+        configured_leverage = str(raw["lever"])
+        return httpx.Response(
+            200,
+            json={
+                "code": "0",
+                "data": [
+                    {
+                        "instId": "ORDER-USDT-SWAP",
+                        "lever": configured_leverage,
+                        "mgnMode": "cross",
+                    }
+                ],
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://okx.test",
+    )
+    client = OkxAccountClient(SECRETS, ExchangeEnvironment.LIVE, client=http)
+
+    result = await client.configure_perp(
+        symbol="ORDER-USDT-SWAP",
+        leverage=4,
+        position_mode=PositionMode.HEDGE,
+        margin_mode=PerpMarginMode.CROSS,
+    )
+
+    assert result.isolated is False
+    post = next(item for item in requests if item[0] == "POST")
+    assert post[2] == {
+        "instId": "ORDER-USDT-SWAP",
+        "lever": "4",
+        "mgnMode": "cross",
+    }
+    assert [item[2].get("mgnMode") for item in requests if item[0] == "GET"] == [
+        "cross",
+        None,
+        None,
+        "cross",
+    ]
     await http.aclose()
 
 

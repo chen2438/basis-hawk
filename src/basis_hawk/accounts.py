@@ -1608,6 +1608,7 @@ class OkxAccountClient(PrivateAccountClient):
         symbol: str,
         leverage: int,
         position_mode: PositionMode,
+        margin_mode: PerpMarginMode = PerpMarginMode.ISOLATED,
     ) -> PerpConfiguration:
         if leverage < 1 or leverage > 10:
             raise ValueError("leverage must be between 1 and 10")
@@ -1616,7 +1617,7 @@ class OkxAccountClient(PrivateAccountClient):
         leverage_info = await self._get(
             "/api/v5/account/leverage-info",
             instId=symbol,
-            mgnMode="isolated",
+            mgnMode=margin_mode.value,
         )
         _okx_success(leverage_info)
         target_side = "short" if position_mode == PositionMode.HEDGE else "net"
@@ -1634,7 +1635,7 @@ class OkxAccountClient(PrivateAccountClient):
             return PerpConfiguration(
                 symbol=symbol,
                 leverage=leverage,
-                isolated=True,
+                isolated=margin_mode == PerpMarginMode.ISOLATED,
                 position_mode=position_mode,
             )
         pending, positions = await _gather(
@@ -1653,9 +1654,12 @@ class OkxAccountClient(PrivateAccountClient):
         values: dict[str, object] = {
             "instId": symbol,
             "lever": str(leverage),
-            "mgnMode": "isolated",
+            "mgnMode": margin_mode.value,
         }
-        if position_mode == PositionMode.HEDGE:
+        if (
+            position_mode == PositionMode.HEDGE
+            and margin_mode == PerpMarginMode.ISOLATED
+        ):
             values["posSide"] = "short"
         payload = await self._post("/api/v5/account/set-leverage", **values)
         item = _okx_command_item(
@@ -1665,10 +1669,32 @@ class OkxAccountClient(PrivateAccountClient):
         )
         if Decimal(str(item.get("lever") or "0")) != Decimal(leverage):
             raise PrivateRequestError("OKX leverage configuration was not confirmed")
+        confirmed = await self._get(
+            "/api/v5/account/leverage-info",
+            instId=symbol,
+            mgnMode=margin_mode.value,
+        )
+        _okx_success(confirmed)
+        confirmed_configuration = next(
+            (
+                row
+                for row in confirmed.get("data") or []
+                if str(row.get("posSide") or "net") == target_side
+                and str(row.get("mgnMode") or margin_mode.value)
+                == margin_mode.value
+            ),
+            None,
+        )
+        if (
+            confirmed_configuration is None
+            or Decimal(str(confirmed_configuration.get("lever") or "0"))
+            != Decimal(leverage)
+        ):
+            raise PrivateRequestError("OKX leverage readback was not confirmed")
         return PerpConfiguration(
             symbol=symbol,
             leverage=leverage,
-            isolated=True,
+            isolated=margin_mode == PerpMarginMode.ISOLATED,
             position_mode=position_mode,
         )
 

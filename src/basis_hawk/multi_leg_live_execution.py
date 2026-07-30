@@ -847,24 +847,25 @@ class MultiLegLiveExecutionService:
                 raise ValueError("live execution position mode is unknown")
             requested_margin = PerpMarginMode(leg.margin_mode or "isolated")
             exchange = Exchange(leg.exchange)
-            symbol_scoped_binance_cross = (
-                exchange == Exchange.BINANCE
+            symbol_scoped_cross = (
+                exchange in {Exchange.BINANCE, Exchange.OKX}
                 and requested_margin == PerpMarginMode.CROSS
             )
             if (
                 snapshot.perp_margin_mode != requested_margin
-                and not symbol_scoped_binance_cross
+                and not symbol_scoped_cross
             ):
                 raise ValueError("live execution margin mode changed after preflight")
             if (
                 requested_margin == PerpMarginMode.CROSS
-                and exchange not in {Exchange.BINANCE, Exchange.GATE}
+                and exchange
+                not in {Exchange.BINANCE, Exchange.OKX, Exchange.GATE}
             ):
                 raise ValueError(
                     f"{exchange.value} cross-margin leverage confirmation "
                     "is not implemented"
                 )
-            if symbol_scoped_binance_cross:
+            if symbol_scoped_cross:
                 configuration = await client.configure_perp(
                     symbol=leg.symbol,
                     leverage=leg.leverage,
